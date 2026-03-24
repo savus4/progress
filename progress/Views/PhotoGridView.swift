@@ -1,0 +1,730 @@
+import SwiftUI
+import CoreData
+import os
+import Combine
+
+struct PhotoGridView: View {
+    @Environment(\.managedObjectContext) private var viewContext
+    @FetchRequest(
+        sortDescriptors: [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false)],
+        animation: .default)
+    private var photos: FetchedResults<DailyPhoto>
+    
+    @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
+
+    @State private var showingCamera = false
+    @State private var showingNotificationSettings = false
+    @State private var showingPhotoPager = false
+    @State private var selectedIndex: Int = 0
+    @State private var scrollPosition = ScrollPosition(idType: NSManagedObjectID.self)
+    @State private var scrollContentOffsetY: CGFloat = 0
+    @State private var visibleScrollDate: Date?
+    @State private var isScrollDateVisible = false
+    @State private var isScrollGestureActive = false
+    @State private var firstGridItemFrameInGlobal: CGRect = .zero
+    @State private var isSelectionMode = false
+    @State private var selectedPhotoIDs: Set<NSManagedObjectID> = []
+    @State private var isExporting = false
+    @State private var exportedFileURLs: [URL] = []
+    @State private var showingExportPicker = false
+    @State private var exportAlertMessage: String?
+    @State private var photoFramesInGridSpace: [NSManagedObjectID: CGRect] = [:]
+    @State private var isSelectionSwipeActive = false
+    @State private var didResolveSelectionDragIntent = false
+    @State private var dragStartLocation: CGPoint = .zero
+    @State private var dragCurrentLocation: CGPoint = .zero
+    @State private var autoScrollDirection: SelectionAutoScrollDirection = .none
+    @State private var autoScrollIntensityValue: CGFloat = 0
+    @State private var scrollViewportSize: CGSize = .zero
+    @State private var selectionDragStartedOnPhotoID: NSManagedObjectID?
+    @State private var selectionSwipeAnchorIndex: Int?
+    @State private var selectionSwipeCurrentIndex: Int?
+    @State private var selectionSwipeBaseSelection: Set<NSManagedObjectID> = []
+    @State private var selectionSwipeOperation: SelectionSwipeOperation = .select
+    @State private var lastAutoScrollTickDate: Date?
+    private let autoScrollTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+    
+    private let columns = [
+        GridItem(.adaptive(minimum: 100, maximum: 150), spacing: 2)
+    ]
+    
+    private var photosArray: [DailyPhoto] {
+        Array(photos)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                if photos.isEmpty {
+                    // Empty state
+                    VStack(spacing: 20) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 60))
+                            .foregroundStyle(.secondary)
+                        
+                        Text("No Photos Yet")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        
+                        Text("Start capturing your daily moments")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                        
+                        Button(action: { showingCamera = true }) {
+                            Label("Take Your First Photo", systemImage: "camera")
+                                .font(.headline)
+                                .padding()
+                                .background(.blue.gradient, in: Capsule())
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.top)
+                    }
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 2) {
+                            ForEach(photos) { photo in
+                                PhotoGridItem(photo: photo)
+                                    .overlay(alignment: .topLeading) {
+                                        if isSelectionMode {
+                                            Image(systemName: selectedPhotoIDs.contains(photo.objectID) ? "checkmark.circle.fill" : "circle")
+                                                .font(.title3)
+                                                .foregroundStyle(selectedPhotoIDs.contains(photo.objectID) ? .blue : .white.opacity(0.85))
+                                                .padding(6)
+                                        }
+                                    }
+                                    .background {
+                                        GeometryReader { proxy in
+                                            Color.clear
+                                                .preference(
+                                                    key: PhotoFrameMapPreferenceKey.self,
+                                                    value: [photo.objectID: proxy.frame(in: .named("photoGridSpace"))]
+                                                )
+                                                .preference(
+                                                    key: FirstGridItemFramePreferenceKey.self,
+                                                    value: photo.objectID == photos.first?.objectID ? proxy.frame(in: .global) : .zero
+                                                )
+                                        }
+                                    }
+                                    .id(photo.objectID)
+                                    .onAppear {
+                                        handlePhotoBecameVisible(photo)
+                                    }
+                                    .onTapGesture {
+                                        if isSelectionMode {
+                                            toggleSelection(for: photo.objectID)
+                                        } else if let index = photosArray.firstIndex(where: { $0.objectID == photo.objectID }) {
+                                            selectedIndex = index
+                                            showingPhotoPager = true
+                                        }
+                                    }
+                            }
+                        }
+                        .scrollTargetLayout()
+                        .padding(.top, 1)
+                    }
+                    .coordinateSpace(name: "photoGridSpace")
+                    .overlay {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(key: GridViewportSizePreferenceKey.self, value: proxy.size)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                    .scrollPosition($scrollPosition)
+                    .onScrollGeometryChange(for: ScrollViewportSnapshot.self, of: { geometry in
+                        ScrollViewportSnapshot(
+                            minY: geometry.contentOffset.y,
+                            height: geometry.visibleRect.height
+                        )
+                    }, action: { _, snapshot in
+                        scrollContentOffsetY = max(snapshot.minY, 0)
+                        if snapshot.height > 0 {
+                            scrollViewportSize.height = snapshot.height
+                        }
+                        if isScrollGestureActive, let date = currentOverlayDate() {
+                            showScrollDateOverlay(for: date)
+                        }
+                    })
+                    .scrollDisabled(isSelectionSwipeActive)
+                    .overlay(alignment: .top) {
+                        if isScrollDateVisible, let visibleScrollDate {
+                            ScrollMonthOverlay(date: visibleScrollDate)
+                                .padding(.top, 12)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                    .overlay(alignment: .bottomLeading) {
+                        DebugSelectionAutoScrollOverlay(
+                            isSelectionMode: isSelectionMode,
+                            isSelectionSwipeActive: isSelectionSwipeActive,
+                            direction: autoScrollDirection,
+                            intensity: autoScrollIntensityValue,
+                            fingerY: dragCurrentLocation.y,
+                            viewportHeight: scrollViewportSize.height,
+                            contentOffsetY: scrollContentOffsetY
+                        )
+                        .padding(.leading, 12)
+                        .padding(.bottom, 12)
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 8, coordinateSpace: .named("photoGridSpace"))
+                            .onChanged { value in
+                                guard isSelectionMode else { return }
+                                handleSelectionDragChanged(value)
+                            }
+                            .onEnded { _ in
+                                guard isSelectionMode else { return }
+                                endSelectionSwipe()
+                            }
+                    )
+                    .onScrollPhaseChange { _, newPhase in
+                        debugScrollOverlay("Scroll phase -> \(newPhase.debugDescription)")
+                        isScrollGestureActive = newPhase != .idle
+
+                        if newPhase == .idle {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                isScrollDateVisible = false
+                            }
+                            debugScrollOverlay("Hiding overlay because scroll is idle")
+                        } else if let date = currentOverlayDate() {
+                            showScrollDateOverlay(for: date)
+                            debugScrollOverlay("Showing overlay immediately on scroll phase change")
+                        } else {
+                            debugScrollOverlay("Scroll started but no date could be resolved")
+                        }
+                    }
+                    .onPreferenceChange(FirstGridItemFramePreferenceKey.self) { frame in
+                        if frame != .zero {
+                            firstGridItemFrameInGlobal = frame
+                        }
+                    }
+                    .onPreferenceChange(PhotoFrameMapPreferenceKey.self) { frames in
+                        photoFramesInGridSpace = frames
+                    }
+                    .onPreferenceChange(GridViewportSizePreferenceKey.self) { size in
+                        scrollViewportSize = size
+                    }
+                    .onReceive(autoScrollTimer) { now in
+                        handleAutoScrollTick(now: now)
+                    }
+                }
+            }
+            .navigationTitle("Progress")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if !photos.isEmpty {
+                        Button(isSelectionMode ? "Cancel" : "Select") {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isSelectionMode.toggle()
+                                endSelectionSwipe()
+                                if !isSelectionMode {
+                                    selectedPhotoIDs.removeAll()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button(action: { showingNotificationSettings = true }) {
+                        Image(systemName: "bell.badge")
+                            .font(.title3)
+                    }
+
+                    if isSelectionMode {
+                        Menu {
+                            Button(action: exportSelectedPhotos) {
+                                Label("Export Selected (\(selectedPhotoIDs.count))", systemImage: "square.and.arrow.up")
+                            }
+                            .disabled(selectedPhotoIDs.isEmpty || isExporting)
+
+                            Button(action: exportAllPhotos) {
+                                Label("Export All (\(photos.count))", systemImage: "tray.and.arrow.down")
+                            }
+                            .disabled(photos.isEmpty || isExporting)
+                        } label: {
+                            if isExporting {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.title3)
+                            }
+                        }
+                    } else {
+                        Button(action: { showingCamera = true }) {
+                            Image(systemName: "camera.fill")
+                                .font(.title3)
+                        }
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $showingCamera) {
+                ExperimentalCameraView(
+                    gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal
+                )
+            }
+            .sheet(isPresented: $showingPhotoPager) {
+                PhotoPagerView(
+                    photos: photosArray,
+                    selectedIndex: $selectedIndex
+                )
+            }
+            .sheet(isPresented: $showingNotificationSettings) {
+                NotificationSettingsView()
+            }
+            .sheet(isPresented: $showingExportPicker, onDismiss: {
+                exportedFileURLs = []
+            }) {
+                ExportDocumentPicker(urls: exportedFileURLs)
+            }
+            .alert("Export", isPresented: Binding(
+                get: { exportAlertMessage != nil },
+                set: { if !$0 { exportAlertMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(exportAlertMessage ?? "")
+            }
+        }
+        .onDisappear {
+            debugScrollOverlay("Grid disappeared")
+        }
+        .onAppear {
+            debugScrollOverlay("Grid appeared")
+            openCameraIfNeededFromNotification()
+        }
+        .onChange(of: notificationNavigation.cameraOpenRequestToken) { _, token in
+            guard token != nil else { return }
+            openCameraIfNeededFromNotification()
+        }
+    }
+
+    private func openCameraIfNeededFromNotification() {
+        guard notificationNavigation.cameraOpenRequestToken != nil else { return }
+        showingCamera = true
+        notificationNavigation.consumeCameraOpenRequest()
+    }
+
+    private func showScrollDateOverlay(for date: Date) {
+        visibleScrollDate = date
+        debugScrollOverlay("Showing overlay for \(date.formatted(date: .abbreviated, time: .shortened))")
+
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            isScrollDateVisible = true
+        }
+    }
+
+    private func debugScrollOverlay(_ message: String) {
+        let logger = Logger(subsystem: "progress", category: "ScrollOverlay")
+        logger.debug("\(message)")
+        print("[PhotoGridView][ScrollOverlay] \(message)")
+    }
+
+    private func handlePhotoBecameVisible(_ photo: DailyPhoto) {
+        guard isScrollGestureActive else { return }
+        guard let captureDate = photo.captureDate else {
+            debugScrollOverlay("Visible item has no captureDate")
+            return
+        }
+        debugScrollOverlay("Visible item appeared -> \(captureDate.formatted(date: .abbreviated, time: .shortened))")
+        showScrollDateOverlay(for: captureDate)
+    }
+
+    private func currentOverlayDate() -> Date? {
+        let viewport = CGRect(origin: .zero, size: scrollViewportSize)
+        let topVisibleID = photoFramesInGridSpace
+            .filter { _, frame in frame.intersects(viewport) }
+            .min(by: { lhs, rhs in lhs.value.minY < rhs.value.minY })?
+            .key
+
+        if let topVisibleID,
+           let positionedPhoto = photos.first(where: { $0.objectID == topVisibleID }),
+           let captureDate = positionedPhoto.captureDate {
+            return captureDate
+        }
+
+        if let visibleScrollDate {
+            return visibleScrollDate
+        }
+
+        return photos.first?.captureDate
+    }
+
+    private func toggleSelection(for objectID: NSManagedObjectID) {
+        if selectedPhotoIDs.contains(objectID) {
+            selectedPhotoIDs.remove(objectID)
+        } else {
+            selectedPhotoIDs.insert(objectID)
+        }
+    }
+
+    private func exportSelectedPhotos() {
+        let selectedPhotos = photos.filter { selectedPhotoIDs.contains($0.objectID) }
+        guard !selectedPhotos.isEmpty else {
+            exportAlertMessage = "Please select at least one photo to export."
+            return
+        }
+        startExport(for: selectedPhotos)
+    }
+
+    private func exportAllPhotos() {
+        let allPhotos = Array(photos)
+        guard !allPhotos.isEmpty else {
+            exportAlertMessage = "No photos available to export."
+            return
+        }
+        startExport(for: allPhotos)
+    }
+
+    private func startExport(for photosToExport: [DailyPhoto]) {
+        guard !isExporting else { return }
+        isExporting = true
+
+        Task {
+            do {
+                let urls = try await PhotoStorageService.shared.prepareExportFiles(for: photosToExport)
+                await MainActor.run {
+                    exportedFileURLs = urls
+                    showingExportPicker = !urls.isEmpty
+                    if urls.isEmpty {
+                        exportAlertMessage = "Nothing was exported."
+                    } else {
+                        isSelectionMode = false
+                        endSelectionSwipe()
+                        selectedPhotoIDs.removeAll()
+                    }
+                    isExporting = false
+                }
+            } catch {
+                await MainActor.run {
+                    exportAlertMessage = "Export failed: \(error.localizedDescription)"
+                    isExporting = false
+                }
+            }
+        }
+    }
+
+    private func selectRange(at location: CGPoint) {
+        guard let hitIndex = nearestPhotoIndex(at: location) else {
+            return
+        }
+        selectRange(to: hitIndex)
+    }
+
+    private func selectRange(to hitIndex: Int) {
+        guard let anchorIndex = selectionSwipeAnchorIndex,
+              photosArray.indices.contains(hitIndex) else {
+            return
+        }
+
+        selectionSwipeCurrentIndex = hitIndex
+
+        let lower = min(anchorIndex, hitIndex)
+        let upper = max(anchorIndex, hitIndex)
+        let rangeIDs = Set(photosArray[lower...upper].map(\.objectID))
+
+        var updated = selectionSwipeBaseSelection
+        switch selectionSwipeOperation {
+        case .select:
+            updated.formUnion(rangeIDs)
+        case .deselect:
+            updated.subtract(rangeIDs)
+        }
+        selectedPhotoIDs = updated
+    }
+
+    private func handleSelectionDragChanged(_ value: DragGesture.Value) {
+        if !didResolveSelectionDragIntent {
+            didResolveSelectionDragIntent = true
+            dragStartLocation = value.startLocation
+            selectionDragStartedOnPhotoID = photoID(at: value.startLocation)
+            if isSelectionSwipeActive == false {
+                lastAutoScrollTickDate = nil
+            }
+        }
+
+        dragCurrentLocation = value.location
+
+        let translationX = value.location.x - value.startLocation.x
+        let translationY = value.location.y - value.startLocation.y
+        let horizontalDominant = abs(translationX) > abs(translationY)
+
+        // Only start swipe-select when drag is horizontal and started on a photo.
+        if !isSelectionSwipeActive, horizontalDominant, let startedPhotoID = selectionDragStartedOnPhotoID {
+            isSelectionSwipeActive = true
+            selectionSwipeBaseSelection = selectedPhotoIDs
+            if let startIndex = photosArray.firstIndex(where: { $0.objectID == startedPhotoID }) {
+                selectionSwipeAnchorIndex = startIndex
+                selectionSwipeCurrentIndex = startIndex
+                selectionSwipeOperation = selectedPhotoIDs.contains(startedPhotoID) ? .deselect : .select
+                selectRange(to: startIndex)
+            }
+        }
+
+        guard isSelectionSwipeActive else { return }
+        selectRange(at: value.location)
+        updateAutoScrollDirection(for: value.location)
+    }
+
+    private func endSelectionSwipe() {
+        isSelectionSwipeActive = false
+        didResolveSelectionDragIntent = false
+        autoScrollDirection = .none
+        selectionDragStartedOnPhotoID = nil
+        selectionSwipeAnchorIndex = nil
+        selectionSwipeCurrentIndex = nil
+        selectionSwipeBaseSelection = []
+        lastAutoScrollTickDate = nil
+    }
+
+    private func photoID(at location: CGPoint) -> NSManagedObjectID? {
+        photoFramesInGridSpace.first { _, frame in frame.contains(location) }?.key
+    }
+
+    private func updateAutoScrollDirection(for location: CGPoint) {
+        guard scrollViewportSize.height > 0 else {
+            autoScrollDirection = .none
+            return
+        }
+
+        let edgeThreshold: CGFloat = 92
+        if location.y < edgeThreshold {
+            autoScrollDirection = .up
+        } else if location.y > scrollViewportSize.height - edgeThreshold {
+            autoScrollDirection = .down
+        } else {
+            autoScrollDirection = .none
+        }
+    }
+
+    private func handleAutoScrollTick(now: Date) {
+        guard isSelectionSwipeActive else { return }
+        guard autoScrollDirection != .none else { return }
+
+        guard let lastTick = lastAutoScrollTickDate else {
+            lastAutoScrollTickDate = now
+            return
+        }
+        lastAutoScrollTickDate = now
+
+        let dt = max(0, min(0.1, now.timeIntervalSince(lastTick)))
+        let intensity = autoScrollIntensity(for: dragCurrentLocation)
+        autoScrollIntensityValue = intensity
+        guard intensity > 0 else { return }
+
+        // Point-based scrolling avoids row-sized jumps and feels system-like.
+        let velocityPointsPerSecond = CGFloat(12 + pow(Double(intensity), 2.15) * 120)
+        let deltaY = velocityPointsPerSecond * CGFloat(dt)
+        let baseOffsetY = max(scrollContentOffsetY, 0)
+        let targetOffsetY: CGFloat
+        switch autoScrollDirection {
+        case .up:
+            targetOffsetY = max(0, baseOffsetY - deltaY)
+        case .down:
+            targetOffsetY = baseOffsetY + deltaY
+        case .none:
+            return
+        }
+
+        scrollPosition.scrollTo(y: targetOffsetY)
+        selectRange(at: dragCurrentLocation)
+    }
+
+    private func nearestPhotoIndex(at location: CGPoint) -> Int? {
+        if let directHitID = photoFramesInGridSpace.first(where: { _, frame in
+            frame.contains(location)
+        })?.key {
+            return photosArray.firstIndex(where: { $0.objectID == directHitID })
+        }
+
+        let nearestID = photoFramesInGridSpace.min(by: { lhs, rhs in
+            let lhsCenter = CGPoint(x: lhs.value.midX, y: lhs.value.midY)
+            let rhsCenter = CGPoint(x: rhs.value.midX, y: rhs.value.midY)
+            let lhsDistance = hypot(lhsCenter.x - location.x, lhsCenter.y - location.y)
+            let rhsDistance = hypot(rhsCenter.x - location.x, rhsCenter.y - location.y)
+            return lhsDistance < rhsDistance
+        })?.key
+
+        guard let nearestID else { return nil }
+        return photosArray.firstIndex(where: { $0.objectID == nearestID })
+    }
+
+    private func autoScrollIntensity(for location: CGPoint) -> CGFloat {
+        guard scrollViewportSize.height > 0 else { return 0 }
+
+        let edgeThreshold: CGFloat = 92
+        let y = min(max(location.y, 0), scrollViewportSize.height)
+        switch autoScrollDirection {
+        case .up:
+            let distance = y
+            return max(0, min(1, (edgeThreshold - distance) / edgeThreshold))
+        case .down:
+            let distance = scrollViewportSize.height - y
+            return max(0, min(1, (edgeThreshold - distance) / edgeThreshold))
+        case .none:
+            return 0
+        }
+    }
+
+}
+
+struct PhotoGridItem: View {
+    let photo: DailyPhoto
+    
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottomTrailing) {
+                if let thumbnailData = photo.thumbnailData,
+                   let thumbnail = UIImage(data: thumbnailData) {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.width)
+                        .clipped()
+                } else {
+                    Rectangle()
+                        .fill(.gray.opacity(0.3))
+                        .frame(width: geometry.size.width, height: geometry.size.width)
+                    
+                    ProgressView()
+                }
+                
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 0))
+    }
+}
+
+private struct FirstGridItemFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero {
+            value = next
+        }
+    }
+}
+
+private struct PhotoFrameMapPreferenceKey: PreferenceKey {
+    static var defaultValue: [NSManagedObjectID: CGRect] = [:]
+
+    static func reduce(value: inout [NSManagedObjectID: CGRect], nextValue: () -> [NSManagedObjectID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct GridViewportSizePreferenceKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next != .zero {
+            value = next
+        }
+    }
+}
+
+private enum SelectionAutoScrollDirection {
+    case up
+    case down
+    case none
+
+    var label: String {
+        switch self {
+        case .up:
+            return "up"
+        case .down:
+            return "down"
+        case .none:
+            return "none"
+        }
+    }
+}
+
+private enum SelectionSwipeOperation {
+    case select
+    case deselect
+}
+
+private struct ScrollViewportSnapshot: Equatable {
+    let minY: CGFloat
+    let height: CGFloat
+}
+
+private struct DebugSelectionAutoScrollOverlay: View {
+    let isSelectionMode: Bool
+    let isSelectionSwipeActive: Bool
+    let direction: SelectionAutoScrollDirection
+    let intensity: CGFloat
+    let fingerY: CGFloat
+    let viewportHeight: CGFloat
+    let contentOffsetY: CGFloat
+
+    var body: some View {
+        if isSelectionMode {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("DEBUG AUTO-SCROLL")
+                    .font(.caption2.weight(.semibold))
+                Text("swipeActive: \(isSelectionSwipeActive ? "true" : "false")")
+                Text("direction: \(direction.label)")
+                Text(String(format: "intensity: %.3f", intensity))
+                Text(String(format: "fingerY: %.1f", fingerY))
+                Text(String(format: "viewportH: %.1f", viewportHeight))
+                Text(String(format: "offsetY: %.1f", contentOffsetY))
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(.white.opacity(0.25), lineWidth: 1)
+            )
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+struct ScrollMonthOverlay: View {
+    let date: Date
+    
+    private var month: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "LLLL"
+        return formatter.string(from: date)
+    }
+
+    private var year: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy"
+        return formatter.string(from: date)
+    }
+    
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(month)
+                .font(.headline)
+                .fontWeight(.semibold)
+            Text(year)
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+    }
+}
+
+#Preview {
+    PhotoGridView()
+        .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+}
