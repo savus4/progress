@@ -17,6 +17,7 @@ struct ExperimentalCameraView: View {
     @State private var isSaving = false
     @State private var showingCapturePreview = false
     @State private var pendingCaptureImage: UIImage?
+    @State private var pendingCaptureImageData: Data?
     @State private var pendingLivePhotoImageData: Data?
     @State private var pendingLivePhotoVideoURL: URL?
     @State private var isCapturing = false
@@ -101,6 +102,7 @@ struct ExperimentalCameraView: View {
         .onChange(of: cameraService.captureCompleted) { _, _ in
             if let capture = cameraService.livePhotoCapture {
                 pendingCaptureImage = capture.image
+                pendingCaptureImageData = capture.imageData
                 pendingLivePhotoImageData = capture.imageData
                 pendingLivePhotoVideoURL = capture.videoURL
                 isAnimatingPreviewToGrid = false
@@ -110,6 +112,7 @@ struct ExperimentalCameraView: View {
                 cameraService.stopSession()
             } else if let image = cameraService.capturedImage {
                 pendingCaptureImage = image
+                pendingCaptureImageData = cameraService.capturedImageData
                 pendingLivePhotoImageData = nil
                 pendingLivePhotoVideoURL = nil
                 isAnimatingPreviewToGrid = false
@@ -184,22 +187,25 @@ struct ExperimentalCameraView: View {
     private func capturePhoto() {
         guard !showingCapturePreview else { return }
         isCapturing = true
+        let captureLocation = locationService.currentLocation
         #if targetEnvironment(simulator)
-        cameraService.capturePhoto(withLivePhoto: false)
+        cameraService.capturePhoto(withLivePhoto: false, location: captureLocation)
         #else
-        cameraService.capturePhoto(withLivePhoto: true)
+        cameraService.capturePhoto(withLivePhoto: true, location: captureLocation)
         #endif
     }
 
     private func retakeCapture() {
         isAnimatingPreviewToGrid = false
         pendingCaptureImage = nil
+        pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
         pendingLivePhotoVideoURL = nil
         withAnimation(.easeInOut(duration: 0.22)) {
             showingCapturePreview = false
         }
         cameraService.capturedImage = nil
+        cameraService.capturedImageData = nil
         cameraService.livePhotoCapture = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             cameraService.startSession()
@@ -216,6 +222,7 @@ struct ExperimentalCameraView: View {
         Task {
             await savePhoto(
                 image: image,
+                imageData: pendingCaptureImageData,
                 livePhotoImageData: pendingLivePhotoImageData,
                 videoURL: pendingLivePhotoVideoURL
             )
@@ -225,6 +232,7 @@ struct ExperimentalCameraView: View {
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
                     pendingCaptureImage = nil
+                    pendingCaptureImageData = nil
                     pendingLivePhotoImageData = nil
                     pendingLivePhotoVideoURL = nil
                     isAnimatingPreviewToGrid = false
@@ -234,12 +242,13 @@ struct ExperimentalCameraView: View {
         }
     }
 
-    private func savePhoto(image: UIImage, livePhotoImageData: Data?, videoURL: URL?) async {
+    private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async {
         isSaving = true
         defer {
             isSaving = false
             Task { @MainActor in
                 cameraService.capturedImage = nil
+                cameraService.capturedImageData = nil
                 cameraService.livePhotoCapture = nil
             }
         }
@@ -254,6 +263,7 @@ struct ExperimentalCameraView: View {
         do {
             _ = try await PhotoStorageService.shared.savePhoto(
                 image: image,
+                imageData: imageData,
                 livePhotoImageData: livePhotoImageData,
                 livePhotoVideoURL: videoURL,
                 location: location,

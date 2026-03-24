@@ -21,6 +21,7 @@ struct CameraView: View {
     @State private var overlayImage: UIImage?
     @State private var showingCapturePreview = false
     @State private var pendingCaptureImage: UIImage?
+    @State private var pendingCaptureImageData: Data?
     @State private var pendingLivePhotoImageData: Data?
     @State private var pendingLivePhotoVideoURL: URL?
     @State private var isCapturing = false
@@ -105,6 +106,7 @@ struct CameraView: View {
             // Handle capture completion
             if let capture = cameraService.livePhotoCapture {
                 pendingCaptureImage = capture.image
+                pendingCaptureImageData = capture.imageData
                 pendingLivePhotoImageData = capture.imageData
                 pendingLivePhotoVideoURL = capture.videoURL
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -113,6 +115,7 @@ struct CameraView: View {
                 cameraService.stopSession()
             } else if let image = cameraService.capturedImage {
                 pendingCaptureImage = image
+                pendingCaptureImageData = cameraService.capturedImageData
                 pendingLivePhotoImageData = nil
                 pendingLivePhotoVideoURL = nil
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -172,21 +175,24 @@ struct CameraView: View {
     private func capturePhoto() {
         guard !showingCapturePreview else { return }
         isCapturing = true
+        let captureLocation = locationService.currentLocation
         #if targetEnvironment(simulator)
-        cameraService.capturePhoto(withLivePhoto: false)
+        cameraService.capturePhoto(withLivePhoto: false, location: captureLocation)
         #else
-        cameraService.capturePhoto(withLivePhoto: true)
+        cameraService.capturePhoto(withLivePhoto: true, location: captureLocation)
         #endif
     }
 
     private func retakeCapture() {
         pendingCaptureImage = nil
+        pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
         pendingLivePhotoVideoURL = nil
         withAnimation(.easeInOut(duration: 0.2)) {
             showingCapturePreview = false
         }
         cameraService.capturedImage = nil
+        cameraService.capturedImageData = nil
         cameraService.livePhotoCapture = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             cameraService.startSession()
@@ -199,11 +205,13 @@ struct CameraView: View {
         Task {
             await savePhoto(
                 image: image,
+                imageData: pendingCaptureImageData,
                 livePhotoImageData: pendingLivePhotoImageData,
                 videoURL: pendingLivePhotoVideoURL
             )
             await MainActor.run {
                 pendingCaptureImage = nil
+                pendingCaptureImageData = nil
                 pendingLivePhotoImageData = nil
                 pendingLivePhotoVideoURL = nil
                 withAnimation(.easeInOut(duration: 0.2)) {
@@ -216,13 +224,14 @@ struct CameraView: View {
         }
     }
 
-    private func savePhoto(image: UIImage, livePhotoImageData: Data?, videoURL: URL?) async {
+    private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async {
         isSaving = true
         defer {
             isSaving = false
             // Reset camera service state after save
             Task { @MainActor in
                 cameraService.capturedImage = nil
+                cameraService.capturedImageData = nil
                 cameraService.livePhotoCapture = nil
             }
         }
@@ -237,6 +246,7 @@ struct CameraView: View {
         do {
             let photo = try await PhotoStorageService.shared.savePhoto(
                 image: image,
+                imageData: imageData,
                 livePhotoImageData: livePhotoImageData,
                 livePhotoVideoURL: videoURL,
                 location: location,

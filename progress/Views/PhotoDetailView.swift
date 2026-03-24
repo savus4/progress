@@ -4,6 +4,7 @@ import MapKit
 import PhotosUI
 import CoreData
 import Photos
+import ImageIO
 
 struct PhotoDetailView: View {
     let photo: DailyPhoto
@@ -63,15 +64,7 @@ struct PhotoDetailView: View {
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 16)
                         .onEnded { value in
-                            if value.translation.height < -24 {
-                                withAnimation(.easeInOut(duration: 0.22)) {
-                                    showsMetadataPanel = true
-                                }
-                            } else if value.translation.height > 24 {
-                                withAnimation(.easeInOut(duration: 0.22)) {
-                                    showsMetadataPanel = false
-                                }
-                            }
+                            handleMetadataPanelDragEnded(value)
                         }
                 )
             }
@@ -92,7 +85,7 @@ struct PhotoDetailView: View {
                         .disabled(isPreparingShare)
 
                         Button(action: shareStillPhoto) {
-                            Label("Share Photo (HEIC)", systemImage: "photo")
+                            Label("Share Photo", systemImage: "photo")
                         }
                         .disabled(isPreparingShare)
 
@@ -238,6 +231,25 @@ struct PhotoDetailView: View {
             }
         }
     }
+
+    private func handleMetadataPanelDragEnded(_ value: DragGesture.Value) {
+        let horizontal = abs(value.translation.width)
+        let vertical = abs(value.translation.height)
+
+        // Prefer horizontal paging: only react when the gesture is clearly vertical.
+        guard vertical > horizontal * 1.6 else { return }
+        guard vertical >= 36 else { return }
+
+        if value.translation.height < 0 {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                showsMetadataPanel = true
+            }
+        } else {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                showsMetadataPanel = false
+            }
+        }
+    }
     
     private func loadLivePhotoResources() {
         #if targetEnvironment(simulator)
@@ -362,9 +374,8 @@ struct PhotoDetailView: View {
                     let liveImageURL = try CloudKitService.shared.loadAssetURL(named: liveImageAssetName)
                     let liveVideoURL = try CloudKitService.shared.loadAssetURL(named: liveVideoAssetName)
                     try await saveLivePhotoToLibrary(imageURL: liveImageURL, videoURL: liveVideoURL)
-                } else if let stillAssetName = photo.fullImageAssetName {
-                    _ = stillAssetName
-                    let stillURL = try PhotoStorageService.shared.prepareStillPhotoHEICShareURL(for: photo)
+                } else if photo.fullImageAssetName != nil {
+                    let stillURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
                     try await saveStillPhotoToLibrary(imageURL: stillURL)
                 } else {
                     throw PhotoStorageError.noImageAsset
@@ -389,10 +400,10 @@ struct PhotoDetailView: View {
 
         Task {
             do {
-                let stillData = try PhotoStorageService.shared.prepareStillPhotoHEICShareData(for: photo)
-                let previewImage = fullImage ?? photo.thumbnailData.flatMap { UIImage(data: $0) }
-                let shareItem = HEICDataActivityItemSource(
-                    data: stillData,
+                let stillURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
+                let previewImage = makeSharePreviewImage(from: stillURL) ?? fullImage ?? photo.thumbnailData.flatMap { UIImage(data: $0) }
+                let shareItem = URLActivityItemSource(
+                    url: stillURL,
                     title: navigationDateTitle,
                     previewImage: previewImage
                 )
@@ -402,7 +413,7 @@ struct PhotoDetailView: View {
                 }
             } catch {
                 await MainActor.run {
-                    shareStatusMessage = "Failed to prepare HEIC share: \(error.localizedDescription)"
+                    shareStatusMessage = "Failed to prepare photo share: \(error.localizedDescription)"
                     isPreparingShare = false
                 }
             }
@@ -450,6 +461,20 @@ struct PhotoDetailView: View {
             }
             request.addResource(with: .photo, fileURL: imageURL, options: nil)
         }
+    }
+
+    private func makeSharePreviewImage(from url: URL) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1024
+        ]
+        guard let cgThumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cgThumbnail)
     }
     
     private func deletePhoto() {

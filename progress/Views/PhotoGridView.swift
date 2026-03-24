@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreData
-import os
 import Combine
 
 struct PhotoGridView: View {
@@ -28,20 +27,25 @@ struct PhotoGridView: View {
     @State private var exportedFileURLs: [URL] = []
     @State private var showingExportPicker = false
     @State private var exportAlertMessage: String?
+    @State private var showingDeleteConfirmation = false
+    @State private var isDeletingSelection = false
     @State private var photoFramesInGridSpace: [NSManagedObjectID: CGRect] = [:]
     @State private var isSelectionSwipeActive = false
     @State private var didResolveSelectionDragIntent = false
     @State private var dragStartLocation: CGPoint = .zero
     @State private var dragCurrentLocation: CGPoint = .zero
+    @State private var dragCurrentViewportLocation: CGPoint = .zero
     @State private var autoScrollDirection: SelectionAutoScrollDirection = .none
     @State private var autoScrollIntensityValue: CGFloat = 0
     @State private var scrollViewportSize: CGSize = .zero
+    @State private var scrollViewportFrameInGlobal: CGRect = .zero
     @State private var selectionDragStartedOnPhotoID: NSManagedObjectID?
     @State private var selectionSwipeAnchorIndex: Int?
     @State private var selectionSwipeCurrentIndex: Int?
     @State private var selectionSwipeBaseSelection: Set<NSManagedObjectID> = []
     @State private var selectionSwipeOperation: SelectionSwipeOperation = .select
     @State private var lastAutoScrollTickDate: Date?
+    @State private var didSyncExifMetadata = false
     private let autoScrollTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
     
     private let columns = [
@@ -127,6 +131,7 @@ struct PhotoGridView: View {
                         GeometryReader { proxy in
                             Color.clear
                                 .preference(key: GridViewportSizePreferenceKey.self, value: proxy.size)
+                                .preference(key: GridViewportFramePreferenceKey.self, value: proxy.frame(in: .global))
                         }
                         .allowsHitTesting(false)
                     }
@@ -153,21 +158,8 @@ struct PhotoGridView: View {
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
                     }
-                    .overlay(alignment: .bottomLeading) {
-                        DebugSelectionAutoScrollOverlay(
-                            isSelectionMode: isSelectionMode,
-                            isSelectionSwipeActive: isSelectionSwipeActive,
-                            direction: autoScrollDirection,
-                            intensity: autoScrollIntensityValue,
-                            fingerY: dragCurrentLocation.y,
-                            viewportHeight: scrollViewportSize.height,
-                            contentOffsetY: scrollContentOffsetY
-                        )
-                        .padding(.leading, 12)
-                        .padding(.bottom, 12)
-                    }
                     .simultaneousGesture(
-                        DragGesture(minimumDistance: 8, coordinateSpace: .named("photoGridSpace"))
+                        DragGesture(minimumDistance: 8, coordinateSpace: .global)
                             .onChanged { value in
                                 guard isSelectionMode else { return }
                                 handleSelectionDragChanged(value)
@@ -178,19 +170,14 @@ struct PhotoGridView: View {
                             }
                     )
                     .onScrollPhaseChange { _, newPhase in
-                        debugScrollOverlay("Scroll phase -> \(newPhase.debugDescription)")
                         isScrollGestureActive = newPhase != .idle
 
                         if newPhase == .idle {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 isScrollDateVisible = false
                             }
-                            debugScrollOverlay("Hiding overlay because scroll is idle")
                         } else if let date = currentOverlayDate() {
                             showScrollDateOverlay(for: date)
-                            debugScrollOverlay("Showing overlay immediately on scroll phase change")
-                        } else {
-                            debugScrollOverlay("Scroll started but no date could be resolved")
                         }
                     }
                     .onPreferenceChange(FirstGridItemFramePreferenceKey.self) { frame in
@@ -204,9 +191,12 @@ struct PhotoGridView: View {
                     .onPreferenceChange(GridViewportSizePreferenceKey.self) { size in
                         scrollViewportSize = size
                     }
-                    .onReceive(autoScrollTimer) { now in
-                        handleAutoScrollTick(now: now)
+                    .onPreferenceChange(GridViewportFramePreferenceKey.self) { frame in
+                        if frame != .zero {
+                            scrollViewportFrameInGlobal = frame
+                        }
                     }
+                    // Auto-scroll intentionally disabled during swipe selection.
                 }
             }
             .navigationTitle("Progress")
@@ -226,11 +216,6 @@ struct PhotoGridView: View {
                 }
 
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button(action: { showingNotificationSettings = true }) {
-                        Image(systemName: "bell.badge")
-                            .font(.title3)
-                    }
-
                     if isSelectionMode {
                         Menu {
                             Button(action: exportSelectedPhotos) {
@@ -250,7 +235,22 @@ struct PhotoGridView: View {
                                     .font(.title3)
                             }
                         }
+
+                        Button(role: .destructive, action: { showingDeleteConfirmation = true }) {
+                            if isDeletingSelection {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "trash")
+                                    .font(.title3)
+                            }
+                        }
+                        .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
                     } else {
+                        Button(action: { showingNotificationSettings = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.title3)
+                        }
+
                         Button(action: { showingCamera = true }) {
                             Image(systemName: "camera.fill")
                                 .font(.title3)
@@ -285,17 +285,32 @@ struct PhotoGridView: View {
             } message: {
                 Text(exportAlertMessage ?? "")
             }
+            .confirmationDialog(
+                "Delete selected photos?",
+                isPresented: $showingDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete \(selectedPhotoIDs.count) Photo\(selectedPhotoIDs.count == 1 ? "" : "s")", role: .destructive) {
+                    deleteSelectedPhotos()
+                }
+                .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
+
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This action cannot be undone.")
+            }
         }
         .onDisappear {
-            debugScrollOverlay("Grid disappeared")
         }
         .onAppear {
-            debugScrollOverlay("Grid appeared")
             openCameraIfNeededFromNotification()
         }
         .onChange(of: notificationNavigation.cameraOpenRequestToken) { _, token in
             guard token != nil else { return }
             openCameraIfNeededFromNotification()
+        }
+        .task {
+            await syncPhotoMetadataFromExifIfNeeded()
         }
     }
 
@@ -305,28 +320,30 @@ struct PhotoGridView: View {
         notificationNavigation.consumeCameraOpenRequest()
     }
 
+    private func syncPhotoMetadataFromExifIfNeeded() async {
+        guard !didSyncExifMetadata else { return }
+        guard !photos.isEmpty else { return }
+        didSyncExifMetadata = true
+
+        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded(
+            photos: Array(photos),
+            context: viewContext
+        )
+    }
+
     private func showScrollDateOverlay(for date: Date) {
         visibleScrollDate = date
-        debugScrollOverlay("Showing overlay for \(date.formatted(date: .abbreviated, time: .shortened))")
 
         withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
             isScrollDateVisible = true
         }
     }
 
-    private func debugScrollOverlay(_ message: String) {
-        let logger = Logger(subsystem: "progress", category: "ScrollOverlay")
-        logger.debug("\(message)")
-        print("[PhotoGridView][ScrollOverlay] \(message)")
-    }
-
     private func handlePhotoBecameVisible(_ photo: DailyPhoto) {
         guard isScrollGestureActive else { return }
         guard let captureDate = photo.captureDate else {
-            debugScrollOverlay("Visible item has no captureDate")
             return
         }
-        debugScrollOverlay("Visible item appeared -> \(captureDate.formatted(date: .abbreviated, time: .shortened))")
         showScrollDateOverlay(for: captureDate)
     }
 
@@ -374,6 +391,38 @@ struct PhotoGridView: View {
             return
         }
         startExport(for: allPhotos)
+    }
+
+    private func deleteSelectedPhotos() {
+        guard !isDeletingSelection else { return }
+
+        let photosToDelete = photos.filter { selectedPhotoIDs.contains($0.objectID) }
+        guard !photosToDelete.isEmpty else {
+            exportAlertMessage = "Please select at least one photo to delete."
+            return
+        }
+
+        isDeletingSelection = true
+
+        Task {
+            do {
+                for photo in photosToDelete {
+                    try await PhotoStorageService.shared.deletePhoto(photo, context: viewContext)
+                }
+
+                await MainActor.run {
+                    isDeletingSelection = false
+                    isSelectionMode = false
+                    endSelectionSwipe()
+                    selectedPhotoIDs.removeAll()
+                }
+            } catch {
+                await MainActor.run {
+                    isDeletingSelection = false
+                    exportAlertMessage = "Delete failed: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     private func startExport(for photosToExport: [DailyPhoto]) {
@@ -434,19 +483,24 @@ struct PhotoGridView: View {
     }
 
     private func handleSelectionDragChanged(_ value: DragGesture.Value) {
+        let startLocationInGridContent = convertGlobalToGridContentPoint(value.startLocation)
+        let currentLocationInGridContent = convertGlobalToGridContentPoint(value.location)
+        let currentLocationInViewport = convertGlobalToViewportPoint(value.location)
+
         if !didResolveSelectionDragIntent {
             didResolveSelectionDragIntent = true
-            dragStartLocation = value.startLocation
-            selectionDragStartedOnPhotoID = photoID(at: value.startLocation)
+            dragStartLocation = startLocationInGridContent
+            selectionDragStartedOnPhotoID = photoID(at: startLocationInGridContent)
             if isSelectionSwipeActive == false {
                 lastAutoScrollTickDate = nil
             }
         }
 
-        dragCurrentLocation = value.location
+        dragCurrentLocation = currentLocationInGridContent
+        dragCurrentViewportLocation = currentLocationInViewport
 
-        let translationX = value.location.x - value.startLocation.x
-        let translationY = value.location.y - value.startLocation.y
+        let translationX = currentLocationInGridContent.x - startLocationInGridContent.x
+        let translationY = currentLocationInGridContent.y - startLocationInGridContent.y
         let horizontalDominant = abs(translationX) > abs(translationY)
 
         // Only start swipe-select when drag is horizontal and started on a photo.
@@ -462,8 +516,9 @@ struct PhotoGridView: View {
         }
 
         guard isSelectionSwipeActive else { return }
-        selectRange(at: value.location)
-        updateAutoScrollDirection(for: value.location)
+        selectRange(at: currentLocationInGridContent)
+        autoScrollDirection = .none
+        autoScrollIntensityValue = 0
     }
 
     private func endSelectionSwipe() {
@@ -474,6 +529,7 @@ struct PhotoGridView: View {
         selectionSwipeAnchorIndex = nil
         selectionSwipeCurrentIndex = nil
         selectionSwipeBaseSelection = []
+        dragCurrentViewportLocation = .zero
         lastAutoScrollTickDate = nil
     }
 
@@ -498,36 +554,7 @@ struct PhotoGridView: View {
     }
 
     private func handleAutoScrollTick(now: Date) {
-        guard isSelectionSwipeActive else { return }
-        guard autoScrollDirection != .none else { return }
-
-        guard let lastTick = lastAutoScrollTickDate else {
-            lastAutoScrollTickDate = now
-            return
-        }
-        lastAutoScrollTickDate = now
-
-        let dt = max(0, min(0.1, now.timeIntervalSince(lastTick)))
-        let intensity = autoScrollIntensity(for: dragCurrentLocation)
-        autoScrollIntensityValue = intensity
-        guard intensity > 0 else { return }
-
-        // Point-based scrolling avoids row-sized jumps and feels system-like.
-        let velocityPointsPerSecond = CGFloat(12 + pow(Double(intensity), 2.15) * 120)
-        let deltaY = velocityPointsPerSecond * CGFloat(dt)
-        let baseOffsetY = max(scrollContentOffsetY, 0)
-        let targetOffsetY: CGFloat
-        switch autoScrollDirection {
-        case .up:
-            targetOffsetY = max(0, baseOffsetY - deltaY)
-        case .down:
-            targetOffsetY = baseOffsetY + deltaY
-        case .none:
-            return
-        }
-
-        scrollPosition.scrollTo(y: targetOffsetY)
-        selectRange(at: dragCurrentLocation)
+        _ = now
     }
 
     private func nearestPhotoIndex(at location: CGPoint) -> Int? {
@@ -564,6 +591,18 @@ struct PhotoGridView: View {
         case .none:
             return 0
         }
+    }
+
+    private func convertGlobalToViewportPoint(_ point: CGPoint) -> CGPoint {
+        guard scrollViewportFrameInGlobal != .zero else { return point }
+        return CGPoint(
+            x: point.x - scrollViewportFrameInGlobal.minX,
+            y: point.y - scrollViewportFrameInGlobal.minY
+        )
+    }
+
+    private func convertGlobalToGridContentPoint(_ point: CGPoint) -> CGPoint {
+        convertGlobalToViewportPoint(point)
     }
 
 }
@@ -619,6 +658,17 @@ private struct GridViewportSizePreferenceKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
 
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next != .zero {
+            value = next
+        }
+    }
+}
+
+private struct GridViewportFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         let next = nextValue()
         if next != .zero {
             value = next

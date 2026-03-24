@@ -15,22 +15,31 @@ class PhotoStorageService {
     /// Save a photo with all its data
     func savePhoto(
         image: UIImage,
+        imageData: Data? = nil,
         livePhotoImageData: Data? = nil,
         livePhotoVideoURL: URL? = nil,
         location: (latitude: Double, longitude: Double)?,
         context: NSManagedObjectContext
     ) async throws -> DailyPhoto {
+        let metadataSourceData = livePhotoImageData ?? imageData
+        let extractedExifMetadata = metadataSourceData.flatMap(exifMetadata(from:))
+        let fallbackCaptureDate = Date()
+        let resolvedCaptureDate = extractedExifMetadata?.captureDate ?? fallbackCaptureDate
+        let resolvedLocation = extractedExifMetadata?.location ?? location
+
         // Create the Core Data object
         let photo = DailyPhoto(context: context)
         photo.id = UUID()
-        photo.captureDate = Date()
+        photo.captureDate = extractedExifMetadata?.captureDate ?? resolvedCaptureDate
         photo.createdAt = Date()
         photo.modifiedAt = Date()
-        
-        // Save location if available
-        if let location = location {
-            photo.latitude = location.latitude
-            photo.longitude = location.longitude
+
+        if let exifLocation = extractedExifMetadata?.location ?? resolvedLocation {
+            photo.latitude = exifLocation.latitude
+            photo.longitude = exifLocation.longitude
+        } else {
+            photo.latitude = 0
+            photo.longitude = 0
         }
         
         // Generate and save thumbnail
@@ -38,20 +47,24 @@ class PhotoStorageService {
             photo.thumbnailData = thumbnailData
         }
         
-        // Save full-res image as CloudKit asset
-        let imageAssetName = try await cloudKitService.saveImageAsset(image)
+        // Save full-res image as CloudKit asset, preserving original metadata when available.
+        let imageAssetName: String
+        if let metadataSourceData {
+            let imageExtension = imageFileExtension(for: metadataSourceData)
+            imageAssetName = try await cloudKitService.saveImageDataAsset(
+                metadataSourceData,
+                fileExtension: imageExtension
+            )
+        } else {
+            throw PhotoStorageError.missingImageData
+        }
         photo.fullImageAssetName = imageAssetName
         
         // Save Live Photo data if available
         if let livePhotoImageData = livePhotoImageData {
-            let livePhotoImageDataWithMetadata = embedMetadata(
-                in: livePhotoImageData,
-                location: location,
-                captureDate: photo.captureDate
-            )
-            let liveImageExtension = imageFileExtension(for: livePhotoImageDataWithMetadata)
+            let liveImageExtension = imageFileExtension(for: livePhotoImageData)
             let liveImageAssetName = try await cloudKitService.saveImageDataAsset(
-                livePhotoImageDataWithMetadata,
+                livePhotoImageData,
                 fileExtension: liveImageExtension
             )
             photo.livePhotoImageAssetName = liveImageAssetName
@@ -67,6 +80,77 @@ class PhotoStorageService {
         return photo
     }
     
+    /// Save imported photo data without decoding full image into memory first.
+    func saveImportedPhoto(
+        imageData: Data,
+        context: NSManagedObjectContext
+    ) async throws -> DailyPhoto {
+        let exifMetadata = exifMetadata(from: imageData)
+
+        let photo = DailyPhoto(context: context)
+        photo.id = UUID()
+        photo.captureDate = exifMetadata?.captureDate ?? Date()
+        photo.createdAt = Date()
+        photo.modifiedAt = Date()
+
+        if let location = exifMetadata?.location {
+            photo.latitude = location.latitude
+            photo.longitude = location.longitude
+        } else {
+            photo.latitude = 0
+            photo.longitude = 0
+        }
+
+        if let thumbnailData = thumbnailService.generateThumbnail(from: imageData) {
+            photo.thumbnailData = thumbnailData
+        }
+
+        let imageExtension = imageFileExtension(for: imageData)
+        let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
+        photo.fullImageAssetName = imageAssetName
+
+        try context.save()
+        return photo
+    }
+
+    /// Save imported Live Photo resources without converting formats.
+    func saveImportedLivePhoto(
+        imageData: Data,
+        videoURL: URL,
+        context: NSManagedObjectContext
+    ) async throws -> DailyPhoto {
+        let exifMetadata = exifMetadata(from: imageData)
+
+        let photo = DailyPhoto(context: context)
+        photo.id = UUID()
+        photo.captureDate = exifMetadata?.captureDate ?? Date()
+        photo.createdAt = Date()
+        photo.modifiedAt = Date()
+
+        if let location = exifMetadata?.location {
+            photo.latitude = location.latitude
+            photo.longitude = location.longitude
+        } else {
+            photo.latitude = 0
+            photo.longitude = 0
+        }
+
+        if let thumbnailData = thumbnailService.generateThumbnail(from: imageData) {
+            photo.thumbnailData = thumbnailData
+        }
+
+        let imageExtension = imageFileExtension(for: imageData)
+        let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
+        photo.fullImageAssetName = imageAssetName
+        photo.livePhotoImageAssetName = imageAssetName
+
+        let videoAssetName = try await cloudKitService.saveVideoAsset(from: videoURL)
+        photo.livePhotoVideoAssetName = videoAssetName
+
+        try context.save()
+        return photo
+    }
+
     /// Load full resolution image
     func loadFullImage(from photo: DailyPhoto) async throws -> UIImage {
         guard let assetName = photo.fullImageAssetName else {
@@ -83,6 +167,51 @@ class PhotoStorageService {
         }
         
         return try await cloudKitService.loadVideoAsset(named: assetName)
+    }
+
+    @MainActor
+    func syncPhotoMetadataFromAssetsIfNeeded(photos: [DailyPhoto], context: NSManagedObjectContext) async {
+        var updatedPhotos: [DailyPhoto] = []
+
+        for photo in photos {
+            guard let assetName = photo.fullImageAssetName else { continue }
+            guard let assetURL = try? cloudKitService.loadAssetURL(named: assetName) else { continue }
+            guard let imageData = try? Data(contentsOf: assetURL) else { continue }
+            guard let metadata = exifMetadata(from: imageData) else { continue }
+
+            if let exifDate = metadata.captureDate {
+                let shouldUpdateDate: Bool
+                if let currentDate = photo.captureDate {
+                    shouldUpdateDate = abs(currentDate.timeIntervalSince(exifDate)) > 1
+                } else {
+                    shouldUpdateDate = true
+                }
+
+                if shouldUpdateDate {
+                    photo.captureDate = exifDate
+                    updatedPhotos.append(photo)
+                }
+            }
+
+            if let location = metadata.location {
+                let shouldUpdateLocation =
+                    abs(photo.latitude - location.latitude) > 0.000_001 ||
+                    abs(photo.longitude - location.longitude) > 0.000_001
+
+                if shouldUpdateLocation {
+                    photo.latitude = location.latitude
+                    photo.longitude = location.longitude
+                    if !updatedPhotos.contains(where: { $0.objectID == photo.objectID }) {
+                        updatedPhotos.append(photo)
+                    }
+                }
+            }
+        }
+
+        if !updatedPhotos.isEmpty {
+            photoModifiedTimestamps(photos: updatedPhotos)
+            try? context.save()
+        }
     }
 
     /// Load Live Photo paired resource URLs
@@ -151,46 +280,18 @@ class PhotoStorageService {
             throw PhotoStorageError.noLivePhotoAssets
         }
 
-        let sourceImageURL = try cloudKitService.loadAssetURL(named: livePhotoImageAssetName)
+        let imageURL = try cloudKitService.loadAssetURL(named: livePhotoImageAssetName)
         let videoURL = try cloudKitService.loadAssetURL(named: livePhotoVideoAssetName)
-        let imageURL: URL
-
-        let sourceExtension = sourceImageURL.pathExtension.lowercased()
-        if sourceExtension == "heic" || sourceExtension == "heif" {
-            imageURL = sourceImageURL
-        } else {
-            let convertedHEICURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(UUID().uuidString).heic")
-            try convertImageToHEIC(sourceURL: sourceImageURL, destinationURL: convertedHEICURL, photo: photo)
-            imageURL = convertedHEICURL
-        }
 
         return [imageURL, videoURL]
     }
 
-    /// Prepare a still-image URL as HEIC while preserving metadata where possible.
-    func prepareStillPhotoHEICShareURL(for photo: DailyPhoto) throws -> URL {
+    /// Prepare a still-image URL in its original file format.
+    func prepareStillPhotoShareURL(for photo: DailyPhoto) throws -> URL {
         guard let fullImageAssetName = photo.fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
-
-        let sourceURL = try cloudKitService.loadAssetURL(named: fullImageAssetName)
-        let sourceExtension = sourceURL.pathExtension.lowercased()
-        if (sourceExtension == "heic" || sourceExtension == "heif"),
-           !sourceStillImageNeedsMetadataRewrite(sourceURL: sourceURL, photo: photo) {
-            return sourceURL
-        }
-
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(UUID().uuidString).heic")
-        try convertImageToHEIC(sourceURL: sourceURL, destinationURL: outputURL, photo: photo)
-        return outputURL
-    }
-
-    /// Prepare still-image HEIC bytes with embedded metadata for share-sheet transfer.
-    func prepareStillPhotoHEICShareData(for photo: DailyPhoto) throws -> Data {
-        let url = try prepareStillPhotoHEICShareURL(for: photo)
-        return try Data(contentsOf: url)
+        return try cloudKitService.loadAssetURL(named: fullImageAssetName)
     }
 
     private func makeExportRootDirectory() throws -> URL {
@@ -229,83 +330,6 @@ class PhotoStorageService {
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
     }
 
-    private func embedMetadata(
-        in imageData: Data,
-        location: (latitude: Double, longitude: Double)?,
-        captureDate: Date?
-    ) -> Data {
-        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
-              let type = CGImageSourceGetType(source),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            return imageData
-        }
-
-        let metadata = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
-        var updatedMetadata = metadata
-
-        if let location {
-            updatedMetadata[kCGImagePropertyGPSDictionary] = gpsDictionary(for: location)
-        }
-        if let captureDate {
-            updatedMetadata[kCGImagePropertyExifDictionary] = exifDateDictionary(for: captureDate)
-            updatedMetadata[kCGImagePropertyTIFFDictionary] = tiffDateDictionary(for: captureDate)
-        }
-
-        let mutableData = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(mutableData, type, 1, nil) else {
-            return imageData
-        }
-
-        CGImageDestinationAddImage(destination, image, updatedMetadata as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else {
-            return imageData
-        }
-
-        return mutableData as Data
-    }
-
-    private func gpsDictionary(for location: (latitude: Double, longitude: Double)) -> [CFString: Any] {
-        let lat = location.latitude
-        let lon = location.longitude
-
-        return [
-            kCGImagePropertyGPSLatitudeRef: lat >= 0 ? "N" : "S",
-            kCGImagePropertyGPSLatitude: abs(lat),
-            kCGImagePropertyGPSLongitudeRef: lon >= 0 ? "E" : "W",
-            kCGImagePropertyGPSLongitude: abs(lon)
-        ]
-    }
-
-    private func exifDateDictionary(for date: Date) -> [CFString: Any] {
-        let offset = exifOffsetString(from: date)
-        return [
-            kCGImagePropertyExifDateTimeOriginal: exifDateString(from: date),
-            kCGImagePropertyExifDateTimeDigitized: exifDateString(from: date),
-            "OffsetTimeOriginal" as CFString: offset,
-            "OffsetTimeDigitized" as CFString: offset
-        ]
-    }
-
-    private func tiffDateDictionary(for date: Date) -> [CFString: Any] {
-        return [
-            kCGImagePropertyTIFFDateTime: exifDateString(from: date)
-        ]
-    }
-
-    private func exifDateString(from date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        return formatter.string(from: date)
-    }
-
-    private func exifOffsetString(from date: Date) -> String {
-        let seconds = TimeZone.current.secondsFromGMT(for: date)
-        let sign = seconds >= 0 ? "+" : "-"
-        let absolute = abs(seconds)
-        let hours = absolute / 3600
-        let minutes = (absolute % 3600) / 60
-        return String(format: "%@%02d:%02d", sign, hours, minutes)
-    }
 
     private func imageFileExtension(for imageData: Data) -> String {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
@@ -322,63 +346,79 @@ class PhotoStorageService {
         return "heic"
     }
 
-    private func sourceStillImageNeedsMetadataRewrite(sourceURL: URL, photo: DailyPhoto) -> Bool {
-        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+    private func exifMetadata(from imageData: Data) -> (captureDate: Date?, location: (latitude: Double, longitude: Double)?)? {
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return true
+            return nil
         }
 
-        if photo.latitude != 0 || photo.longitude != 0 {
-            let gps = metadata[kCGImagePropertyGPSDictionary] as? [CFString: Any]
-            if gps?[kCGImagePropertyGPSLatitude] == nil || gps?[kCGImagePropertyGPSLongitude] == nil {
-                return true
-            }
-        }
-
-        if photo.captureDate != nil {
-            let exif = metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]
-            if exif?[kCGImagePropertyExifDateTimeOriginal] == nil {
-                return true
-            }
-        }
-
-        return false
+        let captureDate = extractCaptureDate(from: metadata)
+        let location = extractLocation(from: metadata)
+        return (captureDate: captureDate, location: location)
     }
 
-    private func convertImageToHEIC(sourceURL: URL, destinationURL: URL, photo: DailyPhoto) throws {
-        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-              let sourceType = CGImageSourceGetType(source) else {
-            throw PhotoStorageError.noImageAsset
+    private func extractCaptureDate(from metadata: [CFString: Any]) -> Date? {
+        let exif = metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+
+        let offsetTime = exif?["OffsetTimeOriginal" as CFString] as? String
+            ?? exif?["OffsetTimeDigitized" as CFString] as? String
+
+        if let exifDateString = exif?[kCGImagePropertyExifDateTimeOriginal] as? String
+            ?? exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
+           let parsedExifDate = parseExifDate(exifDateString, offset: offsetTime) {
+            return parsedExifDate
         }
 
-        guard let destination = CGImageDestinationCreateWithURL(
-            destinationURL as CFURL,
-            UTType.heic.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw PhotoStorageError.saveFailed
+        if let tiffDateString = tiff?[kCGImagePropertyTIFFDateTime] as? String,
+           let parsedTiffDate = parseExifDate(tiffDateString, offset: nil) {
+            return parsedTiffDate
         }
 
-        var metadata = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        return nil
+    }
 
-        if photo.latitude != 0 || photo.longitude != 0 {
-            metadata[kCGImagePropertyGPSDictionary] = gpsDictionary(
-                for: (latitude: photo.latitude, longitude: photo.longitude)
-            )
-        }
-        if let captureDate = photo.captureDate {
-            metadata[kCGImagePropertyExifDictionary] = exifDateDictionary(for: captureDate)
-            metadata[kCGImagePropertyTIFFDictionary] = tiffDateDictionary(for: captureDate)
+    private func extractLocation(from metadata: [CFString: Any]) -> (latitude: Double, longitude: Double)? {
+        guard let gps = metadata[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+              let rawLatitude = gps[kCGImagePropertyGPSLatitude] as? Double,
+              let rawLongitude = gps[kCGImagePropertyGPSLongitude] as? Double else {
+            return nil
         }
 
-        if sourceType as String != UTType.heic.identifier {
-            metadata[kCGImageDestinationLossyCompressionQuality] = 0.9
-        }
+        let latitudeRef = (gps[kCGImagePropertyGPSLatitudeRef] as? String)?.uppercased()
+        let longitudeRef = (gps[kCGImagePropertyGPSLongitudeRef] as? String)?.uppercased()
 
-        CGImageDestinationAddImageFromSource(destination, source, 0, metadata as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else {
-            throw PhotoStorageError.saveFailed
+        let latitude = latitudeRef == "S" ? -abs(rawLatitude) : abs(rawLatitude)
+        let longitude = longitudeRef == "W" ? -abs(rawLongitude) : abs(rawLongitude)
+        return (latitude, longitude)
+    }
+
+    private func parseExifDate(_ dateString: String, offset: String?) -> Date? {
+        if let offset,
+           let date = exifDateTimeWithOffsetFormatter.date(from: "\(dateString)\(offset)") {
+            return date
+        }
+        return exifDateTimeFormatter.date(from: dateString)
+    }
+
+    private var exifDateTimeFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter
+    }
+
+    private var exifDateTimeWithOffsetFormatter: DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ssXXXXX"
+        return formatter
+    }
+
+    private func photoModifiedTimestamps(photos: [DailyPhoto]) {
+        let now = Date()
+        for photo in photos {
+            photo.modifiedAt = now
         }
     }
 }
@@ -387,6 +427,7 @@ enum PhotoStorageError: LocalizedError {
     case noImageAsset
     case noVideoAsset
     case noLivePhotoAssets
+    case missingImageData
     case saveFailed
     
     var errorDescription: String? {
@@ -397,6 +438,8 @@ enum PhotoStorageError: LocalizedError {
             return "No video asset found for this Live Photo"
         case .noLivePhotoAssets:
             return "No paired Live Photo assets found"
+        case .missingImageData:
+            return "No encoded image data available to store"
         case .saveFailed:
             return "Failed to save photo"
         }

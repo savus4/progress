@@ -12,5 +12,7 @@
 	<string>We save your location with each photo to remember where it was taken.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>We can save photos to your photo library if you choose.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>We need access to your photo library to import Live Photos you select.</string>
 </dict>
 </plist>

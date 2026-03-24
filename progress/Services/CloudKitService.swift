@@ -50,7 +50,9 @@ class CloudKitService {
     /// - Parameter videoURL: URL of the video file
     /// - Returns: The file name/identifier of the saved asset
     func saveVideoAsset(from videoURL: URL) async throws -> String {
-        let fileName = "\(UUID().uuidString).mov"
+        let sourceExtension = videoURL.pathExtension
+        let fileExtension = sourceExtension.isEmpty ? "mov" : sourceExtension
+        let fileName = "\(UUID().uuidString).\(fileExtension)"
         let destinationURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         
         try FileManager.default.copyItem(at: videoURL, to: destinationURL)

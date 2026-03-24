@@ -2,12 +2,15 @@ import SwiftUI
 import AVFoundation
 import UIKit
 import Combine
+import CoreLocation
+import ImageIO
 
 class CameraService: NSObject, ObservableObject {
     @Published var isAuthorized = false
     @Published var session = AVCaptureSession()
     @Published var previewLayer: AVCaptureVideoPreviewLayer?
     @Published var capturedImage: UIImage?
+    @Published var capturedImageData: Data?
     @Published var livePhotoCapture: (image: UIImage, imageData: Data, videoURL: URL)?
     @Published var captureCompleted: Int = 0
     @Published var captureFinished: Int = 0
@@ -98,16 +101,21 @@ class CameraService: NSObject, ObservableObject {
         }
     }
     
-    func capturePhoto(withLivePhoto: Bool = true) {
+    func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
         let settings: AVCapturePhotoSettings
         if photoOutput.availablePhotoCodecTypes.contains(.hevc) {
             settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
         } else {
             settings = AVCapturePhotoSettings()
         }
+
+        if let location {
+            settings.metadata = [kCGImagePropertyGPSDictionary as String: gpsMetadataDictionary(for: location)]
+        }
         
         // Reset previous capture
         capturedImage = nil
+        capturedImageData = nil
         livePhotoCapture = nil
         capturedPhotoData = nil
         capturedStillImage = nil
@@ -138,6 +146,16 @@ class CameraService: NSObject, ObservableObject {
         settings.photoQualityPrioritization = .quality
         
         photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+
+    private func gpsMetadataDictionary(for location: CLLocation) -> [String: Any] {
+        let coordinate = location.coordinate
+        return [
+            kCGImagePropertyGPSLatitudeRef as String: coordinate.latitude >= 0 ? "N" : "S",
+            kCGImagePropertyGPSLatitude as String: abs(coordinate.latitude),
+            kCGImagePropertyGPSLongitudeRef as String: coordinate.longitude >= 0 ? "E" : "W",
+            kCGImagePropertyGPSLongitude as String: abs(coordinate.longitude)
+        ]
     }
     
     func switchCamera() {
@@ -184,6 +202,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
 
         DispatchQueue.main.async {
             self.capturedImage = image
+            self.capturedImageData = imageData
             
             // If not capturing Live Photo, trigger save immediately
             if !self.isCapturingLivePhoto {
@@ -203,6 +222,7 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
             let stillData = self.capturedPhotoData ?? (image.jpegData(compressionQuality: 1.0) ?? Data())
             DispatchQueue.main.async {
                 self.capturedImage = image
+                self.capturedImageData = stillData
                 self.livePhotoCapture = (image: image, imageData: stillData, videoURL: outputFileURL)
                 self.captureCompleted += 1
             }
