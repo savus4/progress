@@ -35,8 +35,8 @@ A beautiful iOS app for capturing daily photos with alignment guides, Live Photo
 - **Location data** synchronized with photos
 
 ### 🎨 Modern Design
-- **Liquid glass/glassmorphism** UI with `.ultraThinMaterial`
-- **iOS 18+ design language** with latest SwiftUI features
+- **Liquid glass/glassmorphism** UI with 
+- **iOS 26 design language**
 - **Smooth animations** and transitions
 - **Dark mode support**
 

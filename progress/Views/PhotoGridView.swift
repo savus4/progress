@@ -17,6 +17,7 @@ struct PhotoGridView: View {
     @State private var selectedIndex: Int = 0
     @State private var scrollPosition = ScrollPosition(idType: NSManagedObjectID.self)
     @State private var scrollContentOffsetY: CGFloat = 0
+    @State private var lastScrollContentOffsetY: CGFloat = 0
     @State private var visibleScrollDate: Date?
     @State private var isScrollDateVisible = false
     @State private var isScrollGestureActive = false
@@ -47,6 +48,7 @@ struct PhotoGridView: View {
     @State private var lastAutoScrollTickDate: Date?
     @State private var didSyncExifMetadata = false
     private let autoScrollTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+    private let enableScrollDateDebugLogs = false
     
     private let columns = [
         GridItem(.adaptive(minimum: 100, maximum: 150), spacing: 2)
@@ -110,9 +112,6 @@ struct PhotoGridView: View {
                                         }
                                     }
                                     .id(photo.objectID)
-                                    .onAppear {
-                                        handlePhotoBecameVisible(photo)
-                                    }
                                     .onTapGesture {
                                         if isSelectionMode {
                                             toggleSelection(for: photo.objectID)
@@ -142,12 +141,15 @@ struct PhotoGridView: View {
                             height: geometry.visibleRect.height
                         )
                     }, action: { _, snapshot in
-                        scrollContentOffsetY = max(snapshot.minY, 0)
+                        let nextOffset = max(snapshot.minY, 0)
+                        let scrollDirection = overlayScrollDirection(from: lastScrollContentOffsetY, to: nextOffset)
+                        scrollContentOffsetY = nextOffset
+                        lastScrollContentOffsetY = nextOffset
                         if snapshot.height > 0 {
                             scrollViewportSize.height = snapshot.height
                         }
                         if isScrollGestureActive, let date = currentOverlayDate() {
-                            showScrollDateOverlay(for: date)
+                            showScrollDateOverlay(for: date, direction: scrollDirection)
                         }
                     })
                     .scrollDisabled(isSelectionSwipeActive)
@@ -177,7 +179,7 @@ struct PhotoGridView: View {
                                 isScrollDateVisible = false
                             }
                         } else if let date = currentOverlayDate() {
-                            showScrollDateOverlay(for: date)
+                            showScrollDateOverlay(for: date, direction: .none)
                         }
                     }
                     .onPreferenceChange(FirstGridItemFramePreferenceKey.self) { frame in
@@ -331,20 +333,31 @@ struct PhotoGridView: View {
         )
     }
 
-    private func showScrollDateOverlay(for date: Date) {
+    private func showScrollDateOverlay(for date: Date, direction: OverlayScrollDirection) {
+        if let currentDate = visibleScrollDate {
+            if isSameMonthAndYear(currentDate, date) {
+                return
+            }
+
+            let monthComparison = compareMonthYear(date, currentDate)
+            if (direction == .down && monthComparison == .orderedDescending) ||
+                (direction == .up && monthComparison == .orderedAscending) {
+                if enableScrollDateDebugLogs {
+                    print("ScrollMonthOverlay ignored transition current=\(debugMonthYear(currentDate)) candidate=\(debugMonthYear(date)) direction=\(direction.rawValue)")
+                }
+                return
+            }
+        }
+
+        if enableScrollDateDebugLogs {
+            let current = visibleScrollDate.map(debugMonthYear(_:)) ?? "nil"
+            print("ScrollMonthOverlay update current=\(current) next=\(debugMonthYear(date)) direction=\(direction.rawValue) offsetY=\(Int(scrollContentOffsetY))")
+        }
         visibleScrollDate = date
 
         withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
             isScrollDateVisible = true
         }
-    }
-
-    private func handlePhotoBecameVisible(_ photo: DailyPhoto) {
-        guard isScrollGestureActive else { return }
-        guard let captureDate = photo.captureDate else {
-            return
-        }
-        showScrollDateOverlay(for: captureDate)
     }
 
     private func currentOverlayDate() -> Date? {
@@ -365,6 +378,46 @@ struct PhotoGridView: View {
         }
 
         return photos.first?.captureDate
+    }
+
+    private func overlayScrollDirection(from previous: CGFloat, to current: CGFloat) -> OverlayScrollDirection {
+        let delta = current - previous
+        let threshold: CGFloat = 0.4
+        if delta > threshold {
+            return .down
+        }
+        if delta < -threshold {
+            return .up
+        }
+        return .none
+    }
+
+    private func isSameMonthAndYear(_ lhs: Date, _ rhs: Date) -> Bool {
+        Calendar.current.isDate(lhs, equalTo: rhs, toGranularity: .month) &&
+            Calendar.current.isDate(lhs, equalTo: rhs, toGranularity: .year)
+    }
+
+    private func compareMonthYear(_ lhs: Date, _ rhs: Date) -> ComparisonResult {
+        let calendar = Calendar.current
+        let lhsComponents = calendar.dateComponents([.year, .month], from: lhs)
+        let rhsComponents = calendar.dateComponents([.year, .month], from: rhs)
+
+        if lhsComponents.year == rhsComponents.year {
+            let lhsMonth = lhsComponents.month ?? 0
+            let rhsMonth = rhsComponents.month ?? 0
+            if lhsMonth == rhsMonth { return .orderedSame }
+            return lhsMonth < rhsMonth ? .orderedAscending : .orderedDescending
+        }
+
+        let lhsYear = lhsComponents.year ?? 0
+        let rhsYear = rhsComponents.year ?? 0
+        return lhsYear < rhsYear ? .orderedAscending : .orderedDescending
+    }
+
+    private func debugMonthYear(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM"
+        return formatter.string(from: date)
     }
 
     private func toggleSelection(for objectID: NSManagedObjectID) {
@@ -696,6 +749,12 @@ private enum SelectionAutoScrollDirection {
 private enum SelectionSwipeOperation {
     case select
     case deselect
+}
+
+private enum OverlayScrollDirection: String {
+    case up
+    case down
+    case none
 }
 
 private struct ScrollViewportSnapshot: Equatable {

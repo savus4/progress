@@ -21,6 +21,7 @@ struct PhotoDetailView: View {
     @State private var isPreparingShare = false
     @State private var shareStatusMessage: String?
     @State private var shareStatusToastTask: Task<Void, Never>?
+    @State private var showingDeleteConfirmation = false
 
     private static let navigationDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -38,16 +39,26 @@ struct PhotoDetailView: View {
                         // Photo display
                         if let fullImage = fullImage {
                             if let imageURL = livePhotoImageURL, let videoURL = livePhotoVideoURL {
-                                LivePhotoContainerView(
-                                    imageURL: imageURL,
-                                    videoURL: videoURL,
-                                    fallbackImage: fullImage
-                                )
+                                SnapBackZoomContainer {
+                                    LivePhotoContainerView(
+                                        imageURL: imageURL,
+                                        videoURL: videoURL,
+                                        fallbackImage: fullImage
+                                    )
                                     .aspectRatio(fullImage.size, contentMode: .fit)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                                .aspectRatio(fullImage.size, contentMode: .fit)
+                                .frame(maxWidth: .infinity)
                             } else {
-                                Image(uiImage: fullImage)
-                                    .resizable()
-                                    .scaledToFit()
+                                SnapBackZoomContainer {
+                                    Image(uiImage: fullImage)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                }
+                                .aspectRatio(fullImage.size, contentMode: .fit)
+                                .frame(maxWidth: .infinity)
                             }
                         } else if isLoadingImage {
                             ProgressView()
@@ -102,7 +113,9 @@ struct PhotoDetailView: View {
                         }
                     }
 
-                    Button(role: .destructive, action: deletePhoto) {
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
                         Image(systemName: "trash")
                             .foregroundStyle(.white)
                     }
@@ -146,6 +159,20 @@ struct PhotoDetailView: View {
         .sheet(item: $sharePayload) { payload in
             ActivityView(activityItems: payload.items)
         }
+        .confirmationDialog(
+            "Delete photo?",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Photo", role: .destructive) {
+                deletePhoto()
+            }
+            .disabled(isDeleting)
+
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This action cannot be undone.")
+        }
         .onChange(of: shareStatusMessage) { _, newValue in
             shareStatusToastTask?.cancel()
             guard newValue != nil else { return }
@@ -180,14 +207,18 @@ struct PhotoDetailView: View {
             }
 
             if photo.latitude != 0 && photo.longitude != 0 {
+                let coordinate = CLLocationCoordinate2D(latitude: photo.latitude, longitude: photo.longitude)
                 Map(initialPosition: .region(MKCoordinateRegion(
-                    center: CLLocationCoordinate2D(latitude: photo.latitude, longitude: photo.longitude),
+                    center: coordinate,
                     span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
                 ))) {
-                    Marker("Photo Location", coordinate: CLLocationCoordinate2D(latitude: photo.latitude, longitude: photo.longitude))
+                    Marker("Photo Location", coordinate: coordinate)
                 }
                 .frame(height: 210)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .onTapGesture {
+                    openLocationInMaps()
+                }
             }
 
             #if !targetEnvironment(simulator)
@@ -476,6 +507,19 @@ struct PhotoDetailView: View {
         }
         return UIImage(cgImage: cgThumbnail)
     }
+
+    private func openLocationInMaps() {
+        guard photo.latitude != 0 || photo.longitude != 0 else { return }
+
+        let coordinate = CLLocationCoordinate2D(latitude: photo.latitude, longitude: photo.longitude)
+        let placemark = MKPlacemark(coordinate: coordinate)
+        let mapItem = MKMapItem(placemark: placemark)
+        mapItem.name = locationName == "Unknown location" ? "Photo Location" : locationName
+        mapItem.openInMaps(launchOptions: [
+            MKLaunchOptionsMapCenterKey: NSValue(mkCoordinate: coordinate),
+            MKLaunchOptionsMapSpanKey: NSValue(mkCoordinateSpan: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02))
+        ])
+    }
     
     private func deletePhoto() {
         guard !isDeleting else { return }
@@ -494,6 +538,93 @@ struct PhotoDetailView: View {
                 }
                 print("Failed to delete photo: \(error.localizedDescription)")
             }
+        }
+    }
+}
+
+private struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(rootView: AnyView(content))
+    }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 4
+        scrollView.bouncesZoom = true
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+        scrollView.clipsToBounds = false
+
+        let hostedView = context.coordinator.hostingController.view!
+        hostedView.backgroundColor = .clear
+        hostedView.frame = scrollView.bounds
+        hostedView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+        scrollView.addSubview(hostedView)
+        return scrollView
+    }
+
+    func updateUIView(_ uiView: UIScrollView, context: Context) {
+        context.coordinator.hostingController.rootView = AnyView(content)
+        context.coordinator.hostingController.view.frame = uiView.bounds
+        if uiView.zoomScale < 1.001 {
+            uiView.contentSize = uiView.bounds.size
+            context.coordinator.centerContent(in: uiView)
+        }
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        let hostingController: UIHostingController<AnyView>
+
+        init(rootView: AnyView) {
+            self.hostingController = UIHostingController(rootView: rootView)
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            hostingController.view
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            centerContent(in: scrollView)
+        }
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            UIView.animate(
+                withDuration: 0.28,
+                delay: 0,
+                usingSpringWithDamping: 0.86,
+                initialSpringVelocity: 0.4,
+                options: [.curveEaseOut, .allowUserInteraction]
+            ) {
+                scrollView.zoomScale = 1
+                scrollView.contentOffset = .zero
+            } completion: { _ in
+                self.centerContent(in: scrollView)
+            }
+        }
+
+        func centerContent(in scrollView: UIScrollView) {
+            guard let contentView = hostingController.view else { return }
+            let boundsSize = scrollView.bounds.size
+            var frameToCenter = contentView.frame
+
+            frameToCenter.origin.x = frameToCenter.size.width < boundsSize.width
+                ? (boundsSize.width - frameToCenter.size.width) / 2
+                : 0
+            frameToCenter.origin.y = frameToCenter.size.height < boundsSize.height
+                ? (boundsSize.height - frameToCenter.size.height) / 2
+                : 0
+
+            contentView.frame = frameToCenter
         }
     }
 }
