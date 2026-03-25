@@ -512,8 +512,8 @@ struct PhotoDetailView: View {
         guard photo.latitude != 0 || photo.longitude != 0 else { return }
 
         let coordinate = CLLocationCoordinate2D(latitude: photo.latitude, longitude: photo.longitude)
-        let placemark = MKPlacemark(coordinate: coordinate)
-        let mapItem = MKMapItem(placemark: placemark)
+        let location = CLLocation(latitude: photo.latitude, longitude: photo.longitude)
+        let mapItem = MKMapItem(location: location, address: nil)
         mapItem.name = locationName == "Unknown location" ? "Photo Location" : locationName
         mapItem.openInMaps(launchOptions: [
             MKLaunchOptionsMapCenterKey: NSValue(mkCoordinate: coordinate),

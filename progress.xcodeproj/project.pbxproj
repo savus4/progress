@@ -24,7 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		9A2471C32F47BB3C0021B434 /* progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = progress.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A2471C32F47BB3C0021B434 /* progress-daily.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "progress-daily.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A2471D72F47BB3D0021B434 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A2471E12F47BB3D0021B434 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -98,7 +98,7 @@
 		9A2471C42F47BB3C0021B434 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				9A2471C32F47BB3C0021B434 /* progress.app */,
+				9A2471C32F47BB3C0021B434 /* progress-daily.app */,
 				9A2471D72F47BB3D0021B434 /* progressTests.xctest */,
 				9A2471E12F47BB3D0021B434 /* progressUITests.xctest */,
 			);
@@ -127,7 +127,7 @@
 			packageProductDependencies = (
 			);
 			productName = progress;
-			productReference = 9A2471C32F47BB3C0021B434 /* progress.app */;
+			productReference = 9A2471C32F47BB3C0021B434 /* progress-daily.app */;
 			productType = "com.apple.product-type.application";
 		};
 		9A2471D62F47BB3D0021B434 /* progressTests */ = {
@@ -184,7 +184,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2620;
-				LastUpgradeCheck = 2620;
+				LastUpgradeCheck = 2640;
 				TargetAttributes = {
 					9A2471C22F47BB3C0021B434 = {
 						CreatedOnToolsVersion = 26.2;
@@ -311,7 +311,7 @@
 				);
 				MARKETING_VERSION = 0.5;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "progress-daily";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -351,7 +351,7 @@
 				);
 				MARKETING_VERSION = 0.5;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "progress-daily";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -421,6 +421,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -478,6 +479,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};

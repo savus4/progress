@@ -2,7 +2,10 @@ import SwiftUI
 import UserNotifications
 import UIKit
 import PhotosUI
+import CoreData
+import CoreTransferable
 import Photos
+import os
 
 struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -19,8 +22,16 @@ struct NotificationSettingsView: View {
     @State private var importedCount = 0
     @State private var failedImportCount = 0
     @State private var importStatusMessage: String?
+    @State private var deleteRangeStartDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
+    @State private var deleteRangeEndDate = Date()
+    @State private var deleteRangeMatchCount = 0
+    @State private var isLoadingDeleteRangeMatchCount = false
+    @State private var isDeletingPhotosInRange = false
+    @State private var showingDeleteRangeConfirmation = false
+    @State private var deleteRangeStatusMessage: String?
 
     private let notificationService = DailyReminderNotificationService.shared
+    private let importLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
 
     var body: some View {
         NavigationStack {
@@ -103,7 +114,7 @@ struct NotificationSettingsView: View {
                     }
                     .disabled(isImportingPhotos)
 
-                    Text("Experimental: imports picker-provided representations without Photo Library resource access. Live Photos may import as still images.")
+                    Text("Standard import preserves Live Photos. Private import remains experimental and may import Live Photos as still images.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
@@ -122,6 +133,48 @@ struct NotificationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                Section("Delete Photos") {
+                    DatePicker(
+                        "From",
+                        selection: deleteRangeStartBinding,
+                        displayedComponents: .date
+                    )
+                    .disabled(isDeletingPhotosInRange)
+
+                    DatePicker(
+                        "To",
+                        selection: deleteRangeEndBinding,
+                        in: deleteRangeStartDate...,
+                        displayedComponents: .date
+                    )
+                    .disabled(isDeletingPhotosInRange)
+
+                    if isLoadingDeleteRangeMatchCount {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Counting matching photos…")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.footnote)
+                    } else {
+                        Text(deleteRangeCountDescription)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("Delete Matching Photos", role: .destructive) {
+                        showingDeleteRangeConfirmation = true
+                    }
+                    .disabled(deleteRangeMatchCount == 0 || isDeletingPhotosInRange || isLoadingDeleteRangeMatchCount)
+
+                    if let deleteRangeStatusMessage {
+                        Text(deleteRangeStatusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -136,6 +189,7 @@ struct NotificationSettingsView: View {
             .task {
                 reminderTimes = notificationService.loadReminderTimes()
                 authorizationStatus = await notificationService.authorizationStatus()
+                await configureDeleteRange()
             }
             .onChange(of: selectedPhotoItems) { _, items in
                 guard !items.isEmpty else { return }
@@ -147,6 +201,19 @@ struct NotificationSettingsView: View {
             }
             .onDisappear {
                 persistChangesIfNeeded()
+            }
+            .alert(
+                deleteRangeConfirmationTitle,
+                isPresented: $showingDeleteRangeConfirmation,
+            ) {
+                Button(deleteRangeConfirmationButtonTitle, role: .destructive) {
+                    deletePhotosInSelectedRange()
+                }
+                .disabled(isDeletingPhotosInRange || deleteRangeMatchCount == 0)
+
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(deleteRangeConfirmationMessage)
             }
         }
     }
@@ -182,6 +249,50 @@ struct NotificationSettingsView: View {
         }
     }
 
+    private var deleteRangeStartBinding: Binding<Date> {
+        Binding(
+            get: { deleteRangeStartDate },
+            set: { newValue in
+                deleteRangeStartDate = newValue
+                if deleteRangeEndDate < newValue {
+                    deleteRangeEndDate = newValue
+                }
+                refreshDeleteRangeMatchCount()
+            }
+        )
+    }
+
+    private var deleteRangeEndBinding: Binding<Date> {
+        Binding(
+            get: { deleteRangeEndDate },
+            set: { newValue in
+                deleteRangeEndDate = max(newValue, deleteRangeStartDate)
+                refreshDeleteRangeMatchCount()
+            }
+        )
+    }
+
+    private var deleteRangeCountDescription: String {
+        if deleteRangeMatchCount == 0 {
+            return "No photos match the selected date range."
+        }
+
+        return "\(deleteRangeMatchCount) photo\(deleteRangeMatchCount == 1 ? "" : "s") will be deleted."
+    }
+
+    private var deleteRangeConfirmationTitle: String {
+        "Delete \(deleteRangeMatchCount) Photo\(deleteRangeMatchCount == 1 ? "" : "s")?"
+    }
+
+    private var deleteRangeConfirmationButtonTitle: String {
+        "Delete \(deleteRangeMatchCount) Photo\(deleteRangeMatchCount == 1 ? "" : "s")"
+    }
+
+    private var deleteRangeConfirmationMessage: String {
+        let formatter = Self.deleteRangeDateFormatter
+        return "This will permanently delete \(deleteRangeMatchCount) photo\(deleteRangeMatchCount == 1 ? "" : "s") captured from \(formatter.string(from: deleteRangeStartDate)) to \(formatter.string(from: deleteRangeEndDate))."
+    }
+
     private func importSelectedPhotos(_ items: [PhotosPickerItem]) {
         guard !isImportingPhotos else { return }
 
@@ -191,44 +302,8 @@ struct NotificationSettingsView: View {
         failedImportCount = 0
         importStatusMessage = nil
 
-        Task { @MainActor in
-            for item in items {
-                do {
-                    if let livePhotoImport = try await loadLivePhotoImportResources(for: item) {
-                        defer {
-                            try? FileManager.default.removeItem(at: livePhotoImport.videoURL)
-                        }
-                        _ = try await PhotoStorageService.shared.saveImportedLivePhoto(
-                            imageData: livePhotoImport.imageData,
-                            videoURL: livePhotoImport.videoURL,
-                            context: viewContext
-                        )
-                    } else {
-                        guard let imageData = try await item.loadTransferable(type: Data.self) else {
-                            failedImportCount += 1
-                            continue
-                        }
-
-                        _ = try await PhotoStorageService.shared.saveImportedPhoto(
-                            imageData: imageData,
-                            context: viewContext
-                        )
-                    }
-
-                    importedCount += 1
-                } catch {
-                    failedImportCount += 1
-                }
-            }
-
-            isImportingPhotos = false
-            selectedPhotoItems = []
-
-            if failedImportCount == 0 {
-                importStatusMessage = "Imported \(importedCount) photo\(importedCount == 1 ? "" : "s")."
-            } else {
-                importStatusMessage = "Imported \(importedCount), failed \(failedImportCount)."
-            }
+        Task {
+            await importItems(items, preserveLivePhotos: true)
         }
     }
 
@@ -241,33 +316,8 @@ struct NotificationSettingsView: View {
         failedImportCount = 0
         importStatusMessage = nil
 
-        Task { @MainActor in
-            for item in items {
-                do {
-                    guard let imageData = try await item.loadTransferable(type: Data.self) else {
-                        failedImportCount += 1
-                        continue
-                    }
-
-                    _ = try await PhotoStorageService.shared.saveImportedPhoto(
-                        imageData: imageData,
-                        context: viewContext
-                    )
-
-                    importedCount += 1
-                } catch {
-                    failedImportCount += 1
-                }
-            }
-
-            isImportingPhotos = false
-            selectedPrivatePhotoItems = []
-
-            if failedImportCount == 0 {
-                importStatusMessage = "Imported \(importedCount) photo\(importedCount == 1 ? "" : "s") using private mode."
-            } else {
-                importStatusMessage = "Private import: imported \(importedCount), failed \(failedImportCount)."
-            }
+        Task {
+            await importItems(items, preserveLivePhotos: false)
         }
     }
 
@@ -286,11 +336,85 @@ struct NotificationSettingsView: View {
         UIApplication.shared.open(settingsURL)
     }
 
+    @MainActor
+    private func configureDeleteRange() async {
+        let request = DailyPhoto.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: true)]
+        request.fetchLimit = 1
+
+        if let earliestPhoto = try? viewContext.fetch(request).first,
+           let earliestCaptureDate = earliestPhoto.captureDate {
+            deleteRangeStartDate = Calendar.current.startOfDay(for: earliestCaptureDate)
+        } else {
+            deleteRangeStartDate = Calendar.current.startOfDay(for: Date())
+        }
+
+        deleteRangeEndDate = Calendar.current.startOfDay(for: Date())
+        if deleteRangeEndDate < deleteRangeStartDate {
+            deleteRangeEndDate = deleteRangeStartDate
+        }
+
+        refreshDeleteRangeMatchCount()
+    }
+
+    private func refreshDeleteRangeMatchCount() {
+        let startDate = deleteRangeStartDate
+        let endDate = deleteRangeEndDate
+
+        deleteRangeStatusMessage = nil
+        isLoadingDeleteRangeMatchCount = true
+
+        Task { @MainActor in
+            do {
+                deleteRangeMatchCount = try PhotoStorageService.shared.photoCount(
+                    from: startDate,
+                    to: endDate,
+                    context: viewContext
+                )
+            } catch {
+                deleteRangeMatchCount = 0
+                deleteRangeStatusMessage = "Failed to count matching photos."
+            }
+
+            isLoadingDeleteRangeMatchCount = false
+        }
+    }
+
+    private func deletePhotosInSelectedRange() {
+        guard !isDeletingPhotosInRange else { return }
+
+        let startDate = deleteRangeStartDate
+        let endDate = deleteRangeEndDate
+
+        isDeletingPhotosInRange = true
+        deleteRangeStatusMessage = nil
+
+        Task { @MainActor in
+            do {
+                let deletedCount = try await PhotoStorageService.shared.deletePhotos(
+                    from: startDate,
+                    to: endDate,
+                    context: viewContext
+                )
+                deleteRangeMatchCount = deletedCount
+                deleteRangeStatusMessage = deletedCount == 1
+                    ? "Deleted 1 photo."
+                    : "Deleted \(deletedCount) photos."
+                refreshDeleteRangeMatchCount()
+            } catch {
+                deleteRangeStatusMessage = "Failed to delete matching photos."
+            }
+
+            isDeletingPhotosInRange = false
+        }
+    }
+
     private func loadLivePhotoImportResources(for item: PhotosPickerItem) async throws -> (imageData: Data, videoURL: URL)? {
         guard let identifier = item.itemIdentifier else { return nil }
 
         let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
         guard let asset = fetchResult.firstObject else { return nil }
+        guard asset.mediaSubtypes.contains(.photoLive) else { return nil }
 
         let resources = PHAssetResource.assetResources(for: asset)
         guard let imageResource = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto }),
@@ -310,9 +434,12 @@ struct NotificationSettingsView: View {
 
     private func writeResourceToTemporaryFile(_ resource: PHAssetResource) async throws -> URL {
         let originalExtension = URL(fileURLWithPath: resource.originalFilename).pathExtension
-        let suffix = originalExtension.isEmpty ? "" : ".\(originalExtension)"
-        let destinationURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(UUID().uuidString)\(suffix)")
+        var destinationURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+
+        if !originalExtension.isEmpty {
+            destinationURL.appendPathExtension(originalExtension)
+        }
 
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -327,6 +454,135 @@ struct NotificationSettingsView: View {
             }
         }
 
+        return destinationURL
+    }
+
+    private func importItems(_ items: [PhotosPickerItem], preserveLivePhotos: Bool) async {
+        let chunkSize = 10
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        var pendingPayloads: [ImportedPhotoPayload] = []
+        pendingPayloads.reserveCapacity(chunkSize)
+
+        for item in items {
+            do {
+                if preserveLivePhotos,
+                   let livePhotoImport = try await loadLivePhotoImportResources(for: item) {
+                    pendingPayloads.append(
+                        ImportedPhotoPayload(
+                            imageData: livePhotoImport.imageData,
+                            livePhotoVideoURL: livePhotoImport.videoURL
+                        )
+                    )
+                } else {
+                    guard let importedFile = try await item.loadTransferable(type: ImportedPickerImageFile.self) else {
+                        await MainActor.run {
+                            failedImportCount += 1
+                        }
+                        continue
+                    }
+
+                    let imageData = try Data(contentsOf: importedFile.fileURL)
+                    pendingPayloads.append(ImportedPhotoPayload(imageData: imageData))
+                    try? FileManager.default.removeItem(at: importedFile.fileURL)
+                }
+            } catch {
+                await MainActor.run {
+                    failedImportCount += 1
+                }
+            }
+
+            if pendingPayloads.count >= chunkSize {
+                await flushImportedPayloads(&pendingPayloads)
+            }
+        }
+
+        if !pendingPayloads.isEmpty {
+            await flushImportedPayloads(&pendingPayloads)
+        }
+
+        let elapsed = startedAt.duration(to: clock.now)
+        let totals = await MainActor.run { () -> (imported: Int, failed: Int) in
+            let imported = importedCount
+            let failed = failedImportCount
+
+            isImportingPhotos = false
+            selectedPhotoItems = []
+            selectedPrivatePhotoItems = []
+
+            if failed == 0 {
+                importStatusMessage = preserveLivePhotos
+                    ? "Imported \(imported) photo\(imported == 1 ? "" : "s")."
+                    : "Imported \(imported) photo\(imported == 1 ? "" : "s") using private mode."
+            } else {
+                importStatusMessage = preserveLivePhotos
+                    ? "Imported \(imported), failed \(failed)."
+                    : "Private import: imported \(imported), failed \(failed)."
+            }
+
+            return (imported, failed)
+        }
+
+        importLogger.log(
+            "Settings import finished. total=\(items.count, privacy: .public) imported=\(totals.imported, privacy: .public) failed=\(totals.failed, privacy: .public) elapsed=\(String(describing: elapsed), privacy: .public)"
+        )
+    }
+
+    private func flushImportedPayloads(_ payloads: inout [ImportedPhotoPayload]) async {
+        let chunk = payloads
+        payloads.removeAll(keepingCapacity: true)
+
+        let result = await PhotoStorageService.shared.saveImportedPhotos(chunk)
+        await MainActor.run {
+            importedCount += result.importedCount
+            failedImportCount += result.failedCount
+        }
+    }
+
+    private static let deleteRangeDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+}
+
+private struct ImportedPickerImageFile: Transferable {
+    let fileURL: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            Self(fileURL: try ImportedPickerFileCopier.makeTemporaryCopy(of: received.file))
+        }
+    }
+}
+
+private struct ImportedPickerMovieFile: Transferable {
+    let fileURL: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            Self(fileURL: try ImportedPickerFileCopier.makeTemporaryCopy(of: received.file))
+        }
+    }
+}
+
+private enum ImportedPickerFileCopier {
+    nonisolated static func makeTemporaryCopy(of sourceURL: URL) throws -> URL {
+        let originalExtension = sourceURL.pathExtension
+        var destinationURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+
+        if !originalExtension.isEmpty {
+            destinationURL.appendPathExtension(originalExtension)
+        }
+
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
         return destinationURL
     }
 }

@@ -3,12 +3,29 @@ import CoreData
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
+import os
+
+struct ImportedPhotoPayload: Sendable {
+    let imageData: Data
+    let livePhotoVideoURL: URL?
+
+    init(imageData: Data, livePhotoVideoURL: URL? = nil) {
+        self.imageData = imageData
+        self.livePhotoVideoURL = livePhotoVideoURL
+    }
+}
+
+struct ImportedPhotoBatchResult: Sendable {
+    let importedCount: Int
+    let failedCount: Int
+}
 
 class PhotoStorageService {
     static let shared = PhotoStorageService()
     
     private let cloudKitService = CloudKitService.shared
     private let thumbnailService = ThumbnailService.shared
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
     
     private init() {}
     
@@ -85,30 +102,11 @@ class PhotoStorageService {
         imageData: Data,
         context: NSManagedObjectContext
     ) async throws -> DailyPhoto {
-        let exifMetadata = exifMetadata(from: imageData)
-
-        let photo = DailyPhoto(context: context)
-        photo.id = UUID()
-        photo.captureDate = exifMetadata?.captureDate ?? Date()
-        photo.createdAt = Date()
-        photo.modifiedAt = Date()
-
-        if let location = exifMetadata?.location {
-            photo.latitude = location.latitude
-            photo.longitude = location.longitude
-        } else {
-            photo.latitude = 0
-            photo.longitude = 0
-        }
-
-        if let thumbnailData = thumbnailService.generateThumbnail(from: imageData) {
-            photo.thumbnailData = thumbnailData
-        }
-
-        let imageExtension = imageFileExtension(for: imageData)
-        let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
-        photo.fullImageAssetName = imageAssetName
-
+        let photo = try await makeImportedPhoto(
+            imageData: imageData,
+            livePhotoVideoURL: nil,
+            context: context
+        )
         try context.save()
         return photo
     }
@@ -119,36 +117,89 @@ class PhotoStorageService {
         videoURL: URL,
         context: NSManagedObjectContext
     ) async throws -> DailyPhoto {
-        let exifMetadata = exifMetadata(from: imageData)
-
-        let photo = DailyPhoto(context: context)
-        photo.id = UUID()
-        photo.captureDate = exifMetadata?.captureDate ?? Date()
-        photo.createdAt = Date()
-        photo.modifiedAt = Date()
-
-        if let location = exifMetadata?.location {
-            photo.latitude = location.latitude
-            photo.longitude = location.longitude
-        } else {
-            photo.latitude = 0
-            photo.longitude = 0
-        }
-
-        if let thumbnailData = thumbnailService.generateThumbnail(from: imageData) {
-            photo.thumbnailData = thumbnailData
-        }
-
-        let imageExtension = imageFileExtension(for: imageData)
-        let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
-        photo.fullImageAssetName = imageAssetName
-        photo.livePhotoImageAssetName = imageAssetName
-
-        let videoAssetName = try await cloudKitService.saveVideoAsset(from: videoURL)
-        photo.livePhotoVideoAssetName = videoAssetName
-
+        let photo = try await makeImportedPhoto(
+            imageData: imageData,
+            livePhotoVideoURL: videoURL,
+            context: context
+        )
         try context.save()
         return photo
+    }
+
+    func saveImportedPhotos(
+        _ payloads: [ImportedPhotoPayload],
+        batchSize: Int = 12
+    ) async -> ImportedPhotoBatchResult {
+        guard !payloads.isEmpty else {
+            return ImportedPhotoBatchResult(importedCount: 0, failedCount: 0)
+        }
+
+        let importContext = PersistenceController.shared.makeBackgroundContext()
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+
+        var importedCount = 0
+        var failedCount = 0
+        var pendingInsertCount = 0
+
+        for payload in payloads {
+            do {
+                _ = try await makeImportedPhoto(
+                    imageData: payload.imageData,
+                    livePhotoVideoURL: payload.livePhotoVideoURL,
+                    context: importContext
+                )
+                importedCount += 1
+                pendingInsertCount += 1
+
+                if importContext.hasChanges, importedCount.isMultiple(of: max(batchSize, 1)) {
+                    do {
+                        try await importContext.perform {
+                            try importContext.save()
+                        }
+                        pendingInsertCount = 0
+                    } catch {
+                        logger.error("Batch save failed: \(error.localizedDescription, privacy: .public)")
+                        importedCount -= pendingInsertCount
+                        failedCount += pendingInsertCount
+                        pendingInsertCount = 0
+                        await importContext.perform {
+                            importContext.rollback()
+                        }
+                    }
+                }
+            } catch {
+                failedCount += 1
+                logger.error("Import failed for one photo: \(error.localizedDescription, privacy: .public)")
+            }
+
+            if let livePhotoVideoURL = payload.livePhotoVideoURL {
+                try? FileManager.default.removeItem(at: livePhotoVideoURL)
+            }
+        }
+
+        do {
+            if importContext.hasChanges {
+                try await importContext.perform {
+                    try importContext.save()
+                }
+                pendingInsertCount = 0
+            }
+        } catch {
+            logger.error("Final batch save failed: \(error.localizedDescription, privacy: .public)")
+            importedCount -= pendingInsertCount
+            failedCount += pendingInsertCount
+            await importContext.perform {
+                importContext.rollback()
+            }
+        }
+
+        let elapsed = startedAt.duration(to: clock.now)
+        logger.log(
+            "Imported \(importedCount, privacy: .public) photos, failed \(failedCount, privacy: .public), elapsed \(String(describing: elapsed), privacy: .public)"
+        )
+
+        return ImportedPhotoBatchResult(importedCount: importedCount, failedCount: failedCount)
     }
 
     /// Load full resolution image
@@ -232,6 +283,35 @@ class PhotoStorageService {
         // from CloudKit and temporary storage here
         context.delete(photo)
         try context.save()
+    }
+
+    func photoCount(
+        from startDate: Date,
+        to endDate: Date,
+        context: NSManagedObjectContext
+    ) throws -> Int {
+        let request = DailyPhoto.fetchRequest()
+        request.predicate = dateRangePredicate(from: startDate, to: endDate)
+        return try context.count(for: request)
+    }
+
+    func deletePhotos(
+        from startDate: Date,
+        to endDate: Date,
+        context: NSManagedObjectContext
+    ) async throws -> Int {
+        let request = DailyPhoto.fetchRequest()
+        request.predicate = dateRangePredicate(from: startDate, to: endDate)
+
+        let photos = try context.fetch(request)
+        guard !photos.isEmpty else { return 0 }
+
+        for photo in photos {
+            context.delete(photo)
+        }
+
+        try context.save()
+        return photos.count
     }
 
     /// Export photos as Live Photo paired resources only (still image + companion movie).
@@ -419,6 +499,60 @@ class PhotoStorageService {
         let now = Date()
         for photo in photos {
             photo.modifiedAt = now
+        }
+    }
+
+    private func dateRangePredicate(from startDate: Date, to endDate: Date) -> NSPredicate {
+        let calendar = Calendar.current
+        let normalizedStartDate = calendar.startOfDay(for: min(startDate, endDate))
+        let normalizedEndDate = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: max(startDate, endDate))) ?? max(startDate, endDate)
+        return NSPredicate(
+            format: "captureDate >= %@ AND captureDate < %@",
+            normalizedStartDate as NSDate,
+            normalizedEndDate as NSDate
+        )
+    }
+
+    private func makeImportedPhoto(
+        imageData: Data,
+        livePhotoVideoURL: URL?,
+        context: NSManagedObjectContext
+    ) async throws -> DailyPhoto {
+        let exifMetadata = exifMetadata(from: imageData)
+        let thumbnailData = thumbnailService.generateThumbnail(from: imageData)
+        let imageExtension = imageFileExtension(for: imageData)
+        let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
+        let videoAssetName: String?
+        if let livePhotoVideoURL {
+            videoAssetName = try await cloudKitService.saveVideoAsset(from: livePhotoVideoURL)
+        } else {
+            videoAssetName = nil
+        }
+
+        return await context.perform {
+            let photo = DailyPhoto(context: context)
+            photo.id = UUID()
+            photo.captureDate = exifMetadata?.captureDate ?? Date()
+            photo.createdAt = Date()
+            photo.modifiedAt = Date()
+
+            if let location = exifMetadata?.location {
+                photo.latitude = location.latitude
+                photo.longitude = location.longitude
+            } else {
+                photo.latitude = 0
+                photo.longitude = 0
+            }
+
+            photo.thumbnailData = thumbnailData
+            photo.fullImageAssetName = imageAssetName
+
+            if let videoAssetName {
+                photo.livePhotoImageAssetName = imageAssetName
+                photo.livePhotoVideoAssetName = videoAssetName
+            }
+
+            return photo
         }
     }
 }
