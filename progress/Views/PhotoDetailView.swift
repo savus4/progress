@@ -22,21 +22,25 @@ struct PhotoDetailView: View {
     @State private var shareStatusMessage: String?
     @State private var shareStatusToastTask: Task<Void, Never>?
     @State private var showingDeleteConfirmation = false
+    @GestureState private var metadataSheetDragOffset: CGFloat = 0
 
     private static let navigationDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.setLocalizedDateFormatFromTemplate("MMM d, HH:mm")
         return formatter
     }()
+    private let metadataSheetHeight: CGFloat = 360
+    private let metadataSheetPeekHeight: CGFloat = 44
     
     var body: some View {
         NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                
-                ScrollView {
-                    VStack(spacing: 20) {
-                        // Photo display
+            GeometryReader { proxy in
+                ZStack(alignment: .bottom) {
+                    Color.black.ignoresSafeArea()
+
+                    VStack {
+                        Spacer(minLength: 0)
+
                         if let fullImage = fullImage {
                             if let imageURL = livePhotoImageURL, let videoURL = livePhotoVideoURL {
                                 SnapBackZoomContainer {
@@ -66,18 +70,14 @@ struct PhotoDetailView: View {
                                 .frame(height: 400)
                         }
 
-                        if showsMetadataPanel {
-                            photoMetadataPanel
-                        }
+                        Spacer(minLength: 0)
                     }
-                    .padding(.vertical)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, metadataSheetPeekHeight + 12)
+
+                    metadataBottomSheet
+                        .frame(width: proxy.size.width)
                 }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 16)
-                        .onEnded { value in
-                            handleMetadataPanelDragEnded(value)
-                        }
-                )
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -194,7 +194,7 @@ struct PhotoDetailView: View {
     }
 
     @ViewBuilder
-    private var photoMetadataPanel: some View {
+    private var photoMetadataPanelContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(photo.captureDate?.formatted(date: .complete, time: .shortened) ?? "Unknown date")
@@ -233,16 +233,88 @@ struct PhotoDetailView: View {
             }
             #endif
         }
-        .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private var metadataBottomSheet: some View {
+        let dragGesture = DragGesture(minimumDistance: 10)
+            .updating($metadataSheetDragOffset) { value, state, _ in
+                let proposedOffset = metadataSheetBaseOffset + value.translation.height
+                state = proposedOffset.clamped(to: metadataSheetOpenOffset...metadataSheetClosedOffset) - metadataSheetBaseOffset
+            }
+            .onEnded(handleMetadataSheetDragEnded)
+
+        return VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                Capsule()
+                    .fill(.white.opacity(0.35))
+                    .frame(width: 38, height: 5)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.footnote)
+                    Text("Details")
+                        .font(.subheadline.weight(.medium))
+                }
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: metadataSheetPeekHeight)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    showsMetadataPanel.toggle()
+                }
+            }
+
+            ScrollView {
+                photoMetadataPanelContent
+                    .padding(18)
+                    .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
+            .scrollDisabled(!showsMetadataPanel)
+            .opacity(showsMetadataPanel ? 1 : 0.001)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: metadataSheetHeight)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         )
-        .padding(.horizontal)
+        .offset(y: metadataSheetOffset)
+        .gesture(dragGesture)
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: showsMetadataPanel)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
-    
+
+    private var metadataSheetBaseOffset: CGFloat {
+        showsMetadataPanel ? metadataSheetOpenOffset : metadataSheetClosedOffset
+    }
+
+    private var metadataSheetClosedOffset: CGFloat {
+        metadataSheetHeight - metadataSheetPeekHeight
+    }
+
+    private var metadataSheetOpenOffset: CGFloat { 0 }
+
+    private var metadataSheetOffset: CGFloat {
+        (metadataSheetBaseOffset + metadataSheetDragOffset)
+            .clamped(to: metadataSheetOpenOffset...metadataSheetClosedOffset)
+    }
+
+    private func handleMetadataSheetDragEnded(_ value: DragGesture.Value) {
+        let projectedOffset = (metadataSheetBaseOffset + value.predictedEndTranslation.height)
+            .clamped(to: metadataSheetOpenOffset...metadataSheetClosedOffset)
+        let midpoint = (metadataSheetClosedOffset + metadataSheetOpenOffset) / 2
+
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            showsMetadataPanel = projectedOffset < midpoint
+        }
+    }
+
     private func loadFullImage() async {
         do {
             let image = try await PhotoStorageService.shared.loadFullImage(from: photo)
@@ -263,25 +335,6 @@ struct PhotoDetailView: View {
         }
     }
 
-    private func handleMetadataPanelDragEnded(_ value: DragGesture.Value) {
-        let horizontal = abs(value.translation.width)
-        let vertical = abs(value.translation.height)
-
-        // Prefer horizontal paging: only react when the gesture is clearly vertical.
-        guard vertical > horizontal * 1.6 else { return }
-        guard vertical >= 36 else { return }
-
-        if value.translation.height < 0 {
-            withAnimation(.easeInOut(duration: 0.22)) {
-                showsMetadataPanel = true
-            }
-        } else {
-            withAnimation(.easeInOut(duration: 0.22)) {
-                showsMetadataPanel = false
-            }
-        }
-    }
-    
     private func loadLivePhotoResources() {
         #if targetEnvironment(simulator)
         livePhotoImageURL = nil
@@ -778,5 +831,11 @@ struct LivePhotoContainerView: UIViewRepresentable {
                 break
             }
         }
+    }
+}
+
+private extension Comparable {
+    func clamped(to limits: ClosedRange<Self>) -> Self {
+        min(max(self, limits.lowerBound), limits.upperBound)
     }
 }
