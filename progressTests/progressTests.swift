@@ -204,6 +204,35 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
+    @Test("PhotoStorageService skips exact duplicate imports and reports duplicate count")
+    func photoStorageSkipsExactDuplicateImports() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .purple)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let firstResult = await PhotoStorageService.shared.saveImportedPhotos(
+            [ImportedPhotoPayload(imageData: imageData)],
+            context: context
+        )
+        #expect(firstResult.importedCount == 1)
+        #expect(firstResult.duplicateCount == 0)
+        #expect(firstResult.failedCount == 0)
+
+        let secondResult = await PhotoStorageService.shared.saveImportedPhotos(
+            [ImportedPhotoPayload(imageData: imageData)],
+            context: context
+        )
+        #expect(secondResult.importedCount == 0)
+        #expect(secondResult.duplicateCount == 1)
+        #expect(secondResult.failedCount == 0)
+
+        let request = DailyPhoto.fetchRequest()
+        let storedCount = try context.count(for: request)
+        #expect(storedCount == 1)
+    }
+
+    @MainActor
     @Test("PhotoStorageService returns still photo share URL")
     func photoStoragePrepareStillShareURL() throws {
         let context = PersistenceController(inMemory: true).container.viewContext

@@ -20,8 +20,10 @@ struct NotificationSettingsView: View {
     @State private var isImportingPhotos = false
     @State private var importTotalCount = 0
     @State private var importedCount = 0
+    @State private var duplicateImportCount = 0
     @State private var failedImportCount = 0
     @State private var importStatusMessage: String?
+    @State private var importFailureMessages: [String] = []
     @State private var deleteRangeStartDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @State private var deleteRangeEndDate = Date()
     @State private var deleteRangeMatchCount = 0
@@ -299,8 +301,10 @@ struct NotificationSettingsView: View {
         isImportingPhotos = true
         importTotalCount = items.count
         importedCount = 0
+        duplicateImportCount = 0
         failedImportCount = 0
         importStatusMessage = nil
+        importFailureMessages = []
 
         Task {
             await importItems(items, preserveLivePhotos: true)
@@ -313,8 +317,10 @@ struct NotificationSettingsView: View {
         isImportingPhotos = true
         importTotalCount = items.count
         importedCount = 0
+        duplicateImportCount = 0
         failedImportCount = 0
         importStatusMessage = nil
+        importFailureMessages = []
 
         Task {
             await importItems(items, preserveLivePhotos: false)
@@ -477,9 +483,11 @@ struct NotificationSettingsView: View {
                     )
                 } else {
                     guard let importedFile = try await item.loadTransferable(type: ImportedPickerImageFile.self) else {
-                        await MainActor.run {
-                            failedImportCount += 1
-                        }
+                        await recordImportFailure(
+                            stage: "picker-transfer",
+                            itemIdentifier: item.itemIdentifier,
+                            message: "No transferable image file was returned."
+                        )
                         continue
                     }
 
@@ -488,9 +496,12 @@ struct NotificationSettingsView: View {
                     try? FileManager.default.removeItem(at: importedFile.fileURL)
                 }
             } catch {
-                await MainActor.run {
-                    failedImportCount += 1
-                }
+                let stage = preserveLivePhotos ? "item-load" : "private-item-load"
+                await recordImportFailure(
+                    stage: stage,
+                    itemIdentifier: item.itemIdentifier,
+                    message: error.localizedDescription
+                )
             }
 
             if pendingPayloads.count >= chunkSize {
@@ -503,8 +514,9 @@ struct NotificationSettingsView: View {
         }
 
         let elapsed = startedAt.duration(to: clock.now)
-        let totals = await MainActor.run { () -> (imported: Int, failed: Int) in
+        let totals = await MainActor.run { () -> (imported: Int, duplicates: Int, failed: Int) in
             let imported = importedCount
+            let duplicates = duplicateImportCount
             let failed = failedImportCount
 
             isImportingPhotos = false
@@ -512,20 +524,31 @@ struct NotificationSettingsView: View {
             selectedPrivatePhotoItems = []
 
             if failed == 0 {
-                importStatusMessage = preserveLivePhotos
+                let baseMessage = preserveLivePhotos
                     ? "Imported \(imported) photo\(imported == 1 ? "" : "s")."
                     : "Imported \(imported) photo\(imported == 1 ? "" : "s") using private mode."
+                if duplicates > 0 {
+                    importStatusMessage = "\(baseMessage) Skipped \(duplicates) duplicate picture\(duplicates == 1 ? "" : "s")."
+                } else {
+                    importStatusMessage = baseMessage
+                }
             } else {
-                importStatusMessage = preserveLivePhotos
+                let failureSummary = importFailureMessages.prefix(3).joined(separator: " | ")
+                let prefix = preserveLivePhotos
                     ? "Imported \(imported), failed \(failed)."
                     : "Private import: imported \(imported), failed \(failed)."
+                let duplicateSummary = duplicates > 0
+                    ? " Skipped \(duplicates) duplicate picture\(duplicates == 1 ? "" : "s")."
+                    : ""
+                let summary = prefix + duplicateSummary
+                importStatusMessage = failureSummary.isEmpty ? summary : "\(summary) \(failureSummary)"
             }
 
-            return (imported, failed)
+            return (imported, duplicates, failed)
         }
 
         importLogger.log(
-            "Settings import finished. total=\(items.count, privacy: .public) imported=\(totals.imported, privacy: .public) failed=\(totals.failed, privacy: .public) elapsed=\(String(describing: elapsed), privacy: .public)"
+            "Settings import finished. total=\(items.count, privacy: .public) imported=\(totals.imported, privacy: .public) duplicates=\(totals.duplicates, privacy: .public) failed=\(totals.failed, privacy: .public) elapsed=\(String(describing: elapsed), privacy: .public)"
         )
     }
 
@@ -536,7 +559,26 @@ struct NotificationSettingsView: View {
         let result = await PhotoStorageService.shared.saveImportedPhotos(chunk)
         await MainActor.run {
             importedCount += result.importedCount
+            duplicateImportCount += result.duplicateCount
             failedImportCount += result.failedCount
+            importFailureMessages.append(contentsOf: result.failureMessages)
+            if importFailureMessages.count > 20 {
+                importFailureMessages = Array(importFailureMessages.prefix(20))
+            }
+        }
+    }
+
+    private func recordImportFailure(stage: String, itemIdentifier: String?, message: String) async {
+        let identifier = itemIdentifier ?? "unknown"
+        let logMessage = "\(stage) item=\(identifier): \(message)"
+        importLogger.error("\(logMessage, privacy: .public)")
+
+        await MainActor.run {
+            failedImportCount += 1
+
+            if importFailureMessages.count < 20 {
+                importFailureMessages.append(logMessage)
+            }
         }
     }
 

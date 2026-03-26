@@ -10,10 +10,12 @@ class CloudKitService {
     
     private let container: CKContainer
     private let privateDatabase: CKDatabase
+    private let assetDirectoryURL: URL
     
     private init() {
         container = CKContainer.default()
         privateDatabase = container.privateCloudDatabase
+        assetDirectoryURL = Self.makeAssetDirectoryURL()
     }
     
     /// Save an image as a HEIF CKAsset
@@ -21,7 +23,7 @@ class CloudKitService {
     /// - Returns: The file name/identifier of the saved asset
     func saveImageAsset(_ image: UIImage) async throws -> String {
         let fileName = "\(UUID().uuidString).heic"
-        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        let fileURL = assetFileURL(for: fileName)
         let imageData = autoreleasepool {
             heifData(from: image, compressionQuality: 0.9)
         }
@@ -40,7 +42,7 @@ class CloudKitService {
     /// - Returns: The file name/identifier of the saved asset
     func saveImageDataAsset(_ data: Data, fileExtension: String = "heic") async throws -> String {
         let fileName = "\(UUID().uuidString).\(fileExtension)"
-        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        let fileURL = assetFileURL(for: fileName)
 
         try data.write(to: fileURL)
         return fileName
@@ -53,7 +55,7 @@ class CloudKitService {
         let sourceExtension = videoURL.pathExtension
         let fileExtension = sourceExtension.isEmpty ? "mov" : sourceExtension
         let fileName = "\(UUID().uuidString).\(fileExtension)"
-        let destinationURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        let destinationURL = assetFileURL(for: fileName)
         
         try FileManager.default.copyItem(at: videoURL, to: destinationURL)
         
@@ -99,10 +101,9 @@ class CloudKitService {
     /// - Parameter assetName: The asset file name
     /// - Returns: UIImage if successful
     func loadImageAsset(named assetName: String) async throws -> UIImage {
-        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(assetName)
+        let fileURL = try resolveAssetURL(named: assetName)
         
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let imageData = try? Data(contentsOf: fileURL),
+        guard let imageData = try? Data(contentsOf: fileURL),
               let image = UIImage(data: imageData) else {
             throw CloudKitError.assetNotFound
         }
@@ -114,26 +115,47 @@ class CloudKitService {
     /// - Parameter assetName: The asset file name
     /// - Returns: URL of the video file
     func loadVideoAsset(named assetName: String) async throws -> URL {
-        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(assetName)
-        
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw CloudKitError.assetNotFound
-        }
-        
-        return fileURL
+        try resolveAssetURL(named: assetName)
     }
 
     /// Load an asset URL by name
     /// - Parameter assetName: The asset file name
     /// - Returns: URL if successful
     func loadAssetURL(named assetName: String) throws -> URL {
-        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(assetName)
+        try resolveAssetURL(named: assetName)
+    }
 
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw CloudKitError.assetNotFound
+    private func assetFileURL(for assetName: String) -> URL {
+        assetDirectoryURL.appendingPathComponent(assetName)
+    }
+
+    private func resolveAssetURL(named assetName: String) throws -> URL {
+        let persistentURL = assetFileURL(for: assetName)
+        if FileManager.default.fileExists(atPath: persistentURL.path) {
+            return persistentURL
         }
 
-        return fileURL
+        let legacyTemporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(assetName)
+        if FileManager.default.fileExists(atPath: legacyTemporaryURL.path) {
+            return legacyTemporaryURL
+        }
+
+        throw CloudKitError.assetNotFound
+    }
+
+    private static func makeAssetDirectoryURL() -> URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "progress"
+        let directoryURL = baseURL
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Assets", isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: directoryURL.path) {
+            try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        }
+
+        return directoryURL
     }
 }
 

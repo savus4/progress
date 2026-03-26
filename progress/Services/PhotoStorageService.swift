@@ -3,6 +3,7 @@ import CoreData
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
+import CryptoKit
 import os
 
 struct ImportedPhotoPayload: Sendable {
@@ -17,7 +18,9 @@ struct ImportedPhotoPayload: Sendable {
 
 struct ImportedPhotoBatchResult: Sendable {
     let importedCount: Int
+    let duplicateCount: Int
     let failedCount: Int
+    let failureMessages: [String]
 }
 
 class PhotoStorageService {
@@ -128,22 +131,41 @@ class PhotoStorageService {
 
     func saveImportedPhotos(
         _ payloads: [ImportedPhotoPayload],
-        batchSize: Int = 12
+        batchSize: Int = 12,
+        context: NSManagedObjectContext? = nil
     ) async -> ImportedPhotoBatchResult {
         guard !payloads.isEmpty else {
-            return ImportedPhotoBatchResult(importedCount: 0, failedCount: 0)
+            return ImportedPhotoBatchResult(importedCount: 0, duplicateCount: 0, failedCount: 0, failureMessages: [])
         }
 
-        let importContext = PersistenceController.shared.makeBackgroundContext()
+        let importContext = context ?? PersistenceController.shared.makeBackgroundContext()
         let clock = ContinuousClock()
         let startedAt = clock.now
 
         var importedCount = 0
+        var duplicateCount = 0
         var failedCount = 0
         var pendingInsertCount = 0
+        var failureMessages: [String] = []
+        var knownFingerprints = await existingImportedPhotoFingerprints(context: importContext)
 
-        for payload in payloads {
+        func recordFailure(_ message: String) {
+            if failureMessages.count < 20 {
+                failureMessages.append(message)
+            }
+        }
+
+        for (index, payload) in payloads.enumerated() {
             do {
+                let fingerprint = try fingerprint(for: payload)
+                if knownFingerprints.contains(fingerprint) {
+                    duplicateCount += 1
+                    if let livePhotoVideoURL = payload.livePhotoVideoURL {
+                        try? FileManager.default.removeItem(at: livePhotoVideoURL)
+                    }
+                    continue
+                }
+
                 _ = try await makeImportedPhoto(
                     imageData: payload.imageData,
                     livePhotoVideoURL: payload.livePhotoVideoURL,
@@ -151,6 +173,7 @@ class PhotoStorageService {
                 )
                 importedCount += 1
                 pendingInsertCount += 1
+                knownFingerprints.insert(fingerprint)
 
                 if importContext.hasChanges, importedCount.isMultiple(of: max(batchSize, 1)) {
                     do {
@@ -159,7 +182,9 @@ class PhotoStorageService {
                         }
                         pendingInsertCount = 0
                     } catch {
-                        logger.error("Batch save failed: \(error.localizedDescription, privacy: .public)")
+                        let message = "batch-save payload=\(index) pending=\(pendingInsertCount): \(error.localizedDescription)"
+                        logger.error("\(message, privacy: .public)")
+                        recordFailure(message)
                         importedCount -= pendingInsertCount
                         failedCount += pendingInsertCount
                         pendingInsertCount = 0
@@ -169,8 +194,11 @@ class PhotoStorageService {
                     }
                 }
             } catch {
+                let stage = payload.livePhotoVideoURL == nil ? "persist-still" : "persist-live-photo"
+                let message = "\(stage) payload=\(index): \(error.localizedDescription)"
                 failedCount += 1
-                logger.error("Import failed for one photo: \(error.localizedDescription, privacy: .public)")
+                logger.error("\(message, privacy: .public)")
+                recordFailure(message)
             }
 
             if let livePhotoVideoURL = payload.livePhotoVideoURL {
@@ -186,7 +214,9 @@ class PhotoStorageService {
                 pendingInsertCount = 0
             }
         } catch {
-            logger.error("Final batch save failed: \(error.localizedDescription, privacy: .public)")
+            let message = "final-batch-save pending=\(pendingInsertCount): \(error.localizedDescription)"
+            logger.error("\(message, privacy: .public)")
+            recordFailure(message)
             importedCount -= pendingInsertCount
             failedCount += pendingInsertCount
             await importContext.perform {
@@ -196,10 +226,15 @@ class PhotoStorageService {
 
         let elapsed = startedAt.duration(to: clock.now)
         logger.log(
-            "Imported \(importedCount, privacy: .public) photos, failed \(failedCount, privacy: .public), elapsed \(String(describing: elapsed), privacy: .public)"
+            "Imported \(importedCount, privacy: .public) photos, skipped \(duplicateCount, privacy: .public) duplicates, failed \(failedCount, privacy: .public), elapsed \(String(describing: elapsed), privacy: .public)"
         )
 
-        return ImportedPhotoBatchResult(importedCount: importedCount, failedCount: failedCount)
+        return ImportedPhotoBatchResult(
+            importedCount: importedCount,
+            duplicateCount: duplicateCount,
+            failedCount: failedCount,
+            failureMessages: failureMessages
+        )
     }
 
     /// Load full resolution image
@@ -502,6 +537,45 @@ class PhotoStorageService {
         }
     }
 
+    private func existingImportedPhotoFingerprints(context: NSManagedObjectContext) async -> Set<String> {
+        let photos: [DailyPhoto]
+
+        do {
+            photos = try await context.perform {
+                let request = DailyPhoto.fetchRequest()
+                return try context.fetch(request)
+            }
+        } catch {
+            logger.error("fingerprint-fetch: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+
+        var fingerprints: Set<String> = []
+        fingerprints.reserveCapacity(photos.count)
+
+        for photo in photos {
+            do {
+                guard let imageAssetName = photo.fullImageAssetName else { continue }
+                let imageURL = try cloudKitService.loadAssetURL(named: imageAssetName)
+                let imageData = try Data(contentsOf: imageURL)
+
+                let videoURL: URL?
+                if let videoAssetName = photo.livePhotoVideoAssetName {
+                    videoURL = try cloudKitService.loadAssetURL(named: videoAssetName)
+                } else {
+                    videoURL = nil
+                }
+
+                let fingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: videoURL)
+                fingerprints.insert(fingerprint)
+            } catch {
+                logger.error("fingerprint-existing-photo id=\(photo.objectID.uriRepresentation().absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        return fingerprints
+    }
+
     private func dateRangePredicate(from startDate: Date, to endDate: Date) -> NSPredicate {
         let calendar = Calendar.current
         let normalizedStartDate = calendar.startOfDay(for: min(startDate, endDate))
@@ -554,6 +628,28 @@ class PhotoStorageService {
 
             return photo
         }
+    }
+
+    private func fingerprint(for payload: ImportedPhotoPayload) throws -> String {
+        try fingerprint(imageData: payload.imageData, livePhotoVideoURL: payload.livePhotoVideoURL)
+    }
+
+    private func fingerprint(imageData: Data, livePhotoVideoURL: URL?) throws -> String {
+        let imageDigest = SHA256.hash(data: imageData).hexString
+
+        if let livePhotoVideoURL {
+            let videoData = try Data(contentsOf: livePhotoVideoURL)
+            let videoDigest = SHA256.hash(data: videoData).hexString
+            return "\(imageDigest):\(videoDigest)"
+        }
+
+        return imageDigest
+    }
+}
+
+private extension SHA256.Digest {
+    var hexString: String {
+        map { String(format: "%02x", $0) }.joined()
     }
 }
 

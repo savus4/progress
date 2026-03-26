@@ -20,16 +20,12 @@ struct PhotoPagerView: View {
     @State private var shareStatusToastTask: Task<Void, Never>?
     @State private var showingDeleteConfirmation = false
     @State private var isDeleting = false
-    @GestureState private var metadataSheetDragOffset: CGFloat = 0
 
     private static let navigationDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.setLocalizedDateFormatFromTemplate("MMM d, HH:mm")
         return formatter
     }()
-
-    private let metadataSheetHeight: CGFloat = 360
-    private let metadataSheetPeekHeight: CGFloat = 44
 
     private var currentPhoto: DailyPhoto? {
         guard photos.indices.contains(selectedIndex) else { return nil }
@@ -47,7 +43,7 @@ struct PhotoPagerView: View {
                             ForEach(photos.indices, id: \.self) { index in
                                 PhotoPagerPageView(
                                     photo: photos[index],
-                                    bottomInset: metadataSheetPeekHeight + 12
+                                    bottomInset: 16
                                 )
                                 .frame(width: proxy.size.width, height: proxy.size.height)
                                 .tag(index)
@@ -58,9 +54,6 @@ struct PhotoPagerView: View {
                     .scrollTargetBehavior(.paging)
                     .scrollIndicators(.hidden)
                     .scrollPosition(id: $currentPage)
-
-                    metadataBottomSheet
-                        .frame(width: proxy.size.width)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -91,6 +84,13 @@ struct PhotoPagerView: View {
                                 Label("Share Photo + Video", systemImage: "livephoto")
                             }
                             .disabled(isPreparingShare || currentPhoto == nil)
+
+                            Button {
+                                showsMetadataPanel = true
+                            } label: {
+                                Label("Info", systemImage: "info.circle")
+                            }
+                            .disabled(currentPhoto == nil)
                         } label: {
                             if isPreparingShare {
                                 ProgressView()
@@ -142,6 +142,9 @@ struct PhotoPagerView: View {
                 }
             }
         }
+        .sheet(isPresented: $showsMetadataPanel) {
+            metadataSheet
+        }
         .onAppear {
             currentPage = selectedIndex
             Task {
@@ -151,7 +154,6 @@ struct PhotoPagerView: View {
         .onChange(of: currentPage) { _, newValue in
             guard let newValue else { return }
             selectedIndex = newValue
-            showsMetadataPanel = false
             Task {
                 await loadLocationName()
             }
@@ -199,126 +201,138 @@ struct PhotoPagerView: View {
     }
 
     @ViewBuilder
-    private var photoMetadataPanelContent: some View {
+    private var metadataSheet: some View {
         if let currentPhoto {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(currentPhoto.captureDate?.formatted(date: .complete, time: .shortened) ?? "Unknown date")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        metadataSummaryCard(for: currentPhoto)
 
-                    Text(locationName)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+                        if currentPhoto.latitude != 0 && currentPhoto.longitude != 0 {
+                            metadataMapCard(for: currentPhoto)
+                        }
 
-                if currentPhoto.latitude != 0 && currentPhoto.longitude != 0 {
-                    let coordinate = CLLocationCoordinate2D(latitude: currentPhoto.latitude, longitude: currentPhoto.longitude)
-                    Map(initialPosition: .region(MKCoordinateRegion(
-                        center: coordinate,
-                        span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-                    ))) {
-                        Marker("Photo Location", coordinate: coordinate)
+                        metadataDetailsCard(for: currentPhoto)
                     }
-                    .frame(height: 210)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .onTapGesture {
-                        openLocationInMaps()
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, 28)
+                }
+                .navigationTitle("Info")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            showsMetadataPanel = false
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
                     }
                 }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(.thickMaterial)
+            .presentationCornerRadius(28)
+        }
+    }
 
+    private func metadataSummaryCard(for photo: DailyPhoto) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(photo.captureDate?.formatted(date: .complete, time: .shortened) ?? "Unknown date")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            Label(locationName, systemImage: "mappin.and.ellipse")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Divider()
+            HStack(spacing: 12) {
+                metadataPill(title: "Photo", systemImage: "photo")
                 #if !targetEnvironment(simulator)
-                if currentPhoto.livePhotoVideoAssetName != nil {
-                    HStack(spacing: 8) {
-                        Image(systemName: "livephoto")
-                            .foregroundStyle(.secondary)
-                        Text("Live Photo")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                if photo.livePhotoVideoAssetName != nil {
+                    metadataPill(title: "Live Photo", systemImage: "livephoto")
                 }
                 #endif
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
-    private var metadataBottomSheet: some View {
-        let dragGesture = DragGesture(minimumDistance: 10)
-            .updating($metadataSheetDragOffset) { value, state, _ in
-                let proposedOffset = metadataSheetBaseOffset + value.translation.height
-                state = proposedOffset.clamped(to: metadataSheetOpenOffset...metadataSheetClosedOffset) - metadataSheetBaseOffset
-            }
-            .onEnded(handleMetadataSheetDragEnded)
+    private func metadataMapCard(for photo: DailyPhoto) -> some View {
+        let coordinate = CLLocationCoordinate2D(latitude: photo.latitude, longitude: photo.longitude)
 
-        return VStack(spacing: 0) {
-            VStack(spacing: 8) {
-                Capsule()
-                    .fill(.white.opacity(0.35))
-                    .frame(width: 38, height: 5)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Location")
+                .font(.headline)
+                .foregroundStyle(.primary)
 
-                HStack(spacing: 8) {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                        .font(.footnote)
-                    Text("Details")
-                        .font(.subheadline.weight(.medium))
-                }
-                .foregroundStyle(.secondary)
+            Map(initialPosition: .region(MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+            ))) {
+                Marker(locationName, coordinate: coordinate)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: metadataSheetPeekHeight)
-            .contentShape(Rectangle())
+            .frame(height: 240)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .onTapGesture {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    showsMetadataPanel.toggle()
-                }
+                openLocationInMaps()
             }
+        }
+        .padding(18)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
 
-            ScrollView {
-                photoMetadataPanelContent
-                    .padding(18)
-                    .padding(.bottom, 24)
-            }
-            .scrollIndicators(.hidden)
-            .scrollDisabled(!showsMetadataPanel)
-            .opacity(showsMetadataPanel ? 1 : 0.001)
+    private func metadataDetailsCard(for photo: DailyPhoto) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Details")
+                .font(.headline)
+                .foregroundStyle(.primary)
+
+            metadataDetailRow(
+                title: "Captured",
+                value: photo.captureDate?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown"
+            )
+            metadataDetailRow(
+                title: "Latitude",
+                value: photo.latitude == 0 && photo.longitude == 0 ? "Unavailable" : String(format: "%.5f", photo.latitude)
+            )
+            metadataDetailRow(
+                title: "Longitude",
+                value: photo.latitude == 0 && photo.longitude == 0 ? "Unavailable" : String(format: "%.5f", photo.longitude)
+            )
+            #if !targetEnvironment(simulator)
+            metadataDetailRow(
+                title: "Format",
+                value: photo.livePhotoVideoAssetName != nil ? "Live Photo" : "Still Photo"
+            )
+            #endif
         }
         .frame(maxWidth: .infinity)
-        .frame(height: metadataSheetHeight)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
-        )
-        .offset(y: metadataSheetOffset)
-        .gesture(dragGesture)
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: showsMetadataPanel)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
+        .padding(18)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
-    private var metadataSheetBaseOffset: CGFloat {
-        showsMetadataPanel ? metadataSheetOpenOffset : metadataSheetClosedOffset
+    private func metadataPill(title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.white.opacity(0.08), in: Capsule())
     }
 
-    private var metadataSheetClosedOffset: CGFloat {
-        metadataSheetHeight - metadataSheetPeekHeight
-    }
-
-    private var metadataSheetOpenOffset: CGFloat { 0 }
-
-    private var metadataSheetOffset: CGFloat {
-        (metadataSheetBaseOffset + metadataSheetDragOffset)
-            .clamped(to: metadataSheetOpenOffset...metadataSheetClosedOffset)
-    }
-
-    private func handleMetadataSheetDragEnded(_ value: DragGesture.Value) {
-        let projectedOffset = (metadataSheetBaseOffset + value.predictedEndTranslation.height)
-            .clamped(to: metadataSheetOpenOffset...metadataSheetClosedOffset)
-        let midpoint = (metadataSheetClosedOffset + metadataSheetOpenOffset) / 2
-
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            showsMetadataPanel = projectedOffset < midpoint
+    private func metadataDetailRow(title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 16)
+            Text(value)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.trailing)
         }
     }
 
