@@ -628,7 +628,6 @@ private struct PhotoPagerPageView: View {
 
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 8)
             .padding(.bottom, bottomInset)
         }
         .task(id: photo.objectID) {

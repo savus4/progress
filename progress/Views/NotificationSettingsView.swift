@@ -122,8 +122,8 @@ struct NotificationSettingsView: View {
 
                     if isImportingPhotos {
                         VStack(alignment: .leading, spacing: 8) {
-                            ProgressView(value: Double(importedCount + failedImportCount), total: Double(max(importTotalCount, 1)))
-                            Text("Importing \(importedCount + failedImportCount) of \(importTotalCount)")
+                            ProgressView(value: Double(processedImportCount), total: Double(max(importTotalCount, 1)))
+                            Text(importProgressDescription)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -280,6 +280,24 @@ struct NotificationSettingsView: View {
         }
 
         return "\(deleteRangeMatchCount) photo\(deleteRangeMatchCount == 1 ? "" : "s") will be deleted."
+    }
+
+    private var processedImportCount: Int {
+        importedCount + duplicateImportCount + failedImportCount
+    }
+
+    private var importProgressDescription: String {
+        let processed = processedImportCount
+        let importedSummary = importedCount == 0 ? nil : "\(importedCount) imported"
+        let duplicateSummary = duplicateImportCount == 0 ? nil : "\(duplicateImportCount) skipped"
+        let failureSummary = failedImportCount == 0 ? nil : "\(failedImportCount) failed"
+        let summaries = [importedSummary, duplicateSummary, failureSummary].compactMap(\.self)
+
+        if summaries.isEmpty {
+            return "Importing \(processed) of \(importTotalCount)"
+        }
+
+        return "Importing \(processed) of \(importTotalCount) (\(summaries.joined(separator: ", ")))"
     }
 
     private var deleteRangeConfirmationTitle: String {

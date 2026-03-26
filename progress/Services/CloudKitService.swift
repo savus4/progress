@@ -103,8 +103,7 @@ class CloudKitService {
     func loadImageAsset(named assetName: String) async throws -> UIImage {
         let fileURL = try resolveAssetURL(named: assetName)
         
-        guard let imageData = try? Data(contentsOf: fileURL),
-              let image = UIImage(data: imageData) else {
+        guard let image = UIImage(contentsOfFile: fileURL.path) else {
             throw CloudKitError.assetNotFound
         }
         
