@@ -12,8 +12,9 @@
         <attribute name="locationName" optional="YES" attributeType="String"/>
         <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="modifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="importFingerprint" optional="YES" attributeType="String"/>
     </entity>
     <elements>
-        <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="179"/>
+        <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="194"/>
     </elements>
 </model>

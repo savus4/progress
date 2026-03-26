@@ -327,8 +327,13 @@ struct PhotoGridView: View {
         guard !photos.isEmpty else { return }
         didSyncExifMetadata = true
 
+        let photosNeedingMetadataSync = photos.filter { photo in
+            photo.captureDate == nil || (photo.latitude == 0 && photo.longitude == 0)
+        }
+        guard !photosNeedingMetadataSync.isEmpty else { return }
+
         await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded(
-            photos: Array(photos),
+            photos: photosNeedingMetadataSync,
             context: viewContext
         )
     }

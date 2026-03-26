@@ -46,6 +46,9 @@ class PhotoStorageService {
         let fallbackCaptureDate = Date()
         let resolvedCaptureDate = extractedExifMetadata?.captureDate ?? fallbackCaptureDate
         let resolvedLocation = extractedExifMetadata?.location ?? location
+        let importFingerprint = try metadataSourceData.map { data in
+            try fingerprint(imageData: data, livePhotoVideoURL: livePhotoVideoURL)
+        }
 
         // Create the Core Data object
         let photo = DailyPhoto(context: context)
@@ -79,6 +82,7 @@ class PhotoStorageService {
             throw PhotoStorageError.missingImageData
         }
         photo.fullImageAssetName = imageAssetName
+        photo.setValue(importFingerprint, forKey: "importFingerprint")
         
         // Save Live Photo data if available
         if let livePhotoImageData = livePhotoImageData {
@@ -538,42 +542,20 @@ class PhotoStorageService {
     }
 
     private func existingImportedPhotoFingerprints(context: NSManagedObjectContext) async -> Set<String> {
-        let photos: [DailyPhoto]
-
         do {
-            photos = try await context.perform {
-                let request = DailyPhoto.fetchRequest()
-                return try context.fetch(request)
+            return try await context.perform {
+                let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
+                request.resultType = .dictionaryResultType
+                request.propertiesToFetch = ["importFingerprint"]
+
+                let rows = try context.fetch(request)
+                let fingerprints = rows.compactMap { $0["importFingerprint"] as? String }
+                return Set(fingerprints)
             }
         } catch {
             logger.error("fingerprint-fetch: \(error.localizedDescription, privacy: .public)")
             return []
         }
-
-        var fingerprints: Set<String> = []
-        fingerprints.reserveCapacity(photos.count)
-
-        for photo in photos {
-            do {
-                guard let imageAssetName = photo.fullImageAssetName else { continue }
-                let imageURL = try cloudKitService.loadAssetURL(named: imageAssetName)
-                let imageData = try Data(contentsOf: imageURL)
-
-                let videoURL: URL?
-                if let videoAssetName = photo.livePhotoVideoAssetName {
-                    videoURL = try cloudKitService.loadAssetURL(named: videoAssetName)
-                } else {
-                    videoURL = nil
-                }
-
-                let fingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: videoURL)
-                fingerprints.insert(fingerprint)
-            } catch {
-                logger.error("fingerprint-existing-photo id=\(photo.objectID.uriRepresentation().absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
-        return fingerprints
     }
 
     private func dateRangePredicate(from startDate: Date, to endDate: Date) -> NSPredicate {
@@ -594,6 +576,7 @@ class PhotoStorageService {
     ) async throws -> DailyPhoto {
         let exifMetadata = exifMetadata(from: imageData)
         let thumbnailData = thumbnailService.generateThumbnail(from: imageData)
+        let importFingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: livePhotoVideoURL)
         let imageExtension = imageFileExtension(for: imageData)
         let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
         let videoAssetName: String?
@@ -620,6 +603,7 @@ class PhotoStorageService {
 
             photo.thumbnailData = thumbnailData
             photo.fullImageAssetName = imageAssetName
+            photo.setValue(importFingerprint, forKey: "importFingerprint")
 
             if let videoAssetName {
                 photo.livePhotoImageAssetName = imageAssetName
