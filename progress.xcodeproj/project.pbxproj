@@ -289,12 +289,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = progress/progress.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = PRMMZ6KL9P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = progress/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Daily;
+				INFOPLIST_KEY_CFBundleDisplayName = "Clock It";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "We need access to your camera to capture daily photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We save your location with each photo to remember where it was taken.";
@@ -309,7 +309,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5;
+				MARKETING_VERSION = 0.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
 				PRODUCT_NAME = "progress-daily";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -329,12 +329,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = progress/progress.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = PRMMZ6KL9P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = progress/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Daily;
+				INFOPLIST_KEY_CFBundleDisplayName = "Clock It";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "We need access to your camera to capture daily photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We save your location with each photo to remember where it was taken.";
@@ -349,7 +349,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5;
+				MARKETING_VERSION = 0.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
 				PRODUCT_NAME = "progress-daily";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

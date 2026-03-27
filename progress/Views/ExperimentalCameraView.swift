@@ -6,11 +6,10 @@ import CoreLocation
 struct ExperimentalCameraView: View {
     @StateObject private var cameraService = CameraService()
     @StateObject private var locationService = LocationService()
+    @ObservedObject private var alignmentGuideStore = AlignmentGuideStore.shared
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
 
-    @AppStorage("eyeLinePosition") private var eyeLinePosition: Double = 0.35
-    @AppStorage("mouthLinePosition") private var mouthLinePosition: Double = 0.65
     let gridTargetFrameInGlobal: CGRect?
 
     @State private var isEditingGuides = false
@@ -43,8 +42,8 @@ struct ExperimentalCameraView: View {
                             .background(Color.black)
 
                         ExperimentalGuidesOverlay(
-                            eyeLinePosition: $eyeLinePosition,
-                            mouthLinePosition: $mouthLinePosition,
+                            eyeLinePosition: eyeLinePositionBinding,
+                            mouthLinePosition: mouthLinePositionBinding,
                             isEditingGuides: $isEditingGuides,
                             isInteractionDisabled: controlsDisabled
                         )
@@ -182,6 +181,20 @@ struct ExperimentalCameraView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: height)
+    }
+
+    private var eyeLinePositionBinding: Binding<Double> {
+        Binding(
+            get: { alignmentGuideStore.eyeLinePosition },
+            set: { alignmentGuideStore.eyeLinePosition = $0 }
+        )
+    }
+
+    private var mouthLinePositionBinding: Binding<Double> {
+        Binding(
+            get: { alignmentGuideStore.mouthLinePosition },
+            set: { alignmentGuideStore.mouthLinePosition = $0 }
+        )
     }
 
     private func capturePhoto() {
@@ -447,7 +460,7 @@ struct ExperimentalGuidesOverlay: View {
 
     private let minGap: Double = 0.05
     private let topMin: Double = 0.12
-    private let bottomMax: Double = 0.86
+    private let centerPosition: Double = 0.5
 
     var body: some View {
         GeometryReader { geometry in
@@ -460,45 +473,36 @@ struct ExperimentalGuidesOverlay: View {
 
                 faceLine(
                     y: eyeY,
-                    title: "Eyes",
-                    icon: "eye",
                     color: .white.opacity(0.85),
                     width: geometry.size.width,
-                    showsLabel: isEditingGuides
+                    label: "Eyes"
                 )
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
                                 guard isEditingGuides, !isInteractionDisabled else { return }
                                 let normalized = value.location.y / max(geometry.size.height, 1)
-                                eyeLinePosition = min(max(normalized, topMin), mouthLinePosition - minGap)
+                                updateGuides(fromEyeLine: normalized)
                             }
                     )
 
                 faceLine(
                     y: mouthY,
-                    title: "Mouth",
-                    icon: "mouth",
                     color: .white.opacity(0.85),
                     width: geometry.size.width,
-                    showsLabel: isEditingGuides
+                    label: "Mouth"
                 )
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
                                 guard isEditingGuides, !isInteractionDisabled else { return }
                                 let normalized = value.location.y / max(geometry.size.height, 1)
-                                mouthLinePosition = max(min(normalized, bottomMax), eyeLinePosition + minGap)
+                                updateGuides(fromMouthLine: normalized)
                             }
                     )
 
-                if isEditingGuides {
-                    draggableHandle(title: "Eyes", y: eyeY, color: .white.opacity(0.92))
-                    draggableHandle(title: "Mouth", y: mouthY, color: .white.opacity(0.92))
-                }
             }
             .padding(.horizontal, 18)
-            .padding(.vertical, 24)
         }
     }
 
@@ -511,11 +515,9 @@ struct ExperimentalGuidesOverlay: View {
 
     private func faceLine(
         y: CGFloat,
-        title: String,
-        icon: String,
         color: Color,
         width: CGFloat,
-        showsLabel: Bool
+        label: String
     ) -> some View {
         ZStack(alignment: .leading) {
             Rectangle()
@@ -528,39 +530,50 @@ struct ExperimentalGuidesOverlay: View {
                 )
                 .frame(width: width, height: 1.5)
 
-            if showsLabel {
-                HStack(spacing: 8) {
-                    Image(systemName: icon)
+            if isEditingGuides {
+                HStack(spacing: 6) {
+                    Image(systemName: label == "Eyes" ? "eye" : "mouth")
                         .font(.caption2)
-                    Text(title)
-                        .font(.caption)
+                    Text(label)
+                        .font(.caption2)
                         .fontWeight(.semibold)
+                    Image(systemName: "arrow.up.and.down")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.9))
                 }
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(.black.opacity(0.34), in: Capsule())
+                .background(.ultraThinMaterial, in: Capsule())
                 .overlay(
                     Capsule()
-                        .stroke(color.opacity(0.35), lineWidth: 1)
+                        .stroke(.white.opacity(0.8), lineWidth: 1)
                 )
+                .padding(.leading, 10)
+                .offset(y: -22)
             }
         }
+        .frame(width: width, alignment: .leading)
         .position(x: width / 2, y: y)
     }
 
-    private func draggableHandle(title: String, y: CGFloat, color: Color) -> some View {
-        HStack {
-            Spacer()
-            Text(title)
-                .font(.caption2)
-                .fontWeight(.bold)
-                .foregroundStyle(.black)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(color, in: Capsule())
-        }
-        .position(x: 140, y: y - 24)
+    private func updateGuides(fromEyeLine normalized: Double) {
+        let maximumOffset = centerPosition - topMin
+        let minimumOffset = minGap / 2
+        let offset = min(max(centerPosition - normalized, minimumOffset), maximumOffset)
+        applySymmetricOffset(offset)
+    }
+
+    private func updateGuides(fromMouthLine normalized: Double) {
+        let maximumOffset = centerPosition - topMin
+        let minimumOffset = minGap / 2
+        let offset = min(max(normalized - centerPosition, minimumOffset), maximumOffset)
+        applySymmetricOffset(offset)
+    }
+
+    private func applySymmetricOffset(_ offset: Double) {
+        eyeLinePosition = centerPosition - offset
+        mouthLinePosition = centerPosition + offset
     }
 }
 

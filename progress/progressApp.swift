@@ -43,6 +43,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        Task.detached(priority: .utility) {
+            let context = await MainActor.run {
+                PersistenceController.shared.makeBackgroundContext()
+            }
+            await PhotoStorageService.shared.purgeOrphanedAssets(context: context)
+        }
         return true
     }
 

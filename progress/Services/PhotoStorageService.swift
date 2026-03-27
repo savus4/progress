@@ -318,10 +318,10 @@ class PhotoStorageService {
     
     /// Delete a photo and its assets
     func deletePhoto(_ photo: DailyPhoto, context: NSManagedObjectContext) async throws {
-        // Note: In a production app, you'd want to clean up the actual files
-        // from CloudKit and temporary storage here
+        let assetNames = Set(assetNames(for: photo))
         context.delete(photo)
         try context.save()
+        deleteAssets(named: assetNames)
     }
 
     func photoCount(
@@ -345,12 +345,38 @@ class PhotoStorageService {
         let photos = try context.fetch(request)
         guard !photos.isEmpty else { return 0 }
 
+        let assetNames = Set(photos.flatMap(assetNames(for:)))
+
         for photo in photos {
             context.delete(photo)
         }
 
         try context.save()
+        deleteAssets(named: assetNames)
         return photos.count
+    }
+
+    func purgeOrphanedAssets(context: NSManagedObjectContext) async {
+        let referencedAssetNames: Set<String>
+
+        do {
+            referencedAssetNames = try await context.perform {
+                let request = DailyPhoto.fetchRequest()
+                let photos = try context.fetch(request)
+                return Set(photos.flatMap(self.assetNames(for:)))
+            }
+        } catch {
+            logger.error("orphan-asset-fetch: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        let storedAssetNames = cloudKitService.storedPersistentAssetNames()
+        let orphanedAssetNames = storedAssetNames.subtracting(referencedAssetNames)
+
+        guard !orphanedAssetNames.isEmpty else { return }
+
+        deleteAssets(named: orphanedAssetNames)
+        logger.log("Purged \(orphanedAssetNames.count, privacy: .public) orphaned asset files")
     }
 
     /// Export photos as Live Photo paired resources only (still image + companion movie).
@@ -538,6 +564,20 @@ class PhotoStorageService {
         let now = Date()
         for photo in photos {
             photo.modifiedAt = now
+        }
+    }
+
+    private func assetNames(for photo: DailyPhoto) -> [String] {
+        Set([
+            photo.fullImageAssetName,
+            photo.livePhotoImageAssetName,
+            photo.livePhotoVideoAssetName
+        ].compactMap { $0 }).map { $0 }
+    }
+
+    private func deleteAssets(named assetNames: Set<String>) {
+        for assetName in assetNames {
+            cloudKitService.deleteAsset(named: assetName)
         }
     }
 

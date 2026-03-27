@@ -124,6 +124,25 @@ class CloudKitService {
         try resolveAssetURL(named: assetName)
     }
 
+    func deleteAsset(named assetName: String) {
+        let persistentURL = assetFileURL(for: assetName)
+        if FileManager.default.fileExists(atPath: persistentURL.path) {
+            try? FileManager.default.removeItem(at: persistentURL)
+        }
+
+        let legacyTemporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(assetName)
+        if FileManager.default.fileExists(atPath: legacyTemporaryURL.path) {
+            try? FileManager.default.removeItem(at: legacyTemporaryURL)
+        }
+    }
+
+    func storedPersistentAssetNames() -> Set<String> {
+        guard let fileNames = try? FileManager.default.contentsOfDirectory(atPath: assetDirectoryURL.path) else {
+            return []
+        }
+        return Set(fileNames)
+    }
+
     private func assetFileURL(for assetName: String) -> URL {
         assetDirectoryURL.appendingPathComponent(assetName)
     }

@@ -201,7 +201,7 @@ struct PhotoGridView: View {
                     // Auto-scroll intentionally disabled during swipe selection.
                 }
             }
-            .navigationTitle("Progress")
+            .navigationTitle("Clock It")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !photos.isEmpty {
