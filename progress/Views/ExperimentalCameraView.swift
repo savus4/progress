@@ -615,6 +615,7 @@ struct ExperimentalGuidesOverlay: View {
         GeometryReader { geometry in
             let eyeY = geometry.size.height * eyeLinePosition
             let mouthY = geometry.size.height * mouthLinePosition
+            let horizontalLineWidth = max(geometry.size.width - 36, 0)
 
             ZStack {
                 guideLine(color: .white.opacity(0.28), width: 1.5)
@@ -623,7 +624,7 @@ struct ExperimentalGuidesOverlay: View {
                 faceLine(
                     y: eyeY,
                     color: .white.opacity(0.85),
-                    width: geometry.size.width,
+                    width: horizontalLineWidth,
                     label: "Eyes"
                 )
                     .gesture(
@@ -638,7 +639,7 @@ struct ExperimentalGuidesOverlay: View {
                 faceLine(
                     y: mouthY,
                     color: .white.opacity(0.85),
-                    width: geometry.size.width,
+                    width: horizontalLineWidth,
                     label: "Mouth"
                 )
                     .gesture(
