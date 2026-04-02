@@ -5,8 +5,11 @@
         <attribute name="captureDate" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="thumbnailData" optional="YES" attributeType="Binary" allowsExternalStorage="NO"/>
         <attribute name="fullImageAssetName" optional="YES" attributeType="String"/>
+        <attribute name="fullImageData" optional="YES" attributeType="Binary" allowsExternalStorage="YES"/>
         <attribute name="livePhotoImageAssetName" optional="YES" attributeType="String"/>
+        <attribute name="livePhotoImageData" optional="YES" attributeType="Binary" allowsExternalStorage="YES"/>
         <attribute name="livePhotoVideoAssetName" optional="YES" attributeType="String"/>
+        <attribute name="livePhotoVideoData" optional="YES" attributeType="Binary" allowsExternalStorage="YES"/>
         <attribute name="latitude" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
         <attribute name="longitude" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
         <attribute name="locationName" optional="YES" attributeType="String"/>
@@ -15,6 +18,6 @@
         <attribute name="importFingerprint" optional="YES" attributeType="String"/>
     </entity>
     <elements>
-        <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="194"/>
+        <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="239"/>
     </elements>
 </model>

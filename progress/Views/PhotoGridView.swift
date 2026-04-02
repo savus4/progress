@@ -124,6 +124,7 @@ struct PhotoGridView: View {
                         }
                         .scrollTargetLayout()
                         .padding(.top, 1)
+                        .padding(.bottom, 104)
                     }
                     .coordinateSpace(name: "photoGridSpace")
                     .overlay {
@@ -158,6 +159,12 @@ struct PhotoGridView: View {
                             ScrollMonthOverlay(date: visibleScrollDate)
                                 .padding(.top, 12)
                                 .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if !isSelectionMode {
+                            floatingCaptureButton
+                                .padding(.bottom, 20)
                         }
                     }
                     .simultaneousGesture(
@@ -320,6 +327,45 @@ struct PhotoGridView: View {
         guard notificationNavigation.cameraOpenRequestToken != nil else { return }
         showingCamera = true
         notificationNavigation.consumeCameraOpenRequest()
+    }
+
+    private var floatingCaptureButton: some View {
+        Button(action: { showingCamera = true }) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.96),
+                                Color.white.opacity(0.82)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+
+                Circle()
+                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+
+                Image(systemName: "camera.fill")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Color.black.opacity(0.82))
+            }
+            .frame(width: 68, height: 68)
+            .background(
+                Circle()
+                    .fill(Color.black.opacity(0.12))
+                    .blur(radius: 14)
+            )
+            .overlay(
+                Circle()
+                    .stroke(Color.white.opacity(0.55), lineWidth: 6)
+                    .padding(3)
+            )
+            .shadow(color: .black.opacity(0.18), radius: 18, y: 10)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Capture Photo")
     }
 
     private func syncPhotoMetadataFromExifIfNeeded() async {

@@ -10,6 +10,7 @@ import os
 struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
+    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
 
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -34,6 +35,11 @@ struct NotificationSettingsView: View {
     @State private var isDeletingPhotosInRange = false
     @State private var showingDeleteRangeConfirmation = false
     @State private var deleteRangeStatusMessage: String?
+    @State private var totalPhotoCount = 0
+    @State private var isLoadingTotalPhotoCount = false
+    @State private var isDeletingAllPhotos = false
+    @State private var showingDeleteAllConfirmation = false
+    @State private var deleteAllStatusMessage: String?
 
     private let notificationService = DailyReminderNotificationService.shared
     private let importLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
@@ -146,6 +152,22 @@ struct NotificationSettingsView: View {
                     }
                 }
 
+                Section("iCloud Sync") {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: cloudSyncMonitor.statusSymbolName)
+                            .font(.title3)
+                            .foregroundStyle(cloudSyncMonitor.isFailing ? .red : .secondary)
+                            .frame(width: 24)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(cloudSyncMonitor.statusTitle)
+                            Text(cloudSyncMonitor.statusDetail)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 Section("Delete Photos") {
                     DatePicker(
                         "From",
@@ -187,6 +209,35 @@ struct NotificationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                Section("Start Fresh") {
+                    if isLoadingTotalPhotoCount {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Counting all stored photos…")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.footnote)
+                    } else {
+                        Text(totalPhotoCount == 0
+                             ? "There are no stored photos to remove."
+                             : "Delete all \(totalPhotoCount) stored photo\(totalPhotoCount == 1 ? "" : "s") and remove their local assets.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("Delete All Photos", role: .destructive) {
+                        showingDeleteAllConfirmation = true
+                    }
+                    .disabled(totalPhotoCount == 0 || isDeletingAllPhotos || isLoadingTotalPhotoCount)
+
+                    if let deleteAllStatusMessage {
+                        Text(deleteAllStatusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -202,6 +253,7 @@ struct NotificationSettingsView: View {
                 reminderTimes = notificationService.loadReminderTimes()
                 authorizationStatus = await notificationService.authorizationStatus()
                 await configureDeleteRange()
+                await refreshTotalPhotoCount()
             }
             .onChange(of: selectedPhotoItems) { _, items in
                 guard !items.isEmpty else { return }
@@ -268,6 +320,19 @@ struct NotificationSettingsView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text(deleteRangeConfirmationMessage)
+            }
+            .alert(
+                "Delete all photos?",
+                isPresented: $showingDeleteAllConfirmation
+            ) {
+                Button("Delete All Photos", role: .destructive) {
+                    deleteAllPhotos()
+                }
+                .disabled(isDeletingAllPhotos || totalPhotoCount == 0)
+
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will permanently delete every photo from Clock It and remove the stored local assets on this device.")
             }
         }
     }
@@ -452,6 +517,20 @@ struct NotificationSettingsView: View {
         }
     }
 
+    @MainActor
+    private func refreshTotalPhotoCount() async {
+        isLoadingTotalPhotoCount = true
+        defer { isLoadingTotalPhotoCount = false }
+
+        do {
+            let request = DailyPhoto.fetchRequest()
+            totalPhotoCount = try viewContext.count(for: request)
+        } catch {
+            totalPhotoCount = 0
+            deleteAllStatusMessage = "Failed to count stored photos."
+        }
+    }
+
     private func deletePhotosInSelectedRange() {
         guard !isDeletingPhotosInRange else { return }
 
@@ -473,11 +552,35 @@ struct NotificationSettingsView: View {
                     ? "Deleted 1 photo."
                     : "Deleted \(deletedCount) photos."
                 refreshDeleteRangeMatchCount()
+                await refreshTotalPhotoCount()
             } catch {
                 deleteRangeStatusMessage = "Failed to delete matching photos."
             }
 
             isDeletingPhotosInRange = false
+        }
+    }
+
+    private func deleteAllPhotos() {
+        guard !isDeletingAllPhotos else { return }
+
+        isDeletingAllPhotos = true
+        deleteAllStatusMessage = nil
+
+        Task { @MainActor in
+            do {
+                let deletedCount = try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
+                await PhotoStorageService.shared.purgeOrphanedAssets(context: viewContext)
+                deleteAllStatusMessage = deletedCount == 1
+                    ? "Deleted 1 photo."
+                    : "Deleted \(deletedCount) photos."
+                await configureDeleteRange()
+                await refreshTotalPhotoCount()
+            } catch {
+                deleteAllStatusMessage = "Failed to delete all photos."
+            }
+
+            isDeletingAllPhotos = false
         }
     }
 

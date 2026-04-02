@@ -29,6 +29,13 @@ class PhotoStorageService {
     private let cloudKitService = CloudKitService.shared
     private let thumbnailService = ThumbnailService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
+
+    private enum PayloadKey {
+        static let fullImageData = "fullImageData"
+        static let livePhotoImageData = "livePhotoImageData"
+        static let livePhotoVideoData = "livePhotoVideoData"
+        static let importFingerprint = "importFingerprint"
+    }
     
     private init() {}
     
@@ -82,21 +89,30 @@ class PhotoStorageService {
             throw PhotoStorageError.missingImageData
         }
         photo.fullImageAssetName = imageAssetName
-        photo.setValue(importFingerprint, forKey: "importFingerprint")
+        photo.setValue(metadataSourceData, forKey: PayloadKey.fullImageData)
+        photo.setValue(importFingerprint, forKey: PayloadKey.importFingerprint)
         
         // Save Live Photo data if available
         if let livePhotoImageData = livePhotoImageData {
-            let liveImageExtension = imageFileExtension(for: livePhotoImageData)
-            let liveImageAssetName = try await cloudKitService.saveImageDataAsset(
-                livePhotoImageData,
-                fileExtension: liveImageExtension
-            )
-            photo.livePhotoImageAssetName = liveImageAssetName
+            if livePhotoImageData == metadataSourceData {
+                photo.livePhotoImageAssetName = imageAssetName
+                photo.setValue(nil, forKey: PayloadKey.livePhotoImageData)
+            } else {
+                let liveImageExtension = imageFileExtension(for: livePhotoImageData)
+                let liveImageAssetName = try await cloudKitService.saveImageDataAsset(
+                    livePhotoImageData,
+                    fileExtension: liveImageExtension
+                )
+                photo.livePhotoImageAssetName = liveImageAssetName
+                photo.setValue(livePhotoImageData, forKey: PayloadKey.livePhotoImageData)
+            }
         }
         
         if let livePhotoVideoURL = livePhotoVideoURL {
+            let videoData = try Data(contentsOf: livePhotoVideoURL)
             let videoAssetName = try await cloudKitService.saveVideoAsset(from: livePhotoVideoURL)
             photo.livePhotoVideoAssetName = videoAssetName
+            photo.setValue(videoData, forKey: PayloadKey.livePhotoVideoData)
         }
         
         try context.save()
@@ -246,8 +262,19 @@ class PhotoStorageService {
         guard let assetName = photo.fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
-        
-        return try await cloudKitService.loadImageAsset(named: assetName)
+
+        do {
+            return try await cloudKitService.loadImageAsset(named: assetName)
+        } catch CloudKitError.assetNotFound {
+            guard let imageData = payloadData(for: photo, key: PayloadKey.fullImageData) else {
+                throw CloudKitError.assetNotFound
+            }
+            _ = try cloudKitService.cacheAssetData(imageData, named: assetName)
+            guard let image = UIImage(data: imageData) else {
+                throw CloudKitError.assetNotFound
+            }
+            return image
+        }
     }
     
     /// Load Live Photo video URL
@@ -255,8 +282,15 @@ class PhotoStorageService {
         guard let assetName = photo.livePhotoVideoAssetName else {
             throw PhotoStorageError.noVideoAsset
         }
-        
-        return try await cloudKitService.loadVideoAsset(named: assetName)
+
+        do {
+            return try await cloudKitService.loadVideoAsset(named: assetName)
+        } catch CloudKitError.assetNotFound {
+            guard let videoData = payloadData(for: photo, key: PayloadKey.livePhotoVideoData) else {
+                throw CloudKitError.assetNotFound
+            }
+            return try cloudKitService.cacheAssetData(videoData, named: assetName)
+        }
     }
 
     @MainActor
@@ -311,8 +345,14 @@ class PhotoStorageService {
             throw PhotoStorageError.noLivePhotoAssets
         }
 
-        let imageURL = try cloudKitService.loadAssetURL(named: imageAssetName)
-        let videoURL = try cloudKitService.loadAssetURL(named: videoAssetName)
+        let imageURL = try resolveAssetURL(
+            named: imageAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoImageData) ?? payloadData(for: photo, key: PayloadKey.fullImageData)
+        )
+        let videoURL = try resolveAssetURL(
+            named: videoAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoVideoData)
+        )
         return (imageURL, videoURL)
     }
     
@@ -356,6 +396,22 @@ class PhotoStorageService {
         return photos.count
     }
 
+    func deleteAllPhotos(context: NSManagedObjectContext) async throws -> Int {
+        let request = DailyPhoto.fetchRequest()
+        let photos = try context.fetch(request)
+        guard !photos.isEmpty else { return 0 }
+
+        let assetNames = Set(photos.flatMap(assetNames(for:)))
+
+        for photo in photos {
+            context.delete(photo)
+        }
+
+        try context.save()
+        deleteAssets(named: assetNames)
+        return photos.count
+    }
+
     func purgeOrphanedAssets(context: NSManagedObjectContext) async {
         let referencedAssetNames: Set<String>
 
@@ -377,6 +433,120 @@ class PhotoStorageService {
 
         deleteAssets(named: orphanedAssetNames)
         logger.log("Purged \(orphanedAssetNames.count, privacy: .public) orphaned asset files")
+    }
+
+    func countPhotosMissingSyncedPayloads(context: NSManagedObjectContext) async -> Int {
+        do {
+            return try await context.perform {
+                let request = DailyPhoto.fetchRequest()
+                request.predicate = self.missingSyncedPayloadPredicate()
+                return try context.count(for: request)
+            }
+        } catch {
+            logger.error("payload-backfill-count: \(error.localizedDescription, privacy: .public)")
+            return 0
+        }
+    }
+
+    func backfillMissingSyncedPayloads(
+        context: NSManagedObjectContext,
+        batchSize: Int = 1,
+        maxPhotosPerRun: Int = 4,
+        progress: (@MainActor @Sendable (Int) -> Void)? = nil
+    ) async -> LegacyPayloadMigrationResult {
+        let photoObjectIDs: [NSManagedObjectID]
+
+        do {
+            photoObjectIDs = try await context.perform {
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
+                request.predicate = self.missingSyncedPayloadPredicate()
+                request.resultType = .managedObjectIDResultType
+                request.fetchLimit = max(maxPhotosPerRun, 1)
+                return try context.fetch(request)
+            }
+        } catch {
+            logger.error("payload-backfill-fetch: \(error.localizedDescription, privacy: .public)")
+            return LegacyPayloadMigrationResult(scannedCount: 0, migratedCount: 0, missingAssetCount: 0, failedCount: 1)
+        }
+
+        guard !photoObjectIDs.isEmpty else {
+            return LegacyPayloadMigrationResult(scannedCount: 0, migratedCount: 0, missingAssetCount: 0, failedCount: 0)
+        }
+
+        var migratedCount = 0
+        var missingAssetCount = 0
+        var failedCount = 0
+        var pendingSaves = 0
+        var remainingCount = photoObjectIDs.count
+
+        for photoObjectID in photoObjectIDs {
+            do {
+                let didUpdate = try await context.perform {
+                    guard let photoInContext = try context.existingObject(with: photoObjectID) as? DailyPhoto else {
+                        return false
+                    }
+                    return try self.backfillSyncedPayloadsIfNeeded(for: photoInContext)
+                }
+                if didUpdate {
+                    migratedCount += 1
+                    pendingSaves += 1
+                }
+            } catch CloudKitError.assetNotFound {
+                missingAssetCount += 1
+            } catch {
+                failedCount += 1
+                logger.error("payload-backfill-photo id=\(photoObjectID.uriRepresentation().absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+
+            remainingCount -= 1
+            if let progress {
+                await MainActor.run {
+                    progress(remainingCount)
+                }
+            }
+
+            if context.hasChanges, pendingSaves >= max(batchSize, 1) {
+                do {
+                    try await context.perform {
+                        try context.save()
+                        context.reset()
+                    }
+                    pendingSaves = 0
+                } catch {
+                    migratedCount -= pendingSaves
+                    failedCount += pendingSaves
+                    logger.error("payload-backfill-save: \(error.localizedDescription, privacy: .public)")
+                    await context.perform {
+                        context.rollback()
+                    }
+                    pendingSaves = 0
+                }
+            }
+        }
+
+        if context.hasChanges {
+            do {
+                try await context.perform {
+                    try context.save()
+                    context.reset()
+                }
+                pendingSaves = 0
+            } catch {
+                migratedCount -= pendingSaves
+                failedCount += pendingSaves
+                logger.error("payload-backfill-final-save: \(error.localizedDescription, privacy: .public)")
+                await context.perform {
+                    context.rollback()
+                }
+            }
+        }
+
+        return LegacyPayloadMigrationResult(
+            scannedCount: photoObjectIDs.count,
+            migratedCount: migratedCount,
+            missingAssetCount: missingAssetCount,
+            failedCount: failedCount
+        )
     }
 
     /// Export photos as Live Photo paired resources only (still image + companion movie).
@@ -413,7 +583,10 @@ class PhotoStorageService {
             guard let fullImageAssetName = photo.fullImageAssetName else {
                 throw PhotoStorageError.noImageAsset
             }
-            let stillURL = try cloudKitService.loadAssetURL(named: fullImageAssetName)
+            let stillURL = try resolveAssetURL(
+                named: fullImageAssetName,
+                fallbackData: payloadData(for: photo, key: PayloadKey.fullImageData)
+            )
             return [stillURL]
         }
     }
@@ -425,8 +598,14 @@ class PhotoStorageService {
             throw PhotoStorageError.noLivePhotoAssets
         }
 
-        let imageURL = try cloudKitService.loadAssetURL(named: livePhotoImageAssetName)
-        let videoURL = try cloudKitService.loadAssetURL(named: livePhotoVideoAssetName)
+        let imageURL = try resolveAssetURL(
+            named: livePhotoImageAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoImageData) ?? payloadData(for: photo, key: PayloadKey.fullImageData)
+        )
+        let videoURL = try resolveAssetURL(
+            named: livePhotoVideoAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoVideoData)
+        )
 
         return [imageURL, videoURL]
     }
@@ -436,7 +615,10 @@ class PhotoStorageService {
         guard let fullImageAssetName = photo.fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
-        return try cloudKitService.loadAssetURL(named: fullImageAssetName)
+        return try resolveAssetURL(
+            named: fullImageAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.fullImageData)
+        )
     }
 
     private func makeExportRootDirectory() throws -> URL {
@@ -581,6 +763,57 @@ class PhotoStorageService {
         }
     }
 
+    private func missingSyncedPayloadPredicate() -> NSPredicate {
+        NSPredicate(
+            format: """
+            (fullImageAssetName != nil AND fullImageData == nil)
+            OR (livePhotoImageAssetName != nil AND livePhotoImageAssetName != fullImageAssetName AND livePhotoImageData == nil)
+            OR (livePhotoVideoAssetName != nil AND livePhotoVideoData == nil)
+            """
+        )
+    }
+
+    private func backfillSyncedPayloadsIfNeeded(for photo: DailyPhoto) throws -> Bool {
+        var didUpdate = false
+        var cachedImageDataByName: [String: Data] = [:]
+
+        if let fullImageAssetName = photo.fullImageAssetName,
+           payloadData(for: photo, key: PayloadKey.fullImageData) == nil {
+            let imageData = try payloadDataForMigration(named: fullImageAssetName, cache: &cachedImageDataByName)
+            photo.setValue(imageData, forKey: PayloadKey.fullImageData)
+            didUpdate = true
+        }
+
+        if let livePhotoImageAssetName = photo.livePhotoImageAssetName,
+           livePhotoImageAssetName != photo.fullImageAssetName,
+           payloadData(for: photo, key: PayloadKey.livePhotoImageData) == nil {
+            let liveImageData = try payloadDataForMigration(named: livePhotoImageAssetName, cache: &cachedImageDataByName)
+            photo.setValue(liveImageData, forKey: PayloadKey.livePhotoImageData)
+            didUpdate = true
+        }
+
+        if let livePhotoVideoAssetName = photo.livePhotoVideoAssetName,
+           payloadData(for: photo, key: PayloadKey.livePhotoVideoData) == nil {
+            let videoURL = try cloudKitService.loadAssetURL(named: livePhotoVideoAssetName)
+            let videoData = try Data(contentsOf: videoURL)
+            photo.setValue(videoData, forKey: PayloadKey.livePhotoVideoData)
+            didUpdate = true
+        }
+
+        return didUpdate
+    }
+
+    private func payloadDataForMigration(named assetName: String, cache: inout [String: Data]) throws -> Data {
+        if let cached = cache[assetName] {
+            return cached
+        }
+
+        let assetURL = try cloudKitService.loadAssetURL(named: assetName)
+        let data = try Data(contentsOf: assetURL)
+        cache[assetName] = data
+        return data
+    }
+
     private func existingImportedPhotoFingerprints(context: NSManagedObjectContext) async -> Set<String> {
         do {
             return try await context.perform {
@@ -643,11 +876,17 @@ class PhotoStorageService {
 
             photo.thumbnailData = thumbnailData
             photo.fullImageAssetName = imageAssetName
-            photo.setValue(importFingerprint, forKey: "importFingerprint")
+            photo.setValue(imageData, forKey: PayloadKey.fullImageData)
+            photo.setValue(importFingerprint, forKey: PayloadKey.importFingerprint)
 
             if let videoAssetName {
                 photo.livePhotoImageAssetName = imageAssetName
                 photo.livePhotoVideoAssetName = videoAssetName
+                photo.setValue(nil, forKey: PayloadKey.livePhotoImageData)
+                if let livePhotoVideoURL,
+                   let videoData = try? Data(contentsOf: livePhotoVideoURL) {
+                    photo.setValue(videoData, forKey: PayloadKey.livePhotoVideoData)
+                }
             }
 
             return photo
@@ -668,6 +907,21 @@ class PhotoStorageService {
         }
 
         return imageDigest
+    }
+
+    private func payloadData(for photo: DailyPhoto, key: String) -> Data? {
+        photo.value(forKey: key) as? Data
+    }
+
+    private func resolveAssetURL(named assetName: String, fallbackData: Data?) throws -> URL {
+        do {
+            return try cloudKitService.loadAssetURL(named: assetName)
+        } catch CloudKitError.assetNotFound {
+            guard let fallbackData else {
+                throw CloudKitError.assetNotFound
+            }
+            return try cloudKitService.cacheAssetData(fallbackData, named: assetName)
+        }
     }
 }
 

@@ -204,6 +204,69 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
+    @Test("PhotoStorageService reuses the still asset for imported Live Photos")
+    func photoStorageReusesStillAssetForImportedLivePhoto() async throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .cyan)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
+        try Data([0x10, 0x20, 0x30]).write(to: videoURL)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+
+        let photo = try await PhotoStorageService.shared.saveImportedLivePhoto(
+            imageData: imageData,
+            videoURL: videoURL,
+            context: context
+        )
+
+        let fullImageAssetName = try #require(photo.fullImageAssetName)
+        let liveImageAssetName = try #require(photo.livePhotoImageAssetName)
+        let liveVideoAssetName = try #require(photo.livePhotoVideoAssetName)
+        defer {
+            CloudKitService.shared.deleteAsset(named: fullImageAssetName)
+            CloudKitService.shared.deleteAsset(named: liveVideoAssetName)
+        }
+
+        #expect(fullImageAssetName == liveImageAssetName)
+        #expect((photo.value(forKey: "livePhotoImageData") as? Data) == nil)
+        #expect((photo.value(forKey: "fullImageData") as? Data) == imageData)
+    }
+
+    @MainActor
+    @Test("PhotoStorageService reuses the still asset for captured Live Photos")
+    func photoStorageReusesStillAssetForCapturedLivePhoto() async throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .magenta)
+        let livePhotoImageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
+        try Data([0x40, 0x50, 0x60]).write(to: videoURL)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+
+        let photo = try await PhotoStorageService.shared.savePhoto(
+            image: image,
+            imageData: nil,
+            livePhotoImageData: livePhotoImageData,
+            livePhotoVideoURL: videoURL,
+            location: nil,
+            context: context
+        )
+
+        let fullImageAssetName = try #require(photo.fullImageAssetName)
+        let liveImageAssetName = try #require(photo.livePhotoImageAssetName)
+        let liveVideoAssetName = try #require(photo.livePhotoVideoAssetName)
+        defer {
+            CloudKitService.shared.deleteAsset(named: fullImageAssetName)
+            CloudKitService.shared.deleteAsset(named: liveVideoAssetName)
+        }
+
+        #expect(fullImageAssetName == liveImageAssetName)
+        #expect((photo.value(forKey: "livePhotoImageData") as? Data) == nil)
+        #expect((photo.value(forKey: "fullImageData") as? Data) == livePhotoImageData)
+    }
+
+    @MainActor
     @Test("PhotoStorageService skips exact duplicate imports and reports duplicate count")
     func photoStorageSkipsExactDuplicateImports() async throws {
         let persistence = PersistenceController(inMemory: true)
@@ -247,6 +310,57 @@ struct ProgressCoreFunctionalityTests {
         photo.fullImageAssetName = fileName
         let shareURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
         #expect(shareURL.lastPathComponent == fileName)
+    }
+
+    @MainActor
+    @Test("PhotoStorageService restores missing still asset from synced payload data")
+    func photoStorageRestoresMissingStillAssetFromSyncedPayload() throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let photo = DailyPhoto(context: context)
+        photo.id = UUID()
+
+        let fileName = "\(UUID().uuidString).jpg"
+        let imageData = Data([0x11, 0x22, 0x33, 0x44])
+        photo.fullImageAssetName = fileName
+        photo.setValue(imageData, forKey: "fullImageData")
+
+        let restoredURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
+        defer { try? FileManager.default.removeItem(at: restoredURL) }
+
+        #expect(restoredURL.lastPathComponent == fileName)
+        #expect(FileManager.default.fileExists(atPath: restoredURL.path))
+        let restoredData = try Data(contentsOf: restoredURL)
+        #expect(restoredData == imageData)
+    }
+
+    @MainActor
+    @Test("PhotoStorageService backfills missing synced payload data from local assets")
+    func photoStorageBackfillsMissingSyncedPayloadData() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let image = makeImage(size: CGSize(width: 400, height: 300), color: .brown)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+        let assetName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
+        let assetURL = try CloudKitService.shared.loadAssetURL(named: assetName)
+        defer { try? FileManager.default.removeItem(at: assetURL) }
+
+        let photo = DailyPhoto(context: context)
+        photo.id = UUID()
+        photo.fullImageAssetName = assetName
+        try context.save()
+
+        let beforeCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
+        #expect(beforeCount == 1)
+
+        let result = await PhotoStorageService.shared.backfillMissingSyncedPayloads(context: context)
+        #expect(result.scannedCount == 1)
+        #expect(result.migratedCount == 1)
+        #expect(result.missingAssetCount == 0)
+        #expect(result.failedCount == 0)
+        #expect((photo.value(forKey: "fullImageData") as? Data) == imageData)
+
+        let afterCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
+        #expect(afterCount == 0)
     }
 
     @MainActor

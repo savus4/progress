@@ -143,6 +143,14 @@ class CloudKitService {
         return Set(fileNames)
     }
 
+    func cacheAssetData(_ data: Data, named assetName: String) throws -> URL {
+        let fileURL = assetFileURL(for: assetName)
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            try data.write(to: fileURL, options: .atomic)
+        }
+        return fileURL
+    }
+
     private func assetFileURL(for assetName: String) -> URL {
         assetDirectoryURL.appendingPathComponent(assetName)
     }

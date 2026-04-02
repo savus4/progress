@@ -47,6 +47,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             let context = await MainActor.run {
                 PersistenceController.shared.makeBackgroundContext()
             }
+            let pendingBackfillCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
+            await MainActor.run {
+                CloudSyncMonitor.shared.beginMigration(totalPending: pendingBackfillCount)
+            }
+            if pendingBackfillCount > 0 {
+                let result = await PhotoStorageService.shared.backfillMissingSyncedPayloads(
+                    context: context
+                )
+                let remainingPendingCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
+                await MainActor.run {
+                    CloudSyncMonitor.shared.finishMigration(
+                        result: result,
+                        remainingPendingCount: remainingPendingCount
+                    )
+                }
+            }
             await PhotoStorageService.shared.purgeOrphanedAssets(context: context)
         }
         return true

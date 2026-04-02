@@ -4,6 +4,38 @@ import CoreData
 import CoreLocation
 
 struct ExperimentalCameraView: View {
+    private enum CaptureFeedbackStage {
+        case recordingLivePhoto
+        case processingCapture
+
+        var title: String {
+            switch self {
+            case .recordingLivePhoto:
+                return "Recording Live Photo"
+            case .processingCapture:
+                return "Processing Capture"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .recordingLivePhoto:
+                return "Hold steady for a moment."
+            case .processingCapture:
+                return "Preparing your preview."
+            }
+        }
+
+        var symbolName: String {
+            switch self {
+            case .recordingLivePhoto:
+                return "livephoto"
+            case .processingCapture:
+                return "hourglass"
+            }
+        }
+    }
+
     @StateObject private var cameraService = CameraService()
     @StateObject private var locationService = LocationService()
     @ObservedObject private var alignmentGuideStore = AlignmentGuideStore.shared
@@ -18,12 +50,15 @@ struct ExperimentalCameraView: View {
     @State private var pendingCaptureImage: UIImage?
     @State private var pendingCaptureImageData: Data?
     @State private var pendingLivePhotoImageData: Data?
+    @State private var pendingLivePhotoImageURL: URL?
     @State private var pendingLivePhotoVideoURL: URL?
     @State private var isCapturing = false
     @State private var isAnimatingPreviewToGrid = false
+    @State private var captureFeedbackStage: CaptureFeedbackStage?
+    @State private var visiblePreviewRect: CGRect = .zero
 
     private var controlsDisabled: Bool {
-        isCapturing || isSaving || showingCapturePreview
+        isCapturing || isSaving || showingCapturePreview || captureFeedbackStage != nil
     }
 
     var body: some View {
@@ -32,11 +67,22 @@ struct ExperimentalCameraView: View {
             let barContentHeight: CGFloat = 116
             let bottomBarHeight = barContentHeight + bottomInset
             let previewHeight = max(geometry.size.height - bottomBarHeight, 0)
+            let previewWidth = geometry.size.width
+            let fallbackPreviewHeight = min(
+                previewHeight,
+                previewWidth / max(cameraService.sensorAspectRatio, 0.0001)
+            )
+            let actualPreviewWidth = visiblePreviewRect == .zero ? previewWidth : visiblePreviewRect.width
+            let actualPreviewHeight = visiblePreviewRect == .zero ? fallbackPreviewHeight : visiblePreviewRect.height
 
             ZStack(alignment: .bottom) {
                 VStack(spacing: 0) {
                     ZStack {
-                        ExperimentalCameraPreviewView(session: cameraService.session)
+                        ExperimentalCameraPreviewView(
+                            session: cameraService.session,
+                            sensorAspectRatio: cameraService.sensorAspectRatio,
+                            visiblePreviewRect: $visiblePreviewRect
+                        )
                             .frame(maxWidth: .infinity)
                             .frame(height: previewHeight)
                             .background(Color.black)
@@ -47,9 +93,16 @@ struct ExperimentalCameraView: View {
                             isEditingGuides: $isEditingGuides,
                             isInteractionDisabled: controlsDisabled
                         )
-                        .frame(height: previewHeight)
+                        .frame(width: actualPreviewWidth, height: actualPreviewHeight)
                         .allowsHitTesting(isEditingGuides && !controlsDisabled)
+
+                        if let captureFeedbackStage, !showingCapturePreview {
+                            captureStatusOverlay(for: captureFeedbackStage)
+                        }
                     }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: previewHeight)
+                    .background(Color.black)
                     .contentShape(Rectangle())
 
                     experimentalControlBar(bottomInset: bottomInset, height: bottomBarHeight)
@@ -59,6 +112,8 @@ struct ExperimentalCameraView: View {
                 if showingCapturePreview, let pendingCaptureImage {
                     ExperimentalCapturePreviewOverlay(
                         image: pendingCaptureImage,
+                        livePhotoImageURL: pendingLivePhotoImageURL,
+                        livePhotoVideoURL: pendingLivePhotoVideoURL,
                         isSaving: isSaving,
                         isAnimatingToGrid: isAnimatingPreviewToGrid,
                         targetFrameInGlobal: gridTargetFrameInGlobal,
@@ -85,7 +140,7 @@ struct ExperimentalCameraView: View {
                     }
             )
         }
-        .ignoresSafeArea()
+        .ignoresSafeArea(edges: .top)
         .task {
             await cameraService.checkAuthorization()
             if cameraService.isAuthorized {
@@ -99,10 +154,12 @@ struct ExperimentalCameraView: View {
             cameraService.stopSession()
         }
         .onChange(of: cameraService.captureCompleted) { _, _ in
+            captureFeedbackStage = nil
             if let capture = cameraService.livePhotoCapture {
                 pendingCaptureImage = capture.image
                 pendingCaptureImageData = capture.imageData
                 pendingLivePhotoImageData = capture.imageData
+                pendingLivePhotoImageURL = makeTemporaryPreviewImageURL(from: capture.imageData)
                 pendingLivePhotoVideoURL = capture.videoURL
                 isAnimatingPreviewToGrid = false
                 withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
@@ -113,6 +170,7 @@ struct ExperimentalCameraView: View {
                 pendingCaptureImage = image
                 pendingCaptureImageData = cameraService.capturedImageData
                 pendingLivePhotoImageData = nil
+                pendingLivePhotoImageURL = nil
                 pendingLivePhotoVideoURL = nil
                 isAnimatingPreviewToGrid = false
                 withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
@@ -123,6 +181,9 @@ struct ExperimentalCameraView: View {
         }
         .onChange(of: cameraService.captureFinished) { _, _ in
             isCapturing = false
+            if !showingCapturePreview {
+                captureFeedbackStage = .processingCapture
+            }
         }
     }
 
@@ -131,53 +192,65 @@ struct ExperimentalCameraView: View {
         ZStack {
             Color.black
 
-            HStack(spacing: 20) {
-                Button(action: { dismiss() }) {
-                    Image(systemName: "xmark")
-                        .font(.title2)
-                        .foregroundStyle(.white)
-                        .frame(width: 48, height: 48)
-                        .background(Color.white.opacity(0.08), in: Circle())
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    HStack {
+                        Button(action: { dismiss() }) {
+                            Image(systemName: "xmark")
+                                .font(.title2)
+                                .foregroundStyle(.white)
+                                .frame(width: 48, height: 48)
+                                .background(Color.white.opacity(0.08), in: Circle())
+                        }
+                        .disabled(controlsDisabled)
+
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    Button(action: capturePhoto) {
+                        ZStack {
+                            Circle()
+                                .fill(.white)
+                                .frame(width: 72, height: 72)
+
+                            Circle()
+                                .stroke(.white.opacity(0.96), lineWidth: 5)
+                                .frame(width: 88, height: 88)
+                        }
+                    }
+                    .accessibilityIdentifier("experimentalCameraShutter")
+                    .disabled(controlsDisabled)
+                    .frame(width: 120)
+
+                    HStack {
+                        Spacer(minLength: 0)
+
+                        Button(action: { isEditingGuides.toggle() }) {
+                            VStack(spacing: 4) {
+                                Image(systemName: isEditingGuides ? "slider.horizontal.3" : "eye")
+                                    .font(.title3)
+                                Text(isEditingGuides ? "Done" : "Guides")
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(width: 64, height: 64)
+                            .background(
+                                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                    .fill(isEditingGuides ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
+                            )
+                        }
+                        .disabled(controlsDisabled)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .disabled(controlsDisabled)
+                .padding(.horizontal, 24)
+                .frame(height: 116)
 
                 Spacer()
-
-                Button(action: capturePhoto) {
-                    ZStack {
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 72, height: 72)
-
-                        Circle()
-                            .stroke(.white.opacity(0.96), lineWidth: 5)
-                            .frame(width: 88, height: 88)
-                    }
-                }
-                .accessibilityIdentifier("experimentalCameraShutter")
-                .disabled(controlsDisabled)
-
-                Spacer()
-
-                Button(action: { isEditingGuides.toggle() }) {
-                    VStack(spacing: 4) {
-                        Image(systemName: isEditingGuides ? "slider.horizontal.3" : "eye")
-                            .font(.title3)
-                        Text(isEditingGuides ? "Done" : "Guides")
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(width: 64, height: 64)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(isEditingGuides ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
-                    )
-                }
-                .disabled(controlsDisabled)
+                    .frame(height: bottomInset)
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, max(bottomInset, 14))
         }
         .frame(maxWidth: .infinity)
         .frame(height: height)
@@ -200,6 +273,11 @@ struct ExperimentalCameraView: View {
     private func capturePhoto() {
         guard !showingCapturePreview else { return }
         isCapturing = true
+        #if targetEnvironment(simulator)
+        captureFeedbackStage = .processingCapture
+        #else
+        captureFeedbackStage = .recordingLivePhoto
+        #endif
         let captureLocation = locationService.currentLocation
         #if targetEnvironment(simulator)
         cameraService.capturePhoto(withLivePhoto: false, location: captureLocation)
@@ -210,9 +288,14 @@ struct ExperimentalCameraView: View {
 
     private func retakeCapture() {
         isAnimatingPreviewToGrid = false
+        captureFeedbackStage = nil
         pendingCaptureImage = nil
         pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
+        if let pendingLivePhotoImageURL {
+            try? FileManager.default.removeItem(at: pendingLivePhotoImageURL)
+        }
+        pendingLivePhotoImageURL = nil
         pendingLivePhotoVideoURL = nil
         withAnimation(.easeInOut(duration: 0.22)) {
             showingCapturePreview = false
@@ -227,6 +310,43 @@ struct ExperimentalCameraView: View {
 
     private func dismissCapturePreview() {
         retakeCapture()
+    }
+
+    @ViewBuilder
+    private func captureStatusOverlay(for stage: CaptureFeedbackStage) -> some View {
+        VStack {
+            Spacer()
+
+            HStack(spacing: 12) {
+                Image(systemName: stage.symbolName)
+                    .font(.title3)
+                    .symbolEffect(.pulse, options: .repeating)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stage.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(stage.detail)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+
+                Spacer()
+
+                ProgressView()
+                    .tint(.white)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(.white.opacity(0.1), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+            .padding(.bottom, 144)
+        }
+        .transition(.opacity)
     }
 
     private func confirmSave() {
@@ -247,6 +367,10 @@ struct ExperimentalCameraView: View {
                     pendingCaptureImage = nil
                     pendingCaptureImageData = nil
                     pendingLivePhotoImageData = nil
+                    if let pendingLivePhotoImageURL {
+                        try? FileManager.default.removeItem(at: pendingLivePhotoImageURL)
+                    }
+                    pendingLivePhotoImageURL = nil
                     pendingLivePhotoVideoURL = nil
                     isAnimatingPreviewToGrid = false
                     dismiss()
@@ -286,10 +410,25 @@ struct ExperimentalCameraView: View {
             print("Error saving photo: \(error.localizedDescription)")
         }
     }
+
+    private func makeTemporaryPreviewImageURL(from imageData: Data) -> URL? {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("jpg")
+
+        do {
+            try imageData.write(to: fileURL, options: .atomic)
+            return fileURL
+        } catch {
+            return nil
+        }
+    }
 }
 
 struct ExperimentalCapturePreviewOverlay: View {
     let image: UIImage
+    let livePhotoImageURL: URL?
+    let livePhotoVideoURL: URL?
     let isSaving: Bool
     let isAnimatingToGrid: Bool
     let targetFrameInGlobal: CGRect?
@@ -344,29 +483,39 @@ struct ExperimentalCapturePreviewOverlay: View {
                             .font(.headline)
                             .foregroundStyle(.white.opacity(0.92))
 
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                            )
-                            .padding(.horizontal, 20)
-                            .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
-                            .background {
-                                GeometryReader { proxy in
-                                    Color.clear
-                                        .preference(
-                                            key: PreviewImageFramePreferenceKey.self,
-                                            value: proxy.frame(in: .named("capturePreviewOverlay"))
-                                        )
+                        SnapBackZoomContainer {
+                            Group {
+                                if let livePhotoImageURL, let livePhotoVideoURL {
+                                    LivePhotoContainerView(
+                                        imageURL: livePhotoImageURL,
+                                        videoURL: livePhotoVideoURL,
+                                        fallbackImage: image
+                                    )
+                                } else {
+                                    Image(uiImage: image)
+                                        .resizable()
+                                        .scaledToFit()
                                 }
                             }
-
-                        Text("Swipe down to dismiss")
-                            .font(.footnote)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        .aspectRatio(image.size, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                        .padding(.horizontal, 20)
+                        .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
+                        .background {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .preference(
+                                        key: PreviewImageFramePreferenceKey.self,
+                                        value: proxy.frame(in: .named("capturePreviewOverlay"))
+                                    )
+                            }
+                        }
 
                         HStack(spacing: 14) {
                             Button(action: onRetake) {
@@ -469,7 +618,7 @@ struct ExperimentalGuidesOverlay: View {
 
             ZStack {
                 guideLine(color: .white.opacity(0.28), width: 1.5)
-                    .frame(maxHeight: .infinity)
+                    .frame(height: geometry.size.height)
 
                 faceLine(
                     y: eyeY,
@@ -579,11 +728,19 @@ struct ExperimentalGuidesOverlay: View {
 
 struct ExperimentalCameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
+    let sensorAspectRatio: CGFloat
+    @Binding var visiblePreviewRect: CGRect
 
     func makeUIView(context: Context) -> PreviewContainerView {
         let view = PreviewContainerView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspect
+        view.sensorAspectRatio = sensorAspectRatio
+        view.onVisiblePreviewRectChange = { rect in
+            DispatchQueue.main.async {
+                visiblePreviewRect = rect
+            }
+        }
 
         if let connection = view.previewLayer.connection,
            connection.isVideoRotationAngleSupported(90) {
@@ -595,6 +752,12 @@ struct ExperimentalCameraPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: PreviewContainerView, context: Context) {
         uiView.previewLayer.session = session
+        uiView.sensorAspectRatio = sensorAspectRatio
+        uiView.onVisiblePreviewRectChange = { rect in
+            DispatchQueue.main.async {
+                visiblePreviewRect = rect
+            }
+        }
 
         if let connection = uiView.previewLayer.connection,
            connection.isVideoRotationAngleSupported(90) {
@@ -604,6 +767,9 @@ struct ExperimentalCameraPreviewView: UIViewRepresentable {
 }
 
 final class PreviewContainerView: UIView {
+    var onVisiblePreviewRectChange: ((CGRect) -> Void)?
+    var sensorAspectRatio: CGFloat = 4.0 / 3.0
+
     override class var layerClass: AnyClass {
         AVCaptureVideoPreviewLayer.self
     }
@@ -618,6 +784,19 @@ final class PreviewContainerView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let safeAspectRatio = max(sensorAspectRatio, 0.0001)
+        let fittedHeight = min(bounds.height, bounds.width / safeAspectRatio)
+        let visibleRect = CGRect(
+            x: 0,
+            y: (bounds.height - fittedHeight) / 2,
+            width: bounds.width,
+            height: fittedHeight
+        )
+        onVisiblePreviewRectChange?(visibleRect.integral)
     }
 
     @available(*, unavailable)

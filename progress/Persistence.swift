@@ -102,4 +102,9 @@ struct PersistenceController {
         context.automaticallyMergesChangesFromParent = true
         return context
     }
+
+    @MainActor
+    var cloudSyncMonitor: CloudSyncMonitor {
+        CloudSyncMonitor.shared
+    }
 }
