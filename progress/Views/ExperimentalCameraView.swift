@@ -56,9 +56,15 @@ struct ExperimentalCameraView: View {
     @State private var isAnimatingPreviewToGrid = false
     @State private var captureFeedbackStage: CaptureFeedbackStage?
     @State private var visiblePreviewRect: CGRect = .zero
+    @State private var draftEyeLinePosition: Double?
+    @State private var draftMouthLinePosition: Double?
+
+    private var guideInteractionDisabled: Bool {
+        isCapturing || isSaving || showingCapturePreview || captureFeedbackStage != nil
+    }
 
     private var controlsDisabled: Bool {
-        isCapturing || isSaving || showingCapturePreview || captureFeedbackStage != nil
+        guideInteractionDisabled || isEditingGuides
     }
 
     var body: some View {
@@ -91,10 +97,10 @@ struct ExperimentalCameraView: View {
                             eyeLinePosition: eyeLinePositionBinding,
                             mouthLinePosition: mouthLinePositionBinding,
                             isEditingGuides: $isEditingGuides,
-                            isInteractionDisabled: controlsDisabled
+                            isInteractionDisabled: guideInteractionDisabled
                         )
                         .frame(width: actualPreviewWidth, height: actualPreviewHeight)
-                        .allowsHitTesting(isEditingGuides && !controlsDisabled)
+                        .allowsHitTesting(isEditingGuides && !guideInteractionDisabled)
 
                         if let captureFeedbackStage, !showingCapturePreview {
                             captureStatusOverlay(for: captureFeedbackStage)
@@ -194,59 +200,103 @@ struct ExperimentalCameraView: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    HStack {
-                        Button(action: { dismiss() }) {
-                            Image(systemName: "xmark")
-                                .font(.title2)
-                                .foregroundStyle(.white)
-                                .frame(width: 48, height: 48)
-                                .background(Color.white.opacity(0.08), in: Circle())
-                        }
-                        .disabled(controlsDisabled)
-
+                    if isEditingGuides {
                         Spacer(minLength: 0)
-                    }
-                    .frame(maxWidth: .infinity)
-
-                    Button(action: capturePhoto) {
-                        ZStack {
-                            Circle()
-                                .fill(.white)
-                                .frame(width: 72, height: 72)
-
-                            Circle()
-                                .stroke(.white.opacity(0.96), lineWidth: 5)
-                                .frame(width: 88, height: 88)
-                        }
-                    }
-                    .accessibilityIdentifier("experimentalCameraShutter")
-                    .disabled(controlsDisabled)
-                    .frame(width: 120)
-
-                    HStack {
-                        Spacer(minLength: 0)
-
-                        Button(action: { isEditingGuides.toggle() }) {
-                            VStack(spacing: 4) {
-                                Image(systemName: isEditingGuides ? "slider.horizontal.3" : "eye")
-                                    .font(.title3)
-                                Text(isEditingGuides ? "Done" : "Guides")
-                                    .font(.caption2)
-                                    .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        HStack {
+                            Button(action: { dismiss() }) {
+                                Image(systemName: "xmark")
+                                    .font(.title2)
+                                    .foregroundStyle(.white)
+                                    .frame(width: 48, height: 48)
+                                    .background(Color.white.opacity(0.08), in: Circle())
                             }
-                            .foregroundStyle(.white)
-                            .frame(width: 64, height: 64)
-                            .background(
-                                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                    .fill(isEditingGuides ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
-                            )
+                            .disabled(controlsDisabled)
+
+                            Spacer(minLength: 0)
                         }
+                        .frame(maxWidth: .infinity)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+
+                        Button(action: capturePhoto) {
+                            ZStack {
+                                Circle()
+                                    .fill(.white)
+                                    .frame(width: 72, height: 72)
+
+                                Circle()
+                                    .stroke(.white.opacity(0.96), lineWidth: 5)
+                                    .frame(width: 88, height: 88)
+                            }
+                        }
+                        .accessibilityIdentifier("experimentalCameraShutter")
                         .disabled(controlsDisabled)
+                        .frame(width: 120)
+                        .transition(.scale(scale: 0.88).combined(with: .opacity))
+                    }
+
+                    HStack {
+                        Spacer(minLength: 0)
+
+                        if isEditingGuides {
+                            HStack(spacing: 10) {
+                                Button(action: cancelGuideEditing) {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: "xmark")
+                                            .font(.title3)
+                                        Text("Cancel")
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                    }
+                                    .foregroundStyle(.white)
+                                    .frame(width: 64, height: 64)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                            .fill(Color.white.opacity(0.08))
+                                    )
+                                }
+
+                                Button(action: commitGuideEditing) {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: "checkmark")
+                                            .font(.title3)
+                                        Text("Done")
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                    }
+                                    .foregroundStyle(.white)
+                                    .frame(width: 64, height: 64)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                            .fill(Color.white.opacity(0.18))
+                                    )
+                                }
+                            }
+                        } else {
+                            Button(action: beginGuideEditing) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "eye")
+                                        .font(.title3)
+                                    Text("Guides")
+                                        .font(.caption2)
+                                        .fontWeight(.semibold)
+                                }
+                                .foregroundStyle(.white)
+                                .frame(width: 64, height: 64)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                        .fill(Color.white.opacity(0.08))
+                                )
+                            }
+                            .disabled(guideInteractionDisabled)
+                        }
                     }
                     .frame(maxWidth: .infinity)
                 }
                 .padding(.horizontal, 24)
                 .frame(height: 116)
+                .animation(.easeInOut(duration: 0.18), value: isEditingGuides)
 
                 Spacer()
                     .frame(height: bottomInset)
@@ -258,16 +308,52 @@ struct ExperimentalCameraView: View {
 
     private var eyeLinePositionBinding: Binding<Double> {
         Binding(
-            get: { alignmentGuideStore.eyeLinePosition },
-            set: { alignmentGuideStore.eyeLinePosition = $0 }
+            get: { draftEyeLinePosition ?? alignmentGuideStore.eyeLinePosition },
+            set: {
+                if isEditingGuides {
+                    draftEyeLinePosition = $0
+                } else {
+                    alignmentGuideStore.eyeLinePosition = $0
+                }
+            }
         )
     }
 
     private var mouthLinePositionBinding: Binding<Double> {
         Binding(
-            get: { alignmentGuideStore.mouthLinePosition },
-            set: { alignmentGuideStore.mouthLinePosition = $0 }
+            get: { draftMouthLinePosition ?? alignmentGuideStore.mouthLinePosition },
+            set: {
+                if isEditingGuides {
+                    draftMouthLinePosition = $0
+                } else {
+                    alignmentGuideStore.mouthLinePosition = $0
+                }
+            }
         )
+    }
+
+    private func beginGuideEditing() {
+        draftEyeLinePosition = alignmentGuideStore.eyeLinePosition
+        draftMouthLinePosition = alignmentGuideStore.mouthLinePosition
+        isEditingGuides = true
+    }
+
+    private func cancelGuideEditing() {
+        draftEyeLinePosition = nil
+        draftMouthLinePosition = nil
+        isEditingGuides = false
+    }
+
+    private func commitGuideEditing() {
+        if let draftEyeLinePosition {
+            alignmentGuideStore.eyeLinePosition = draftEyeLinePosition
+        }
+        if let draftMouthLinePosition {
+            alignmentGuideStore.mouthLinePosition = draftMouthLinePosition
+        }
+        draftEyeLinePosition = nil
+        draftMouthLinePosition = nil
+        isEditingGuides = false
     }
 
     private func capturePhoto() {
