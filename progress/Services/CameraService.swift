@@ -14,7 +14,7 @@ class CameraService: NSObject, ObservableObject {
     @Published var livePhotoCapture: (image: UIImage, imageData: Data, videoURL: URL)?
     @Published var captureCompleted: Int = 0
     @Published var captureFinished: Int = 0
-    @Published var sensorAspectRatio: CGFloat = 4.0 / 3.0 // default fallback
+    @Published var sensorAspectRatio: CGFloat
     
     private let photoOutput = AVCapturePhotoOutput()
     private var livePhotoCompanionMovieURL: URL?
@@ -23,6 +23,7 @@ class CameraService: NSObject, ObservableObject {
     private var capturedStillImage: UIImage?
     
     override init() {
+        self.sensorAspectRatio = Self.frontCameraPortraitAspectRatio()
         super.init()
     }
     
@@ -83,6 +84,20 @@ class CameraService: NSObject, ObservableObject {
         }
         
         session.commitConfiguration()
+    }
+
+    private static func frontCameraPortraitAspectRatio() -> CGFloat {
+        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) else {
+            return 3.0 / 4.0
+        }
+
+        let formatDesc = videoDevice.activeFormat.formatDescription
+        let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
+        let width = CGFloat(dims.width)
+        let height = CGFloat(dims.height)
+        let longEdge = max(width, height)
+        let shortEdge = min(width, height)
+        return shortEdge / max(longEdge, 1)
     }
     
     func startSession() {

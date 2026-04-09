@@ -24,7 +24,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		9A2471C32F47BB3C0021B434 /* progress-daily.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "progress-daily.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A2471C32F47BB3C0021B434 /* Work in Progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Work in Progress.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A2471D72F47BB3D0021B434 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A2471E12F47BB3D0021B434 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -98,7 +98,7 @@
 		9A2471C42F47BB3C0021B434 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				9A2471C32F47BB3C0021B434 /* progress-daily.app */,
+				9A2471C32F47BB3C0021B434 /* Work in Progress.app */,
 				9A2471D72F47BB3D0021B434 /* progressTests.xctest */,
 				9A2471E12F47BB3D0021B434 /* progressUITests.xctest */,
 			);
@@ -127,7 +127,7 @@
 			packageProductDependencies = (
 			);
 			productName = progress;
-			productReference = 9A2471C32F47BB3C0021B434 /* progress-daily.app */;
+			productReference = 9A2471C32F47BB3C0021B434 /* Work in Progress.app */;
 			productType = "com.apple.product-type.application";
 		};
 		9A2471D62F47BB3D0021B434 /* progressTests */ = {
@@ -294,7 +294,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = progress/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Clock It";
+				INFOPLIST_KEY_CFBundleDisplayName = "Work in Progress";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "We need access to your camera to capture daily photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We save your location with each photo to remember where it was taken.";
@@ -311,7 +311,7 @@
 				);
 				MARKETING_VERSION = 0.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
-				PRODUCT_NAME = "progress-daily";
+				PRODUCT_NAME = "Work in Progress";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -334,7 +334,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = progress/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Clock It";
+				INFOPLIST_KEY_CFBundleDisplayName = "Work in Progress";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "We need access to your camera to capture daily photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We save your location with each photo to remember where it was taken.";
@@ -351,7 +351,7 @@
 				);
 				MARKETING_VERSION = 0.5.1;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
-				PRODUCT_NAME = "progress-daily";
+				PRODUCT_NAME = "Work in Progress";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;

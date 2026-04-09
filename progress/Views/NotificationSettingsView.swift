@@ -332,7 +332,7 @@ struct NotificationSettingsView: View {
 
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will permanently delete every photo from Clock It and remove the stored local assets on this device.")
+                Text("This will permanently delete every photo from Work in Progress and remove the stored local assets on this device.")
             }
         }
     }

@@ -55,7 +55,6 @@ struct ExperimentalCameraView: View {
     @State private var isCapturing = false
     @State private var isAnimatingPreviewToGrid = false
     @State private var captureFeedbackStage: CaptureFeedbackStage?
-    @State private var visiblePreviewRect: CGRect = .zero
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
 
@@ -74,23 +73,18 @@ struct ExperimentalCameraView: View {
             let bottomBarHeight = barContentHeight + bottomInset
             let previewHeight = max(geometry.size.height - bottomBarHeight, 0)
             let previewWidth = geometry.size.width
-            let fallbackPreviewHeight = min(
+            let actualPreviewHeight = min(
                 previewHeight,
                 previewWidth / max(cameraService.sensorAspectRatio, 0.0001)
             )
-            let actualPreviewWidth = visiblePreviewRect == .zero ? previewWidth : visiblePreviewRect.width
-            let actualPreviewHeight = visiblePreviewRect == .zero ? fallbackPreviewHeight : visiblePreviewRect.height
 
             ZStack(alignment: .bottom) {
                 VStack(spacing: 0) {
                     ZStack {
-                        ExperimentalCameraPreviewView(
-                            session: cameraService.session,
-                            sensorAspectRatio: cameraService.sensorAspectRatio,
-                            visiblePreviewRect: $visiblePreviewRect
-                        )
-                            .frame(maxWidth: .infinity)
-                            .frame(height: previewHeight)
+                        Color.black
+
+                        ExperimentalCameraPreviewView(session: cameraService.session)
+                            .frame(width: previewWidth, height: actualPreviewHeight)
                             .background(Color.black)
 
                         ExperimentalGuidesOverlay(
@@ -99,11 +93,14 @@ struct ExperimentalCameraView: View {
                             isEditingGuides: $isEditingGuides,
                             isInteractionDisabled: guideInteractionDisabled
                         )
-                        .frame(width: actualPreviewWidth, height: actualPreviewHeight)
+                        .frame(width: previewWidth, height: actualPreviewHeight)
                         .allowsHitTesting(isEditingGuides && !guideInteractionDisabled)
 
                         if let captureFeedbackStage, !showingCapturePreview {
-                            captureStatusOverlay(for: captureFeedbackStage)
+                            captureStatusOverlay(
+                                for: captureFeedbackStage,
+                                bottomInset: bottomInset
+                            )
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -146,7 +143,6 @@ struct ExperimentalCameraView: View {
                     }
             )
         }
-        .ignoresSafeArea(edges: .top)
         .task {
             await cameraService.checkAuthorization()
             if cameraService.isAuthorized {
@@ -399,7 +395,7 @@ struct ExperimentalCameraView: View {
     }
 
     @ViewBuilder
-    private func captureStatusOverlay(for stage: CaptureFeedbackStage) -> some View {
+    private func captureStatusOverlay(for stage: CaptureFeedbackStage, bottomInset: CGFloat) -> some View {
         VStack {
             Spacer()
 
@@ -430,7 +426,7 @@ struct ExperimentalCameraView: View {
                     .stroke(.white.opacity(0.1), lineWidth: 1)
             )
             .padding(.horizontal, 20)
-            .padding(.bottom, 144)
+            .padding(.bottom, bottomInset + 28)
         }
         .transition(.opacity)
     }
@@ -633,7 +629,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .padding(.horizontal, 20)
                         .padding(.bottom, 28)
                     }
-                    .padding(.top, geometry.safeAreaInsets.top + 24)
+                    .padding(.top, max(geometry.safeAreaInsets.top - 4, 0))
                 } else {
                     Image(uiImage: image)
                         .resizable()
@@ -815,19 +811,11 @@ struct ExperimentalGuidesOverlay: View {
 
 struct ExperimentalCameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
-    let sensorAspectRatio: CGFloat
-    @Binding var visiblePreviewRect: CGRect
 
     func makeUIView(context: Context) -> PreviewContainerView {
         let view = PreviewContainerView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspect
-        view.sensorAspectRatio = sensorAspectRatio
-        view.onVisiblePreviewRectChange = { rect in
-            DispatchQueue.main.async {
-                visiblePreviewRect = rect
-            }
-        }
 
         if let connection = view.previewLayer.connection,
            connection.isVideoRotationAngleSupported(90) {
@@ -839,12 +827,6 @@ struct ExperimentalCameraPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: PreviewContainerView, context: Context) {
         uiView.previewLayer.session = session
-        uiView.sensorAspectRatio = sensorAspectRatio
-        uiView.onVisiblePreviewRectChange = { rect in
-            DispatchQueue.main.async {
-                visiblePreviewRect = rect
-            }
-        }
 
         if let connection = uiView.previewLayer.connection,
            connection.isVideoRotationAngleSupported(90) {
@@ -854,9 +836,6 @@ struct ExperimentalCameraPreviewView: UIViewRepresentable {
 }
 
 final class PreviewContainerView: UIView {
-    var onVisiblePreviewRectChange: ((CGRect) -> Void)?
-    var sensorAspectRatio: CGFloat = 4.0 / 3.0
-
     override class var layerClass: AnyClass {
         AVCaptureVideoPreviewLayer.self
     }
@@ -871,19 +850,6 @@ final class PreviewContainerView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let safeAspectRatio = max(sensorAspectRatio, 0.0001)
-        let fittedHeight = min(bounds.height, bounds.width / safeAspectRatio)
-        let visibleRect = CGRect(
-            x: 0,
-            y: (bounds.height - fittedHeight) / 2,
-            width: bounds.width,
-            height: fittedHeight
-        )
-        onVisiblePreviewRectChange?(visibleRect.integral)
     }
 
     @available(*, unavailable)

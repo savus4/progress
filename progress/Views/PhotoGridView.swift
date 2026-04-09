@@ -208,7 +208,7 @@ struct PhotoGridView: View {
                     // Auto-scroll intentionally disabled during swipe selection.
                 }
             }
-            .navigationTitle("Clock It")
+            .navigationTitle("Work in Progress")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !photos.isEmpty {
@@ -257,11 +257,6 @@ struct PhotoGridView: View {
                     } else {
                         Button(action: { showingNotificationSettings = true }) {
                             Image(systemName: "gearshape")
-                                .font(.title3)
-                        }
-
-                        Button(action: { showingCamera = true }) {
-                            Image(systemName: "camera.fill")
                                 .font(.title3)
                         }
                     }
@@ -331,41 +326,48 @@ struct PhotoGridView: View {
 
     private var floatingCaptureButton: some View {
         Button(action: { showingCamera = true }) {
+            captureButtonLabel
+        }
+        .contentShape(.circle)
+        .buttonStyle(floatingCaptureButtonStyle)
+        .accessibilityLabel("Capture Photo")
+    }
+
+    @ViewBuilder
+    private var captureButtonLabel: some View {
+        if #available(iOS 26.0, *) {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 21, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 60, height: 60)
+                .background(
+                    Circle()
+                        .fill(.clear)
+                )
+                .shadow(color: .black.opacity(0.1), radius: 14, y: 8)
+        } else {
             ZStack {
                 Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.96),
-                                Color.white.opacity(0.82)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .fill(.ultraThinMaterial)
 
                 Circle()
-                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.5), lineWidth: 1)
 
                 Image(systemName: "camera.fill")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(Color.black.opacity(0.82))
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(.primary)
             }
-            .frame(width: 68, height: 68)
-            .background(
-                Circle()
-                    .fill(Color.black.opacity(0.12))
-                    .blur(radius: 14)
-            )
-            .overlay(
-                Circle()
-                    .stroke(Color.white.opacity(0.55), lineWidth: 6)
-                    .padding(3)
-            )
-            .shadow(color: .black.opacity(0.18), radius: 18, y: 10)
+            .frame(width: 60, height: 60)
+            .shadow(color: .black.opacity(0.12), radius: 14, y: 8)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Capture Photo")
+    }
+
+    private var floatingCaptureButtonStyle: some PrimitiveButtonStyle {
+        if #available(iOS 26.0, *) {
+            return .glass(.regular.interactive())
+        } else {
+            return .plain
+        }
     }
 
     private func syncPhotoMetadataFromExifIfNeeded() async {
