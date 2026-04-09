@@ -438,10 +438,11 @@ struct PhotoPagerView: View {
                     return
                 }
 
-                if let liveImageAssetName = currentPhoto.livePhotoImageAssetName,
-                   let liveVideoAssetName = currentPhoto.livePhotoVideoAssetName {
-                    let liveImageURL = try CloudKitService.shared.loadAssetURL(named: liveImageAssetName)
-                    let liveVideoURL = try CloudKitService.shared.loadAssetURL(named: liveVideoAssetName)
+                if currentPhoto.livePhotoImageAssetName != nil,
+                   currentPhoto.livePhotoVideoAssetName != nil {
+                    let resources = try PhotoStorageService.shared.loadLivePhotoResources(from: currentPhoto)
+                    let liveImageURL = resources.imageURL
+                    let liveVideoURL = resources.videoURL
                     try await saveLivePhotoToLibrary(for: currentPhoto, imageURL: liveImageURL, videoURL: liveVideoURL)
                 } else if currentPhoto.fullImageAssetName != nil {
                     let stillURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)

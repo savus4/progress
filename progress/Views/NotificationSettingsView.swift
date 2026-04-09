@@ -308,6 +308,7 @@ struct NotificationSettingsView: View {
                     }
                 }
             }
+            .interactiveDismissDisabled(isImportingPhotos)
             .alert(
                 deleteRangeConfirmationTitle,
                 isPresented: $showingDeleteRangeConfirmation,

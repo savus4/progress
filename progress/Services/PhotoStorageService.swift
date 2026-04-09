@@ -299,7 +299,8 @@ class PhotoStorageService {
 
         for photo in photos {
             guard let assetName = photo.fullImageAssetName else { continue }
-            guard let assetURL = try? cloudKitService.loadAssetURL(named: assetName) else { continue }
+            let fallbackData = payloadData(for: photo, key: PayloadKey.fullImageData)
+            guard let assetURL = try? resolveAssetURL(named: assetName, fallbackData: fallbackData) else { continue }
             guard let imageData = try? Data(contentsOf: assetURL) else { continue }
             guard let metadata = exifMetadata(from: imageData) else { continue }
 
@@ -643,12 +644,20 @@ class PhotoStorageService {
             throw PhotoStorageError.noLivePhotoAssets
         }
 
-        try copyAsset(named: livePhotoImageAssetName, to: directory)
-        try copyAsset(named: livePhotoVideoAssetName, to: directory)
+        try copyAsset(
+            named: livePhotoImageAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoImageData) ?? payloadData(for: photo, key: PayloadKey.fullImageData),
+            to: directory
+        )
+        try copyAsset(
+            named: livePhotoVideoAssetName,
+            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoVideoData),
+            to: directory
+        )
     }
 
-    private func copyAsset(named assetName: String, to directory: URL) throws {
-        let sourceURL = try cloudKitService.loadAssetURL(named: assetName)
+    private func copyAsset(named assetName: String, fallbackData: Data?, to directory: URL) throws {
+        let sourceURL = try resolveAssetURL(named: assetName, fallbackData: fallbackData)
         let destinationURL = directory.appendingPathComponent(assetName)
 
         if FileManager.default.fileExists(atPath: destinationURL.path) {

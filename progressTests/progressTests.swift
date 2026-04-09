@@ -154,13 +154,13 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
-    @Test("CloudKitService saves image bytes and resolves asset URL")
-    func cloudKitSaveImageDataAndLoadURL() async throws {
+    @Test("CloudKitService caches image bytes and resolves asset URL")
+    func cloudKitCachesImageDataAndLoadsURL() async throws {
         let image = makeImage(size: CGSize(width: 320, height: 320), color: .green)
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
         let assetName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
-        let assetURL = try CloudKitService.shared.loadAssetURL(named: assetName)
+        let assetURL = try CloudKitService.shared.cacheAssetData(imageData, named: assetName)
         defer { try? FileManager.default.removeItem(at: assetURL) }
 
         #expect(FileManager.default.fileExists(atPath: assetURL.path))
@@ -341,7 +341,7 @@ struct ProgressCoreFunctionalityTests {
         let image = makeImage(size: CGSize(width: 400, height: 300), color: .brown)
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
         let assetName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
-        let assetURL = try CloudKitService.shared.loadAssetURL(named: assetName)
+        let assetURL = try CloudKitService.shared.cacheAssetData(imageData, named: assetName)
         defer { try? FileManager.default.removeItem(at: assetURL) }
 
         let photo = DailyPhoto(context: context)
