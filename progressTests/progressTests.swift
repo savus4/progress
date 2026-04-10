@@ -160,7 +160,7 @@ struct ProgressCoreFunctionalityTests {
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
         let assetName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
-        let assetURL = try CloudKitService.shared.cacheAssetData(imageData, named: assetName)
+        let assetURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
         defer { try? FileManager.default.removeItem(at: assetURL) }
 
         #expect(FileManager.default.fileExists(atPath: assetURL.path))
@@ -169,9 +169,9 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @Test("CloudKitService throws for unknown asset names")
-    func cloudKitThrowsForMissingAssetURL() {
+    func cloudKitThrowsForMissingAssetURL() async {
         do {
-            _ = try CloudKitService.shared.loadAssetURL(named: "\(UUID().uuidString).missing")
+            _ = try await CloudKitService.shared.loadAssetURL(named: "\(UUID().uuidString).missing")
             Issue.record("Expected CloudKitError.assetNotFound")
         } catch let error as CloudKitError {
             switch error {
@@ -193,8 +193,9 @@ struct ProgressCoreFunctionalityTests {
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
         let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        await PhotoUploadService.shared.processPendingUploadsForTesting()
         let assetName = try #require(photo.fullImageAssetName)
-        let assetURL = try CloudKitService.shared.loadAssetURL(named: assetName)
+        let assetURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
         defer { try? FileManager.default.removeItem(at: assetURL) }
 
         #expect(photo.id != nil)
@@ -219,6 +220,7 @@ struct ProgressCoreFunctionalityTests {
             videoURL: videoURL,
             context: context
         )
+        await PhotoUploadService.shared.processPendingUploadsForTesting()
 
         let fullImageAssetName = try #require(photo.fullImageAssetName)
         let liveImageAssetName = try #require(photo.livePhotoImageAssetName)
@@ -230,7 +232,7 @@ struct ProgressCoreFunctionalityTests {
 
         #expect(fullImageAssetName == liveImageAssetName)
         #expect((photo.value(forKey: "livePhotoImageData") as? Data) == nil)
-        #expect((photo.value(forKey: "fullImageData") as? Data) == imageData)
+        #expect((photo.value(forKey: "fullImageData") as? Data) == nil)
     }
 
     @MainActor
@@ -252,6 +254,7 @@ struct ProgressCoreFunctionalityTests {
             location: nil,
             context: context
         )
+        await PhotoUploadService.shared.processPendingUploadsForTesting()
 
         let fullImageAssetName = try #require(photo.fullImageAssetName)
         let liveImageAssetName = try #require(photo.livePhotoImageAssetName)
@@ -263,7 +266,7 @@ struct ProgressCoreFunctionalityTests {
 
         #expect(fullImageAssetName == liveImageAssetName)
         #expect((photo.value(forKey: "livePhotoImageData") as? Data) == nil)
-        #expect((photo.value(forKey: "fullImageData") as? Data) == livePhotoImageData)
+        #expect((photo.value(forKey: "fullImageData") as? Data) == nil)
     }
 
     @MainActor
@@ -297,34 +300,32 @@ struct ProgressCoreFunctionalityTests {
 
     @MainActor
     @Test("PhotoStorageService returns still photo share URL")
-    func photoStoragePrepareStillShareURL() throws {
+    func photoStoragePrepareStillShareURL() async throws {
         let context = PersistenceController(inMemory: true).container.viewContext
         let photo = DailyPhoto(context: context)
         photo.id = UUID()
 
-        let fileName = "\(UUID().uuidString).jpg"
-        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        try Data([0x01, 0x02, 0x03]).write(to: fileURL)
-        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let imageData = Data([0x01, 0x02, 0x03])
+        let fileName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
+        defer { CloudKitService.shared.deleteAsset(named: fileName) }
 
         photo.fullImageAssetName = fileName
-        let shareURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
+        let shareURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
         #expect(shareURL.lastPathComponent == fileName)
     }
 
     @MainActor
-    @Test("PhotoStorageService restores missing still asset from synced payload data")
-    func photoStorageRestoresMissingStillAssetFromSyncedPayload() throws {
+    @Test("PhotoStorageService restores missing still asset from CloudKit")
+    func photoStorageRestoresMissingStillAssetFromCloudKit() async throws {
         let context = PersistenceController(inMemory: true).container.viewContext
         let photo = DailyPhoto(context: context)
         photo.id = UUID()
 
-        let fileName = "\(UUID().uuidString).jpg"
         let imageData = Data([0x11, 0x22, 0x33, 0x44])
+        let fileName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
         photo.fullImageAssetName = fileName
-        photo.setValue(imageData, forKey: "fullImageData")
 
-        let restoredURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
+        let restoredURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
         defer { try? FileManager.default.removeItem(at: restoredURL) }
 
         #expect(restoredURL.lastPathComponent == fileName)
@@ -334,72 +335,167 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
-    @Test("PhotoStorageService backfills missing synced payload data from local assets")
+    @Test("PhotoStorageService has no pending payload backfill in metadata-only architecture")
     func photoStorageBackfillsMissingSyncedPayloadData() async throws {
         let persistence = PersistenceController(inMemory: true)
         let context = persistence.container.viewContext
-        let image = makeImage(size: CGSize(width: 400, height: 300), color: .brown)
-        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
-        let assetName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
-        let assetURL = try CloudKitService.shared.cacheAssetData(imageData, named: assetName)
-        defer { try? FileManager.default.removeItem(at: assetURL) }
-
-        let photo = DailyPhoto(context: context)
-        photo.id = UUID()
-        photo.fullImageAssetName = assetName
-        try context.save()
-
         let beforeCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
-        #expect(beforeCount == 1)
+        #expect(beforeCount == 0)
 
         let result = await PhotoStorageService.shared.backfillMissingSyncedPayloads(context: context)
-        #expect(result.scannedCount == 1)
-        #expect(result.migratedCount == 1)
+        #expect(result.scannedCount == 0)
+        #expect(result.migratedCount == 0)
         #expect(result.missingAssetCount == 0)
         #expect(result.failedCount == 0)
-        #expect((photo.value(forKey: "fullImageData") as? Data) == imageData)
 
         let afterCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
         #expect(afterCount == 0)
     }
 
     @MainActor
+    @Test("PhotoStorageService keeps original payload bytes out of Core Data")
+    func photoStorageKeepsOriginalPayloadBytesOutOfCoreData() async throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 900, height: 600), color: .brown)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+
+        #expect(photo.fullImageAssetName != nil)
+        #expect((photo.value(forKey: "fullImageData") as? Data) == nil)
+        #expect((photo.value(forKey: "livePhotoImageData") as? Data) == nil)
+        #expect((photo.value(forKey: "livePhotoVideoData") as? Data) == nil)
+    }
+
+    @MainActor
+    @Test("PhotoStorageService re-downloads still image after cache eviction")
+    func photoStorageRedownloadsStillImageAfterCacheEviction() async throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .systemTeal)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        await PhotoUploadService.shared.processPendingUploadsForTesting()
+        let assetName = try #require(photo.fullImageAssetName)
+
+        let originalURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
+        #expect(FileManager.default.fileExists(atPath: originalURL.path))
+
+        CloudKitService.shared.deleteAsset(named: assetName)
+        #expect(!FileManager.default.fileExists(atPath: originalURL.path))
+
+        let restoredImage = try await PhotoStorageService.shared.loadFullImage(from: photo)
+        let restoredURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
+        defer { try? FileManager.default.removeItem(at: restoredURL) }
+
+        #expect(FileManager.default.fileExists(atPath: restoredURL.path))
+        #expect(restoredImage.cgImage != nil)
+        #expect(restoredImage.size.width > 0)
+        #expect(restoredImage.size.height > 0)
+    }
+
+    @MainActor
     @Test("PhotoStorageService returns paired Live Photo share URLs")
-    func photoStoragePrepareLivePhotoShareURLs() throws {
+    func photoStoragePrepareLivePhotoShareURLs() async throws {
         let context = PersistenceController(inMemory: true).container.viewContext
         let photo = DailyPhoto(context: context)
         photo.id = UUID()
 
-        let imageName = "\(UUID().uuidString).heic"
-        let videoName = "\(UUID().uuidString).mov"
-        let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent(imageName)
-        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent(videoName)
-        try Data([0xAA]).write(to: imageURL)
+        let imageName = try await CloudKitService.shared.saveImageDataAsset(Data([0xAA]), fileExtension: "heic")
+        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
         try Data([0xBB]).write(to: videoURL)
+        let videoName = try await CloudKitService.shared.saveVideoAsset(from: videoURL)
         defer {
-            try? FileManager.default.removeItem(at: imageURL)
             try? FileManager.default.removeItem(at: videoURL)
+            CloudKitService.shared.deleteAsset(named: imageName)
+            CloudKitService.shared.deleteAsset(named: videoName)
         }
 
         photo.livePhotoImageAssetName = imageName
         photo.livePhotoVideoAssetName = videoName
 
-        let urls = try PhotoStorageService.shared.prepareLivePhotoShareItemURLs(for: photo)
+        let urls = try await PhotoStorageService.shared.prepareLivePhotoShareItemURLs(for: photo)
         #expect(urls.count == 2)
         #expect(urls.contains(where: { $0.lastPathComponent == imageName }))
         #expect(urls.contains(where: { $0.lastPathComponent == videoName }))
     }
 
     @MainActor
+    @Test("PhotoStorageService re-downloads Live Photo resources after cache eviction")
+    func photoStorageRedownloadsLivePhotoResourcesAfterCacheEviction() async throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .systemPink)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
+        try Data([0x01, 0x02, 0x03, 0x04]).write(to: videoURL)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+
+        let photo = try await PhotoStorageService.shared.saveImportedLivePhoto(
+            imageData: imageData,
+            videoURL: videoURL,
+            context: context
+        )
+        await PhotoUploadService.shared.processPendingUploadsForTesting()
+
+        let imageAssetName = try #require(photo.livePhotoImageAssetName)
+        let videoAssetName = try #require(photo.livePhotoVideoAssetName)
+        let cachedImageURL = try await CloudKitService.shared.loadAssetURL(named: imageAssetName)
+        let cachedVideoURL = try await CloudKitService.shared.loadAssetURL(named: videoAssetName)
+
+        CloudKitService.shared.deleteAsset(named: imageAssetName)
+        CloudKitService.shared.deleteAsset(named: videoAssetName)
+        #expect(!FileManager.default.fileExists(atPath: cachedImageURL.path))
+        #expect(!FileManager.default.fileExists(atPath: cachedVideoURL.path))
+
+        let resources = try await PhotoStorageService.shared.loadLivePhotoResources(from: photo)
+        defer {
+            try? FileManager.default.removeItem(at: resources.imageURL)
+            try? FileManager.default.removeItem(at: resources.videoURL)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: resources.imageURL.path))
+        #expect(FileManager.default.fileExists(atPath: resources.videoURL.path))
+        let restoredVideoData = try Data(contentsOf: resources.videoURL)
+        #expect(restoredVideoData == Data([0x01, 0x02, 0x03, 0x04]))
+    }
+
+    @MainActor
+    @Test("PhotoStorageService delete removes metadata and remote assets")
+    func photoStorageDeleteRemovesMetadataAndRemoteAssets() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .systemIndigo)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        await PhotoUploadService.shared.processPendingUploadsForTesting()
+        let assetName = try #require(photo.fullImageAssetName)
+
+        try await PhotoStorageService.shared.deletePhoto(photo, context: context)
+
+        let request = DailyPhoto.fetchRequest()
+        let storedCount = try context.count(for: request)
+        #expect(storedCount == 0)
+
+        do {
+            _ = try await CloudKitService.shared.loadAssetURL(named: assetName)
+            Issue.record("Expected CloudKitError.assetNotFound after deleting photo assets")
+        } catch let error as CloudKitError {
+            #expect(error == .assetNotFound)
+        }
+    }
+
+    @MainActor
     @Test("PhotoStorageService throws if no still asset exists")
-    func photoStorageStillShareURLThrowsWithoutAsset() {
+    func photoStorageStillShareURLThrowsWithoutAsset() async {
         let context = PersistenceController(inMemory: true).container.viewContext
         let photo = DailyPhoto(context: context)
         photo.id = UUID()
         photo.fullImageAssetName = nil
 
         do {
-            _ = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
+            _ = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: photo)
             Issue.record("Expected PhotoStorageError.noImageAsset")
         } catch let error as PhotoStorageError {
             switch error {

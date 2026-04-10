@@ -43,29 +43,29 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        PhotoUploadService.registerBackgroundTask()
+
+        Task {
+            await PhotoUploadService.shared.start()
+        }
+
         Task.detached(priority: .utility) {
             let context = await MainActor.run {
                 PersistenceController.shared.makeBackgroundContext()
             }
-            let pendingBackfillCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
-            await MainActor.run {
-                CloudSyncMonitor.shared.beginMigration(totalPending: pendingBackfillCount)
-            }
-            if pendingBackfillCount > 0 {
-                let result = await PhotoStorageService.shared.backfillMissingSyncedPayloads(
-                    context: context
-                )
-                let remainingPendingCount = await PhotoStorageService.shared.countPhotosMissingSyncedPayloads(context: context)
-                await MainActor.run {
-                    CloudSyncMonitor.shared.finishMigration(
-                        result: result,
-                        remainingPendingCount: remainingPendingCount
-                    )
-                }
-            }
             await PhotoStorageService.shared.purgeOrphanedAssets(context: context)
         }
         return true
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        PhotoUploadService.scheduleBackgroundProcessing()
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        Task {
+            await PhotoUploadService.shared.enqueuePendingUploads()
+        }
     }
 
     func userNotificationCenter(

@@ -73,8 +73,9 @@ struct PersistenceController {
     let container: NSPersistentCloudKitContainer
 
     init(inMemory: Bool = false) {
+        let shouldUseInMemory = inMemory || ProcessInfo.processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
         container = NSPersistentCloudKitContainer(name: "progress")
-        if inMemory {
+        if shouldUseInMemory {
             container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
         }
         container.loadPersistentStores(completionHandler: { (storeDescription, error) in

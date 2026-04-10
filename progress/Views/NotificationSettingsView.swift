@@ -252,6 +252,7 @@ struct NotificationSettingsView: View {
             .task {
                 reminderTimes = notificationService.loadReminderTimes()
                 authorizationStatus = await notificationService.authorizationStatus()
+                await cloudSyncMonitor.refreshUploadStatus()
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
             }

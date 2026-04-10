@@ -83,6 +83,7 @@ struct PhotoGridView: View {
                                 .background(.blue.gradient, in: Capsule())
                                 .foregroundStyle(.white)
                         }
+                        .accessibilityIdentifier("emptyStateCaptureButton")
                         .padding(.top)
                     }
                 } else {
@@ -331,6 +332,7 @@ struct PhotoGridView: View {
         .contentShape(.circle)
         .buttonStyle(floatingCaptureButtonStyle)
         .accessibilityLabel("Capture Photo")
+        .accessibilityIdentifier("gridCaptureButton")
     }
 
     @ViewBuilder
@@ -714,11 +716,11 @@ struct PhotoGridView: View {
 }
 
 struct PhotoGridItem: View {
-    let photo: DailyPhoto
+    @ObservedObject var photo: DailyPhoto
     
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .bottomTrailing) {
+            ZStack(alignment: .topTrailing) {
                 if let thumbnailData = photo.thumbnailData,
                    let thumbnail = UIImage(data: thumbnailData) {
                     Image(uiImage: thumbnail)
@@ -733,11 +735,38 @@ struct PhotoGridItem: View {
                     
                     ProgressView()
                 }
-                
+
+                uploadBadge
+                    .padding(8)
             }
         }
         .aspectRatio(1, contentMode: .fit)
         .clipShape(RoundedRectangle(cornerRadius: 0))
+        .accessibilityIdentifier("photoGridItem")
+    }
+
+    @ViewBuilder
+    private var uploadBadge: some View {
+        switch photo.uploadState {
+        case .pending, .uploading:
+            Label("Uploading", systemImage: "icloud.and.arrow.up")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(.black.opacity(0.62), in: Capsule())
+                .foregroundStyle(.white)
+                .accessibilityIdentifier("photoGridUploadBadge")
+        case .failed:
+            Label("Retrying later", systemImage: "exclamationmark.icloud")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(.orange.opacity(0.9), in: Capsule())
+                .foregroundStyle(.black)
+                .accessibilityIdentifier("photoGridUploadBadge")
+        case .uploaded:
+            EmptyView()
+        }
     }
 }
 

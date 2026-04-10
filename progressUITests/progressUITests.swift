@@ -23,12 +23,39 @@ final class progressUITests: XCTestCase {
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testCaptureSaveReturnsPhotoToGridAndShowsUploadState() throws {
         let app = XCUIApplication()
+        app.launchArguments += [
+            "UI_TEST_IN_MEMORY_STORE",
+            "UI_TEST_MOCK_CAPTURE"
+        ]
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+        let openCameraButton = app.buttons["emptyStateCaptureButton"]
+        XCTAssertTrue(openCameraButton.waitForExistence(timeout: 5))
+        openCameraButton.tap()
+
+        let shutterButton = app.buttons["experimentalCameraShutter"]
+        XCTAssertTrue(shutterButton.waitForExistence(timeout: 5))
+        shutterButton.tap()
+
+        let capturePreviewOverlay = app.otherElements["capturePreviewOverlay"]
+        XCTAssertTrue(capturePreviewOverlay.waitForExistence(timeout: 5))
+
+        let doneButton = app.buttons["capturePreviewDoneButton"]
+        XCTAssertTrue(doneButton.waitForExistence(timeout: 5))
+        doneButton.tap()
+
+        let disappeared = NSPredicate(format: "exists == false")
+        expectation(for: disappeared, evaluatedWith: capturePreviewOverlay)
+        waitForExpectations(timeout: 5)
+
+        let gridItem = app.otherElements["photoGridItem"].firstMatch
+        XCTAssertTrue(gridItem.waitForExistence(timeout: 5))
+
+        let uploadBadge = app.otherElements["photoGridUploadBadge"].firstMatch
+        let uploadBanner = app.otherElements["photoGridUploadBanner"].firstMatch
+        XCTAssertTrue(uploadBadge.waitForExistence(timeout: 3) || uploadBanner.waitForExistence(timeout: 3))
     }
 
     @MainActor

@@ -25,8 +25,16 @@ final class CloudSyncMonitor: ObservableObject {
     @Published private(set) var isRunningMigration = false
     @Published private(set) var lastMigrationResult: LegacyPayloadMigrationResult?
     @Published private(set) var lastMigrationError: String?
+    @Published private(set) var pendingUploadCount = 0
+    @Published private(set) var failedUploadCount = 0
+    @Published private(set) var uploadingAssetCount = 0
+    @Published private(set) var downloadingAssetCount = 0
 
     private var observer: NSObjectProtocol?
+    private var uploadObserver: NSObjectProtocol?
+    private var contextSaveObserver: NSObjectProtocol?
+    private var assetTransferObserver: NSObjectProtocol?
+    private var activeDownloadAssetNames: Set<String> = []
 
     private init() {
         observer = NotificationCenter.default.addObserver(
@@ -42,15 +50,76 @@ final class CloudSyncMonitor: ObservableObject {
                 self?.handle(event: event)
             }
         }
+
+        uploadObserver = NotificationCenter.default.addObserver(
+            forName: PhotoUploadService.didCompleteUploadNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshUploadStatus()
+            }
+        }
+
+        contextSaveObserver = NotificationCenter.default.addObserver(
+            forName: .NSManagedObjectContextDidSave,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshUploadStatus()
+            }
+        }
+
+        assetTransferObserver = NotificationCenter.default.addObserver(
+            forName: CloudKitService.assetTransferDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let kindRawValue = notification.userInfo?["kind"] as? String,
+                  let phaseRawValue = notification.userInfo?["phase"] as? String,
+                  let assetName = notification.userInfo?["assetName"] as? String,
+                  let kind = CloudKitService.AssetTransferKind(rawValue: kindRawValue),
+                  let phase = CloudKitService.AssetTransferPhase(rawValue: phaseRawValue) else {
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                self?.handleAssetTransfer(kind: kind, phase: phase, assetName: assetName)
+            }
+        }
+
+        Task { @MainActor [weak self] in
+            await self?.refreshUploadStatus()
+        }
     }
 
     deinit {
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let uploadObserver {
+            NotificationCenter.default.removeObserver(uploadObserver)
+        }
+        if let contextSaveObserver {
+            NotificationCenter.default.removeObserver(contextSaveObserver)
+        }
+        if let assetTransferObserver {
+            NotificationCenter.default.removeObserver(assetTransferObserver)
+        }
     }
 
     var statusSymbolName: String {
+        if downloadingAssetCount > 0 {
+            return "arrow.down.circle.icloud"
+        }
+        if uploadingAssetCount > 0 || pendingUploadCount > 0 {
+            return "arrow.triangle.2.circlepath.icloud"
+        }
+        if failedUploadCount > 0 {
+            return "exclamationmark.icloud"
+        }
+
         switch syncState {
         case .idle:
             return isRunningMigration ? "arrow.triangle.2.circlepath" : "checkmark.icloud"
@@ -62,6 +131,9 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var isFailing: Bool {
+        if failedUploadCount > 0 {
+            return true
+        }
         if case .failed = syncState {
             return true
         }
@@ -71,6 +143,22 @@ final class CloudSyncMonitor: ObservableObject {
     var statusTitle: String {
         if isRunningMigration {
             return "Preparing older photos for iCloud sync"
+        }
+
+        if downloadingAssetCount > 0 {
+            return "Downloading original photos from iCloud"
+        }
+
+        if uploadingAssetCount > 0 {
+            return "Uploading original photos to iCloud"
+        }
+
+        if pendingUploadCount > 0 {
+            return "Waiting to upload original photos"
+        }
+
+        if failedUploadCount > 0 {
+            return "Some photo uploads need attention"
         }
 
         switch syncState {
@@ -97,6 +185,22 @@ final class CloudSyncMonitor: ObservableObject {
             return pendingMigrationCount > 0
                 ? "\(pendingMigrationCount) older photo\(pendingMigrationCount == 1 ? "" : "s") left to backfill."
                 : "Backfilling older photos for cross-device access."
+        }
+
+        if downloadingAssetCount > 0 {
+            return "Currently downloading \(downloadingAssetCount) photo\(downloadingAssetCount == 1 ? "" : "s") from iCloud for viewing."
+        }
+
+        if uploadingAssetCount > 0 {
+            return "Currently uploading \(uploadingAssetCount) photo\(uploadingAssetCount == 1 ? "" : "s") in the background."
+        }
+
+        if pendingUploadCount > 0 {
+            return "Waiting to upload \(pendingUploadCount) photo\(pendingUploadCount == 1 ? "" : "s") when network and background time allow."
+        }
+
+        if failedUploadCount > 0 {
+            return "\(failedUploadCount) photo\(failedUploadCount == 1 ? "" : "s") will retry automatically later."
         }
 
         if let lastMigrationError {
@@ -151,6 +255,33 @@ final class CloudSyncMonitor: ObservableObject {
         lastMigrationError = message
     }
 
+    func refreshUploadStatus() async {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+
+        do {
+            let counts = try await context.perform {
+                func count(for states: [String]) throws -> Int {
+                    let request = DailyPhoto.fetchRequest()
+                    request.predicate = NSPredicate(format: "uploadStateRaw IN %@", states)
+                    return try context.count(for: request)
+                }
+
+                let uploading = try count(for: [PhotoUploadState.uploading.rawValue])
+                let pending = try count(for: [PhotoUploadState.pending.rawValue])
+                let failed = try count(for: [PhotoUploadState.failed.rawValue])
+                return (pending, uploading, failed)
+            }
+
+            pendingUploadCount = counts.0
+            uploadingAssetCount = counts.1
+            failedUploadCount = counts.2
+        } catch {
+            pendingUploadCount = 0
+            uploadingAssetCount = 0
+            failedUploadCount = 0
+        }
+    }
+
     private func handle(event: NSPersistentCloudKitContainer.Event) {
         if let endDate = event.endDate {
             if let error = event.error {
@@ -162,5 +293,22 @@ final class CloudSyncMonitor: ObservableObject {
         } else {
             syncState = .syncing(event.type)
         }
+    }
+
+    private func handleAssetTransfer(
+        kind: CloudKitService.AssetTransferKind,
+        phase: CloudKitService.AssetTransferPhase,
+        assetName: String
+    ) {
+        guard kind == .download else { return }
+
+        switch phase {
+        case .started:
+            activeDownloadAssetNames.insert(assetName)
+        case .finished, .failed:
+            activeDownloadAssetNames.remove(assetName)
+        }
+
+        downloadingAssetCount = activeDownloadAssetNames.count
     }
 }

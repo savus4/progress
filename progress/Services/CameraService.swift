@@ -21,6 +21,7 @@ class CameraService: NSObject, ObservableObject {
     private var isCapturingLivePhoto = false
     private var capturedPhotoData: Data?
     private var capturedStillImage: UIImage?
+    private let processInfo = ProcessInfo.processInfo
     
     override init() {
         self.sensorAspectRatio = Self.frontCameraPortraitAspectRatio()
@@ -117,6 +118,11 @@ class CameraService: NSObject, ObservableObject {
     }
     
     func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
+        if processInfo.arguments.contains("UI_TEST_MOCK_CAPTURE") {
+            simulateMockCapture(location: location)
+            return
+        }
+
         let settings: AVCapturePhotoSettings
         if photoOutput.availablePhotoCodecTypes.contains(.hevc) {
             settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
@@ -161,6 +167,45 @@ class CameraService: NSObject, ObservableObject {
         settings.photoQualityPrioritization = .quality
         
         photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+
+    private func simulateMockCapture(location: CLLocation?) {
+        capturedImage = nil
+        capturedImageData = nil
+        livePhotoCapture = nil
+        capturedPhotoData = nil
+        capturedStillImage = nil
+        livePhotoCompanionMovieURL = nil
+        isCapturingLivePhoto = false
+
+        let size = CGSize(width: 1200, height: 1600)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            UIColor.systemYellow.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: 96),
+                .foregroundColor: UIColor.black,
+                .paragraphStyle: paragraphStyle
+            ]
+            let text = "UI TEST"
+            let rect = CGRect(x: 0, y: size.height / 2 - 60, width: size.width, height: 120)
+            text.draw(in: rect, withAttributes: attributes)
+        }
+
+        guard let data = image.jpegData(compressionQuality: 0.95) else { return }
+        capturedPhotoData = data
+        capturedStillImage = image
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.capturedImage = image
+            self.capturedImageData = data
+            self.captureFinished += 1
+            self.captureCompleted += 1
+        }
     }
 
     private func gpsMetadataDictionary(for location: CLLocation) -> [String: Any] {

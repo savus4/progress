@@ -1,5 +1,8 @@
 import Foundation
+import BackgroundTasks
+import CloudKit
 import CoreData
+import Network
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
@@ -23,23 +26,36 @@ struct ImportedPhotoBatchResult: Sendable {
     let failureMessages: [String]
 }
 
-class PhotoStorageService {
+enum PhotoUploadState: String, Sendable {
+    case pending
+    case uploading
+    case uploaded
+    case failed
+}
+
+extension DailyPhoto {
+    var uploadState: PhotoUploadState {
+        get {
+            guard let rawValue = uploadStateRaw else {
+                return .uploaded
+            }
+            return PhotoUploadState(rawValue: rawValue) ?? .uploaded
+        }
+        set {
+            uploadStateRaw = newValue.rawValue
+        }
+    }
+}
+
+final class PhotoStorageService {
     static let shared = PhotoStorageService()
-    
+
     private let cloudKitService = CloudKitService.shared
     private let thumbnailService = ThumbnailService.shared
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoStorage")
 
-    private enum PayloadKey {
-        static let fullImageData = "fullImageData"
-        static let livePhotoImageData = "livePhotoImageData"
-        static let livePhotoVideoData = "livePhotoVideoData"
-        static let importFingerprint = "importFingerprint"
-    }
-    
     private init() {}
-    
-    /// Save a photo with all its data
+
     func savePhoto(
         image: UIImage,
         imageData: Data? = nil,
@@ -48,79 +64,59 @@ class PhotoStorageService {
         location: (latitude: Double, longitude: Double)?,
         context: NSManagedObjectContext
     ) async throws -> DailyPhoto {
-        let metadataSourceData = livePhotoImageData ?? imageData
-        let extractedExifMetadata = metadataSourceData.flatMap(exifMetadata(from:))
-        let fallbackCaptureDate = Date()
-        let resolvedCaptureDate = extractedExifMetadata?.captureDate ?? fallbackCaptureDate
-        let resolvedLocation = extractedExifMetadata?.location ?? location
-        let importFingerprint = try metadataSourceData.map { data in
-            try fingerprint(imageData: data, livePhotoVideoURL: livePhotoVideoURL)
-        }
-
-        // Create the Core Data object
-        let photo = DailyPhoto(context: context)
-        photo.id = UUID()
-        photo.captureDate = extractedExifMetadata?.captureDate ?? resolvedCaptureDate
-        photo.createdAt = Date()
-        photo.modifiedAt = Date()
-
-        if let exifLocation = extractedExifMetadata?.location ?? resolvedLocation {
-            photo.latitude = exifLocation.latitude
-            photo.longitude = exifLocation.longitude
-        } else {
-            photo.latitude = 0
-            photo.longitude = 0
-        }
-        
-        // Generate and save thumbnail
-        if let thumbnailData = thumbnailService.generateThumbnail(from: image) {
-            photo.thumbnailData = thumbnailData
-        }
-        
-        // Save full-res image as CloudKit asset, preserving original metadata when available.
-        let imageAssetName: String
-        if let metadataSourceData {
-            let imageExtension = imageFileExtension(for: metadataSourceData)
-            imageAssetName = try await cloudKitService.saveImageDataAsset(
-                metadataSourceData,
-                fileExtension: imageExtension
-            )
-        } else {
+        let photoID = UUID()
+        let sourceImageData = livePhotoImageData ?? imageData
+        guard let sourceImageData else {
             throw PhotoStorageError.missingImageData
         }
-        photo.fullImageAssetName = imageAssetName
-        photo.setValue(metadataSourceData, forKey: PayloadKey.fullImageData)
-        photo.setValue(importFingerprint, forKey: PayloadKey.importFingerprint)
-        
-        // Save Live Photo data if available
-        if let livePhotoImageData = livePhotoImageData {
-            if livePhotoImageData == metadataSourceData {
-                photo.livePhotoImageAssetName = imageAssetName
-                photo.setValue(nil, forKey: PayloadKey.livePhotoImageData)
-            } else {
-                let liveImageExtension = imageFileExtension(for: livePhotoImageData)
-                let liveImageAssetName = try await cloudKitService.saveImageDataAsset(
-                    livePhotoImageData,
-                    fileExtension: liveImageExtension
-                )
-                photo.livePhotoImageAssetName = liveImageAssetName
-                photo.setValue(livePhotoImageData, forKey: PayloadKey.livePhotoImageData)
-            }
+
+        let extractedMetadata = exifMetadata(from: sourceImageData)
+        let resolvedLocation = extractedMetadata?.location ?? location
+        let stillAssetName = try stageStillAsset(
+            data: sourceImageData,
+            photoID: photoID,
+            role: .still
+        )
+        let livePhotoVideoAssetName: String?
+        if let livePhotoVideoURL {
+            livePhotoVideoAssetName = try stageVideoAsset(
+                from: livePhotoVideoURL,
+                photoID: photoID,
+                role: .livePhotoVideo
+            )
+        } else {
+            livePhotoVideoAssetName = nil
         }
-        
-        if let livePhotoVideoURL = livePhotoVideoURL {
-            let videoData = try Data(contentsOf: livePhotoVideoURL)
-            let videoAssetName = try await cloudKitService.saveVideoAsset(from: livePhotoVideoURL)
-            photo.livePhotoVideoAssetName = videoAssetName
-            photo.setValue(videoData, forKey: PayloadKey.livePhotoVideoData)
-        }
-        
+
+        let importFingerprint = try fingerprint(imageData: sourceImageData, livePhotoVideoURL: livePhotoVideoURL)
+
+        let photo = DailyPhoto(context: context)
+        photo.id = photoID
+        photo.captureDate = extractedMetadata?.captureDate ?? Date()
+        photo.createdAt = Date()
+        photo.modifiedAt = Date()
+        photo.latitude = resolvedLocation?.latitude ?? 0
+        photo.longitude = resolvedLocation?.longitude ?? 0
+        photo.thumbnailData = thumbnailService.generateThumbnail(from: image)
+        photo.fullImageAssetName = stillAssetName
+        photo.livePhotoImageAssetName = livePhotoVideoAssetName == nil ? nil : stillAssetName
+        photo.livePhotoVideoAssetName = livePhotoVideoAssetName
+        photo.setValue(nil, forKey: "fullImageData")
+        photo.setValue(nil, forKey: "livePhotoImageData")
+        photo.setValue(nil, forKey: "livePhotoVideoData")
+        photo.setValue(importFingerprint, forKey: "importFingerprint")
+        photo.uploadState = .pending
+        photo.uploadAttemptCount = 0
+        photo.uploadErrorMessage = nil
+        photo.uploadRetryAfter = nil
+
         try context.save()
-        
+        Task.detached(priority: .utility) {
+            await PhotoUploadService.shared.enqueuePendingUploads()
+        }
         return photo
     }
-    
-    /// Save imported photo data without decoding full image into memory first.
+
     func saveImportedPhoto(
         imageData: Data,
         context: NSManagedObjectContext
@@ -131,10 +127,12 @@ class PhotoStorageService {
             context: context
         )
         try context.save()
+        Task.detached(priority: .utility) {
+            await PhotoUploadService.shared.enqueuePendingUploads()
+        }
         return photo
     }
 
-    /// Save imported Live Photo resources without converting formats.
     func saveImportedLivePhoto(
         imageData: Data,
         videoURL: URL,
@@ -146,6 +144,9 @@ class PhotoStorageService {
             context: context
         )
         try context.save()
+        Task.detached(priority: .utility) {
+            await PhotoUploadService.shared.enqueuePendingUploads()
+        }
         return photo
     }
 
@@ -231,7 +232,6 @@ class PhotoStorageService {
                 try await importContext.perform {
                     try importContext.save()
                 }
-                pendingInsertCount = 0
             }
         } catch {
             let message = "final-batch-save pending=\(pendingInsertCount): \(error.localizedDescription)"
@@ -249,6 +249,12 @@ class PhotoStorageService {
             "Imported \(importedCount, privacy: .public) photos, skipped \(duplicateCount, privacy: .public) duplicates, failed \(failedCount, privacy: .public), elapsed \(String(describing: elapsed), privacy: .public)"
         )
 
+        if importedCount > 0 {
+            Task.detached(priority: .utility) {
+                await PhotoUploadService.shared.enqueuePendingUploads()
+            }
+        }
+
         return ImportedPhotoBatchResult(
             importedCount: importedCount,
             duplicateCount: duplicateCount,
@@ -257,40 +263,23 @@ class PhotoStorageService {
         )
     }
 
-    /// Load full resolution image
     func loadFullImage(from photo: DailyPhoto) async throws -> UIImage {
         guard let assetName = photo.fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
 
-        do {
-            return try await cloudKitService.loadImageAsset(named: assetName)
-        } catch CloudKitError.assetNotFound {
-            guard let imageData = payloadData(for: photo, key: PayloadKey.fullImageData) else {
-                throw CloudKitError.assetNotFound
-            }
-            _ = try cloudKitService.cacheAssetData(imageData, named: assetName)
-            guard let image = UIImage(data: imageData) else {
-                throw CloudKitError.assetNotFound
-            }
-            return image
+        let fileURL = try await cloudKitService.loadAssetURL(named: assetName)
+        guard let image = UIImage(contentsOfFile: fileURL.path) else {
+            throw CloudKitError.assetNotFound
         }
+        return image
     }
-    
-    /// Load Live Photo video URL
+
     func loadLivePhotoVideo(from photo: DailyPhoto) async throws -> URL {
         guard let assetName = photo.livePhotoVideoAssetName else {
             throw PhotoStorageError.noVideoAsset
         }
-
-        do {
-            return try await cloudKitService.loadVideoAsset(named: assetName)
-        } catch CloudKitError.assetNotFound {
-            guard let videoData = payloadData(for: photo, key: PayloadKey.livePhotoVideoData) else {
-                throw CloudKitError.assetNotFound
-            }
-            return try cloudKitService.cacheAssetData(videoData, named: assetName)
-        }
+        return try await cloudKitService.loadVideoAsset(named: assetName)
     }
 
     @MainActor
@@ -299,8 +288,7 @@ class PhotoStorageService {
 
         for photo in photos {
             guard let assetName = photo.fullImageAssetName else { continue }
-            let fallbackData = payloadData(for: photo, key: PayloadKey.fullImageData)
-            guard let assetURL = try? resolveAssetURL(named: assetName, fallbackData: fallbackData) else { continue }
+            guard let assetURL = try? await cloudKitService.loadAssetURL(named: assetName) else { continue }
             guard let imageData = try? Data(contentsOf: assetURL) else { continue }
             guard let metadata = exifMetadata(from: imageData) else { continue }
 
@@ -334,35 +322,27 @@ class PhotoStorageService {
         }
 
         if !updatedPhotos.isEmpty {
-            photoModifiedTimestamps(photos: updatedPhotos)
+            updateModifiedTimestamps(for: updatedPhotos)
             try? context.save()
         }
     }
 
-    /// Load Live Photo paired resource URLs
-    func loadLivePhotoResources(from photo: DailyPhoto) throws -> (imageURL: URL, videoURL: URL) {
+    func loadLivePhotoResources(from photo: DailyPhoto) async throws -> (imageURL: URL, videoURL: URL) {
         guard let imageAssetName = photo.livePhotoImageAssetName,
               let videoAssetName = photo.livePhotoVideoAssetName else {
             throw PhotoStorageError.noLivePhotoAssets
         }
 
-        let imageURL = try resolveAssetURL(
-            named: imageAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoImageData) ?? payloadData(for: photo, key: PayloadKey.fullImageData)
-        )
-        let videoURL = try resolveAssetURL(
-            named: videoAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoVideoData)
-        )
-        return (imageURL, videoURL)
+        async let imageURL = cloudKitService.loadAssetURL(named: imageAssetName)
+        async let videoURL = cloudKitService.loadAssetURL(named: videoAssetName)
+        return try await (imageURL, videoURL)
     }
-    
-    /// Delete a photo and its assets
+
     func deletePhoto(_ photo: DailyPhoto, context: NSManagedObjectContext) async throws {
         let assetNames = Set(assetNames(for: photo))
         context.delete(photo)
         try context.save()
-        deleteAssets(named: assetNames)
+        await deleteAssets(named: assetNames)
     }
 
     func photoCount(
@@ -393,7 +373,7 @@ class PhotoStorageService {
         }
 
         try context.save()
-        deleteAssets(named: assetNames)
+        await deleteAssets(named: assetNames)
         return photos.count
     }
 
@@ -409,7 +389,7 @@ class PhotoStorageService {
         }
 
         try context.save()
-        deleteAssets(named: assetNames)
+        await deleteAssets(named: assetNames)
         return photos.count
     }
 
@@ -427,26 +407,18 @@ class PhotoStorageService {
             return
         }
 
-        let storedAssetNames = cloudKitService.storedPersistentAssetNames()
-        let orphanedAssetNames = storedAssetNames.subtracting(referencedAssetNames)
-
+        let cachedAssetNames = cloudKitService.storedPersistentAssetNames()
+        let orphanedAssetNames = cachedAssetNames.subtracting(referencedAssetNames)
         guard !orphanedAssetNames.isEmpty else { return }
 
-        deleteAssets(named: orphanedAssetNames)
-        logger.log("Purged \(orphanedAssetNames.count, privacy: .public) orphaned asset files")
+        for assetName in orphanedAssetNames {
+            cloudKitService.deleteAsset(named: assetName)
+        }
     }
 
     func countPhotosMissingSyncedPayloads(context: NSManagedObjectContext) async -> Int {
-        do {
-            return try await context.perform {
-                let request = DailyPhoto.fetchRequest()
-                request.predicate = self.missingSyncedPayloadPredicate()
-                return try context.count(for: request)
-            }
-        } catch {
-            logger.error("payload-backfill-count: \(error.localizedDescription, privacy: .public)")
-            return 0
-        }
+        _ = context
+        return 0
     }
 
     func backfillMissingSyncedPayloads(
@@ -455,171 +427,67 @@ class PhotoStorageService {
         maxPhotosPerRun: Int = 4,
         progress: (@MainActor @Sendable (Int) -> Void)? = nil
     ) async -> LegacyPayloadMigrationResult {
-        let photoObjectIDs: [NSManagedObjectID]
-
-        do {
-            photoObjectIDs = try await context.perform {
-                let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
-                request.predicate = self.missingSyncedPayloadPredicate()
-                request.resultType = .managedObjectIDResultType
-                request.fetchLimit = max(maxPhotosPerRun, 1)
-                return try context.fetch(request)
-            }
-        } catch {
-            logger.error("payload-backfill-fetch: \(error.localizedDescription, privacy: .public)")
-            return LegacyPayloadMigrationResult(scannedCount: 0, migratedCount: 0, missingAssetCount: 0, failedCount: 1)
-        }
-
-        guard !photoObjectIDs.isEmpty else {
-            return LegacyPayloadMigrationResult(scannedCount: 0, migratedCount: 0, missingAssetCount: 0, failedCount: 0)
-        }
-
-        var migratedCount = 0
-        var missingAssetCount = 0
-        var failedCount = 0
-        var pendingSaves = 0
-        var remainingCount = photoObjectIDs.count
-
-        for photoObjectID in photoObjectIDs {
-            do {
-                let didUpdate = try await context.perform {
-                    guard let photoInContext = try context.existingObject(with: photoObjectID) as? DailyPhoto else {
-                        return false
-                    }
-                    return try self.backfillSyncedPayloadsIfNeeded(for: photoInContext)
-                }
-                if didUpdate {
-                    migratedCount += 1
-                    pendingSaves += 1
-                }
-            } catch CloudKitError.assetNotFound {
-                missingAssetCount += 1
-            } catch {
-                failedCount += 1
-                logger.error("payload-backfill-photo id=\(photoObjectID.uriRepresentation().absoluteString, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-
-            remainingCount -= 1
-            if let progress {
-                await MainActor.run {
-                    progress(remainingCount)
-                }
-            }
-
-            if context.hasChanges, pendingSaves >= max(batchSize, 1) {
-                do {
-                    try await context.perform {
-                        try context.save()
-                        context.reset()
-                    }
-                    pendingSaves = 0
-                } catch {
-                    migratedCount -= pendingSaves
-                    failedCount += pendingSaves
-                    logger.error("payload-backfill-save: \(error.localizedDescription, privacy: .public)")
-                    await context.perform {
-                        context.rollback()
-                    }
-                    pendingSaves = 0
-                }
+        _ = context
+        _ = batchSize
+        _ = maxPhotosPerRun
+        if let progress {
+            await MainActor.run {
+                progress(0)
             }
         }
-
-        if context.hasChanges {
-            do {
-                try await context.perform {
-                    try context.save()
-                    context.reset()
-                }
-                pendingSaves = 0
-            } catch {
-                migratedCount -= pendingSaves
-                failedCount += pendingSaves
-                logger.error("payload-backfill-final-save: \(error.localizedDescription, privacy: .public)")
-                await context.perform {
-                    context.rollback()
-                }
-            }
-        }
-
-        return LegacyPayloadMigrationResult(
-            scannedCount: photoObjectIDs.count,
-            migratedCount: migratedCount,
-            missingAssetCount: missingAssetCount,
-            failedCount: failedCount
-        )
+        return LegacyPayloadMigrationResult(scannedCount: 0, migratedCount: 0, missingAssetCount: 0, failedCount: 0)
     }
 
-    /// Export photos as Live Photo paired resources only (still image + companion movie).
-    /// Returns URLs that can be handed to UIDocumentPickerViewController(forExporting:).
     func prepareExportFiles(for photos: [DailyPhoto]) async throws -> [URL] {
         let exportRoot = try makeExportRootDirectory()
         var exportedDirectories: [URL] = []
 
         for photo in photos {
             let photoDirectory = try createPhotoExportDirectory(for: photo, inside: exportRoot)
-            try await exportLivePhotoAssets(for: photo, to: photoDirectory)
+            try await exportPhotoAssets(for: photo, to: photoDirectory)
             exportedDirectories.append(photoDirectory)
         }
 
         return exportedDirectories
     }
 
-    /// Prepare shareable file URLs for a single photo export package.
-    /// The returned URLs include Live Photo paired resources when available.
-    /// If the photo has no Live Photo resources, this falls back to the original still asset.
     func prepareShareItemURLs(for photo: DailyPhoto) async throws -> [URL] {
-        do {
-            let directories = try await prepareExportFiles(for: [photo])
-            guard let directory = directories.first else { return [] }
+        let directories = try await prepareExportFiles(for: [photo])
+        guard let directory = directories.first else { return [] }
 
-            let urls = try FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )
-
-            return urls.sorted { $0.lastPathComponent < $1.lastPathComponent }
-        } catch PhotoStorageError.noLivePhotoAssets {
-            guard let fullImageAssetName = photo.fullImageAssetName else {
-                throw PhotoStorageError.noImageAsset
-            }
-            let stillURL = try resolveAssetURL(
-                named: fullImageAssetName,
-                fallbackData: payloadData(for: photo, key: PayloadKey.fullImageData)
-            )
-            return [stillURL]
-        }
-    }
-
-    /// Prepare shareable URLs for Live Photo paired resources only.
-    func prepareLivePhotoShareItemURLs(for photo: DailyPhoto) throws -> [URL] {
-        guard let livePhotoImageAssetName = photo.livePhotoImageAssetName,
-              let livePhotoVideoAssetName = photo.livePhotoVideoAssetName else {
-            throw PhotoStorageError.noLivePhotoAssets
-        }
-
-        let imageURL = try resolveAssetURL(
-            named: livePhotoImageAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoImageData) ?? payloadData(for: photo, key: PayloadKey.fullImageData)
-        )
-        let videoURL = try resolveAssetURL(
-            named: livePhotoVideoAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoVideoData)
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
         )
 
-        return [imageURL, videoURL]
+        return urls.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
-    /// Prepare a still-image URL in its original file format.
-    func prepareStillPhotoShareURL(for photo: DailyPhoto) throws -> URL {
+    func prepareLivePhotoShareItemURLs(for photo: DailyPhoto) async throws -> [URL] {
+        let resources = try await loadLivePhotoResources(from: photo)
+        return [resources.imageURL, resources.videoURL]
+    }
+
+    func prepareStillPhotoShareURL(for photo: DailyPhoto) async throws -> URL {
         guard let fullImageAssetName = photo.fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
-        return try resolveAssetURL(
-            named: fullImageAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.fullImageData)
-        )
+        return try await cloudKitService.loadAssetURL(named: fullImageAssetName)
+    }
+
+    private func stageStillAsset(data: Data, photoID: UUID, role: PhotoAssetRole) throws -> String {
+        let fileExtension = imageFileExtension(for: data)
+        let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
+        _ = try cloudKitService.stageAssetData(data, named: assetName)
+        return assetName
+    }
+
+    private func stageVideoAsset(from videoURL: URL, photoID: UUID, role: PhotoAssetRole) throws -> String {
+        let fileExtension = videoURL.pathExtension.isEmpty ? "mov" : videoURL.pathExtension
+        let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
+        _ = try cloudKitService.stageAssetFile(from: videoURL, named: assetName)
+        return assetName
     }
 
     private func makeExportRootDirectory() throws -> URL {
@@ -630,7 +498,11 @@ class PhotoStorageService {
     }
 
     private func createPhotoExportDirectory(for photo: DailyPhoto, inside root: URL) throws -> URL {
-        let dateText = photo.captureDate?.formatted(date: .numeric, time: .standard).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ",", with: "").replacingOccurrences(of: " ", with: "_") ?? "unknown_date"
+        let dateText = photo.captureDate?
+            .formatted(date: .numeric, time: .standard)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: " ", with: "_") ?? "unknown_date"
         let idText = photo.id?.uuidString ?? UUID().uuidString
         let directoryName = "photo_\(dateText)_\(idText)"
         let directoryURL = root.appendingPathComponent(directoryName, isDirectory: true)
@@ -638,34 +510,28 @@ class PhotoStorageService {
         return directoryURL
     }
 
-    private func exportLivePhotoAssets(for photo: DailyPhoto, to directory: URL) async throws {
-        guard let livePhotoImageAssetName = photo.livePhotoImageAssetName,
-              let livePhotoVideoAssetName = photo.livePhotoVideoAssetName else {
-            throw PhotoStorageError.noLivePhotoAssets
+    private func exportPhotoAssets(for photo: DailyPhoto, to directory: URL) async throws {
+        if let livePhotoImageAssetName = photo.livePhotoImageAssetName,
+           let livePhotoVideoAssetName = photo.livePhotoVideoAssetName {
+            try await copyAsset(named: livePhotoImageAssetName, to: directory)
+            try await copyAsset(named: livePhotoVideoAssetName, to: directory)
+            return
         }
 
-        try copyAsset(
-            named: livePhotoImageAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoImageData) ?? payloadData(for: photo, key: PayloadKey.fullImageData),
-            to: directory
-        )
-        try copyAsset(
-            named: livePhotoVideoAssetName,
-            fallbackData: payloadData(for: photo, key: PayloadKey.livePhotoVideoData),
-            to: directory
-        )
+        guard let fullImageAssetName = photo.fullImageAssetName else {
+            throw PhotoStorageError.noImageAsset
+        }
+        try await copyAsset(named: fullImageAssetName, to: directory)
     }
 
-    private func copyAsset(named assetName: String, fallbackData: Data?, to directory: URL) throws {
-        let sourceURL = try resolveAssetURL(named: assetName, fallbackData: fallbackData)
+    private func copyAsset(named assetName: String, to directory: URL) async throws {
+        let sourceURL = try await cloudKitService.loadAssetURL(named: assetName)
         let destinationURL = directory.appendingPathComponent(assetName)
-
         if FileManager.default.fileExists(atPath: destinationURL.path) {
             try FileManager.default.removeItem(at: destinationURL)
         }
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
     }
-
 
     private func imageFileExtension(for imageData: Data) -> String {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
@@ -751,7 +617,7 @@ class PhotoStorageService {
         return formatter
     }
 
-    private func photoModifiedTimestamps(photos: [DailyPhoto]) {
+    private func updateModifiedTimestamps(for photos: [DailyPhoto]) {
         let now = Date()
         for photo in photos {
             photo.modifiedAt = now
@@ -766,61 +632,10 @@ class PhotoStorageService {
         ].compactMap { $0 }).map { $0 }
     }
 
-    private func deleteAssets(named assetNames: Set<String>) {
+    private func deleteAssets(named assetNames: Set<String>) async {
         for assetName in assetNames {
-            cloudKitService.deleteAsset(named: assetName)
+            await cloudKitService.deleteRemoteAsset(named: assetName)
         }
-    }
-
-    private func missingSyncedPayloadPredicate() -> NSPredicate {
-        NSPredicate(
-            format: """
-            (fullImageAssetName != nil AND fullImageData == nil)
-            OR (livePhotoImageAssetName != nil AND livePhotoImageAssetName != fullImageAssetName AND livePhotoImageData == nil)
-            OR (livePhotoVideoAssetName != nil AND livePhotoVideoData == nil)
-            """
-        )
-    }
-
-    private func backfillSyncedPayloadsIfNeeded(for photo: DailyPhoto) throws -> Bool {
-        var didUpdate = false
-        var cachedImageDataByName: [String: Data] = [:]
-
-        if let fullImageAssetName = photo.fullImageAssetName,
-           payloadData(for: photo, key: PayloadKey.fullImageData) == nil {
-            let imageData = try payloadDataForMigration(named: fullImageAssetName, cache: &cachedImageDataByName)
-            photo.setValue(imageData, forKey: PayloadKey.fullImageData)
-            didUpdate = true
-        }
-
-        if let livePhotoImageAssetName = photo.livePhotoImageAssetName,
-           livePhotoImageAssetName != photo.fullImageAssetName,
-           payloadData(for: photo, key: PayloadKey.livePhotoImageData) == nil {
-            let liveImageData = try payloadDataForMigration(named: livePhotoImageAssetName, cache: &cachedImageDataByName)
-            photo.setValue(liveImageData, forKey: PayloadKey.livePhotoImageData)
-            didUpdate = true
-        }
-
-        if let livePhotoVideoAssetName = photo.livePhotoVideoAssetName,
-           payloadData(for: photo, key: PayloadKey.livePhotoVideoData) == nil {
-            let videoURL = try cloudKitService.loadAssetURL(named: livePhotoVideoAssetName)
-            let videoData = try Data(contentsOf: videoURL)
-            photo.setValue(videoData, forKey: PayloadKey.livePhotoVideoData)
-            didUpdate = true
-        }
-
-        return didUpdate
-    }
-
-    private func payloadDataForMigration(named assetName: String, cache: inout [String: Data]) throws -> Data {
-        if let cached = cache[assetName] {
-            return cached
-        }
-
-        let assetURL = try cloudKitService.loadAssetURL(named: assetName)
-        let data = try Data(contentsOf: assetURL)
-        cache[assetName] = data
-        return data
     }
 
     private func existingImportedPhotoFingerprints(context: NSManagedObjectContext) async -> Set<String> {
@@ -856,48 +671,47 @@ class PhotoStorageService {
         livePhotoVideoURL: URL?,
         context: NSManagedObjectContext
     ) async throws -> DailyPhoto {
+        let photoID = UUID()
         let exifMetadata = exifMetadata(from: imageData)
         let thumbnailData = thumbnailService.generateThumbnail(from: imageData)
         let importFingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: livePhotoVideoURL)
-        let imageExtension = imageFileExtension(for: imageData)
-        let imageAssetName = try await cloudKitService.saveImageDataAsset(imageData, fileExtension: imageExtension)
+        let imageAssetName = try stageStillAsset(
+            data: imageData,
+            photoID: photoID,
+            role: .still
+        )
+
         let videoAssetName: String?
         if let livePhotoVideoURL {
-            videoAssetName = try await cloudKitService.saveVideoAsset(from: livePhotoVideoURL)
+            videoAssetName = try stageVideoAsset(
+                from: livePhotoVideoURL,
+                photoID: photoID,
+                role: .livePhotoVideo
+            )
         } else {
             videoAssetName = nil
         }
 
         return await context.perform {
             let photo = DailyPhoto(context: context)
-            photo.id = UUID()
+            photo.id = photoID
             photo.captureDate = exifMetadata?.captureDate ?? Date()
             photo.createdAt = Date()
             photo.modifiedAt = Date()
-
-            if let location = exifMetadata?.location {
-                photo.latitude = location.latitude
-                photo.longitude = location.longitude
-            } else {
-                photo.latitude = 0
-                photo.longitude = 0
-            }
-
+            photo.latitude = exifMetadata?.location?.latitude ?? 0
+            photo.longitude = exifMetadata?.location?.longitude ?? 0
             photo.thumbnailData = thumbnailData
             photo.fullImageAssetName = imageAssetName
-            photo.setValue(imageData, forKey: PayloadKey.fullImageData)
-            photo.setValue(importFingerprint, forKey: PayloadKey.importFingerprint)
-
-            if let videoAssetName {
-                photo.livePhotoImageAssetName = imageAssetName
-                photo.livePhotoVideoAssetName = videoAssetName
-                photo.setValue(nil, forKey: PayloadKey.livePhotoImageData)
-                if let livePhotoVideoURL,
-                   let videoData = try? Data(contentsOf: livePhotoVideoURL) {
-                    photo.setValue(videoData, forKey: PayloadKey.livePhotoVideoData)
-                }
-            }
-
+            photo.livePhotoImageAssetName = videoAssetName == nil ? nil : imageAssetName
+            photo.livePhotoVideoAssetName = videoAssetName
+            photo.setValue(nil, forKey: "fullImageData")
+            photo.setValue(nil, forKey: "livePhotoImageData")
+            photo.setValue(nil, forKey: "livePhotoVideoData")
+            photo.setValue(importFingerprint, forKey: "importFingerprint")
+            photo.uploadState = .pending
+            photo.uploadAttemptCount = 0
+            photo.uploadErrorMessage = nil
+            photo.uploadRetryAfter = nil
             return photo
         }
     }
@@ -917,20 +731,320 @@ class PhotoStorageService {
 
         return imageDigest
     }
+}
 
-    private func payloadData(for photo: DailyPhoto, key: String) -> Data? {
-        photo.value(forKey: key) as? Data
+private struct PendingPhotoUpload {
+    let objectID: NSManagedObjectID
+    let photoID: UUID
+    let stillAssetName: String
+    let videoAssetName: String?
+    let attemptCount: Int
+}
+
+actor PhotoUploadService {
+    static let shared = PhotoUploadService()
+    static let backgroundTaskIdentifier = "me.riepl.progress.photo-upload"
+    static let didCompleteUploadNotification = Notification.Name("PhotoUploadService.didCompleteUpload")
+
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
+    private let pathMonitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "progress.photo-upload.monitor")
+
+    private var didStart = false
+    private var isProcessing = false
+
+    nonisolated static func registerBackgroundTask() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { task in
+            guard let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+
+            Task {
+                await PhotoUploadService.shared.handleBackgroundProcessingTask(processingTask)
+            }
+        }
     }
 
-    private func resolveAssetURL(named assetName: String, fallbackData: Data?) throws -> URL {
+    nonisolated static func scheduleBackgroundProcessing(earliestBeginDate: Date? = nil) {
+        let request = BGProcessingTaskRequest(identifier: backgroundTaskIdentifier)
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false
+        request.earliestBeginDate = earliestBeginDate
         do {
-            return try cloudKitService.loadAssetURL(named: assetName)
-        } catch CloudKitError.assetNotFound {
-            guard let fallbackData else {
-                throw CloudKitError.assetNotFound
-            }
-            return try cloudKitService.cacheAssetData(fallbackData, named: assetName)
+            try BGTaskScheduler.shared.submit(request)
+        } catch {
+            let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
+            logger.error("bg-submit: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    func start() {
+        guard !didStart else { return }
+        didStart = true
+
+        pathMonitor.pathUpdateHandler = { path in
+            guard path.status == .satisfied else { return }
+            Task {
+                await PhotoUploadService.shared.enqueuePendingUploads()
+            }
+        }
+        pathMonitor.start(queue: monitorQueue)
+
+        Self.scheduleBackgroundProcessing()
+
+        Task {
+            await enqueuePendingUploads()
+        }
+    }
+
+    func enqueuePendingUploads() async {
+        Self.scheduleBackgroundProcessing()
+        _ = await processPendingUploads(maxCount: nil)
+    }
+
+    func processPendingUploadsForTesting() async {
+        _ = await processPendingUploads(maxCount: nil)
+    }
+
+    private func handleBackgroundProcessingTask(_ task: BGProcessingTask) async {
+        Self.scheduleBackgroundProcessing()
+
+        let worker = Task {
+            let remaining = await processPendingUploads(maxCount: 8)
+            task.setTaskCompleted(success: remaining == 0)
+        }
+
+        task.expirationHandler = {
+            worker.cancel()
+        }
+
+        _ = await worker.value
+    }
+
+    @discardableResult
+    private func processPendingUploads(maxCount: Int?) async -> Int {
+        guard !isProcessing else {
+            return await pendingUploadCount()
+        }
+
+        isProcessing = true
+        defer { isProcessing = false }
+
+        var processedCount = 0
+
+        while !Task.isCancelled {
+            if let maxCount, processedCount >= maxCount {
+                break
+            }
+
+            guard let candidate = await claimNextPendingUpload() else {
+                break
+            }
+
+            do {
+                try await upload(candidate)
+                await markUploadCompleted(for: candidate.objectID)
+                processedCount += 1
+                await MainActor.run {
+                    NotificationCenter.default.post(name: Self.didCompleteUploadNotification, object: candidate.objectID)
+                }
+            } catch is CancellationError {
+                logger.error("upload-candidate-cancelled photo=\(candidate.photoID.uuidString, privacy: .public) attempt=\(candidate.attemptCount, privacy: .public)")
+                await markUploadFailed(
+                    for: candidate.objectID,
+                    message: "Upload cancelled before completion.",
+                    retryAfter: Date().addingTimeInterval(60)
+                )
+                break
+            } catch {
+                logger.error(
+                    "upload-candidate-failed photo=\(candidate.photoID.uuidString, privacy: .public) attempt=\(candidate.attemptCount, privacy: .public) error=\(self.describe(error), privacy: .public)"
+                )
+                await markUploadFailed(
+                    for: candidate.objectID,
+                    message: self.describe(error),
+                    retryAfter: retryDate(for: error, attemptCount: candidate.attemptCount)
+                )
+                processedCount += 1
+            }
+        }
+
+        let remaining = await pendingUploadCount()
+        if remaining > 0 {
+            Self.scheduleBackgroundProcessing(earliestBeginDate: await nextRetryDate())
+        }
+        return remaining
+    }
+
+    private func upload(_ candidate: PendingPhotoUpload) async throws {
+        let cloudKitService = await MainActor.run { CloudKitService.shared }
+        logger.log(
+            "upload-candidate-start photo=\(candidate.photoID.uuidString, privacy: .public) still=\(candidate.stillAssetName, privacy: .public) video=\(candidate.videoAssetName ?? "nil", privacy: .public) attempt=\(candidate.attemptCount, privacy: .public)"
+        )
+
+        try await cloudKitService.uploadStagedAsset(
+            named: candidate.stillAssetName,
+            photoID: candidate.photoID,
+            role: .still
+        )
+
+        if let videoAssetName = candidate.videoAssetName {
+            try await cloudKitService.uploadStagedAsset(
+                named: videoAssetName,
+                photoID: candidate.photoID,
+                role: .livePhotoVideo
+            )
+        }
+
+        logger.log("upload-candidate-finished photo=\(candidate.photoID.uuidString, privacy: .public)")
+    }
+
+    private func claimNextPendingUpload() async -> PendingPhotoUpload? {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        let now = Date()
+
+        return try? await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            request.fetchLimit = 1
+            request.sortDescriptors = [
+                NSSortDescriptor(keyPath: \DailyPhoto.createdAt, ascending: true),
+                NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: true)
+            ]
+            request.predicate = NSPredicate(
+                format: """
+                fullImageAssetName != nil AND (
+                    uploadStateRaw == nil OR
+                    uploadStateRaw == %@ OR
+                    uploadStateRaw == %@ OR
+                    (uploadStateRaw == %@ AND (uploadRetryAfter == nil OR uploadRetryAfter <= %@))
+                )
+                """,
+                PhotoUploadState.pending.rawValue,
+                PhotoUploadState.uploading.rawValue,
+                PhotoUploadState.failed.rawValue,
+                now as NSDate
+            )
+
+            guard let photo = try context.fetch(request).first,
+                  let photoID = photo.id,
+                  let stillAssetName = photo.fullImageAssetName else {
+                return nil
+            }
+
+            photo.uploadState = .uploading
+            photo.uploadAttemptCount += 1
+            photo.uploadErrorMessage = nil
+            try context.save()
+
+            self.logger.log(
+                "claim-pending-upload photo=\(photoID.uuidString, privacy: .public) still=\(stillAssetName, privacy: .public) video=\(photo.livePhotoVideoAssetName ?? "nil", privacy: .public) attempt=\(photo.uploadAttemptCount, privacy: .public)"
+            )
+
+            return PendingPhotoUpload(
+                objectID: photo.objectID,
+                photoID: photoID,
+                stillAssetName: stillAssetName,
+                videoAssetName: photo.livePhotoVideoAssetName,
+                attemptCount: Int(photo.uploadAttemptCount)
+            )
+        }
+    }
+
+    private func markUploadCompleted(for objectID: NSManagedObjectID) async {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        do {
+            try await context.perform {
+                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
+                    return
+                }
+                photo.uploadState = .uploaded
+                photo.uploadErrorMessage = nil
+                photo.uploadRetryAfter = nil
+                photo.modifiedAt = Date()
+                try context.save()
+                self.logger.log("mark-uploaded photo=\(photo.id?.uuidString ?? "nil", privacy: .public)")
+            }
+        } catch {
+            logger.error("mark-uploaded: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func markUploadFailed(for objectID: NSManagedObjectID, message: String, retryAfter: Date?) async {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        do {
+            try await context.perform {
+                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
+                    return
+                }
+                photo.uploadState = .failed
+                photo.uploadErrorMessage = message
+                photo.uploadRetryAfter = retryAfter
+                try context.save()
+                self.logger.error(
+                    "mark-upload-failed photo=\(photo.id?.uuidString ?? "nil", privacy: .public) retry=\(retryAfter?.description ?? "nil", privacy: .public) message=\(message, privacy: .public)"
+                )
+            }
+        } catch {
+            logger.error("mark-upload-failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func pendingUploadCount() async -> Int {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        return (try? await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            request.predicate = NSPredicate(
+                format: "uploadStateRaw == %@ OR uploadStateRaw == %@ OR uploadStateRaw == %@",
+                PhotoUploadState.pending.rawValue,
+                PhotoUploadState.uploading.rawValue,
+                PhotoUploadState.failed.rawValue
+            )
+            return try context.count(for: request)
+        }) ?? 0
+    }
+
+    private func nextRetryDate() async -> Date? {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        return try? await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            request.fetchLimit = 1
+            request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.uploadRetryAfter, ascending: true)]
+            request.predicate = NSPredicate(
+                format: "uploadStateRaw == %@ AND uploadRetryAfter != nil",
+                PhotoUploadState.failed.rawValue
+            )
+            return try context.fetch(request).first?.uploadRetryAfter
+        }
+    }
+
+    private func retryDate(for error: Error, attemptCount: Int) -> Date? {
+        let now = Date()
+
+        if let ckError = error as? CKError {
+            if let retryAfter = ckError.retryAfterSeconds {
+                return now.addingTimeInterval(retryAfter)
+            }
+
+            switch ckError.code {
+            case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy, .serverResponseLost:
+                let seconds = min(pow(2.0, Double(max(attemptCount, 1))) * 30.0, 60.0 * 60.0)
+                return now.addingTimeInterval(seconds)
+            case .notAuthenticated:
+                return now.addingTimeInterval(10 * 60)
+            default:
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    private func describe(_ error: Error) -> String {
+        if let ckError = error as? CKError {
+            return "CKError(\(ckError.code.rawValue)): \(ckError.localizedDescription)"
+        }
+        return error.localizedDescription
     }
 }
 
@@ -946,7 +1060,7 @@ enum PhotoStorageError: LocalizedError {
     case noLivePhotoAssets
     case missingImageData
     case saveFailed
-    
+
     var errorDescription: String? {
         switch self {
         case .noImageAsset:

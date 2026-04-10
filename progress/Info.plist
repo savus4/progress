@@ -6,8 +6,13 @@
 	<false/>
 	<key>CFBundleDisplayName</key>
 	<string>Work in Progress</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>me.riepl.progress.photo-upload</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>processing</string>
 		<string>remote-notification</string>
 	</array>
 </dict>

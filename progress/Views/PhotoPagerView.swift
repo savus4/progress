@@ -440,12 +440,12 @@ struct PhotoPagerView: View {
 
                 if currentPhoto.livePhotoImageAssetName != nil,
                    currentPhoto.livePhotoVideoAssetName != nil {
-                    let resources = try PhotoStorageService.shared.loadLivePhotoResources(from: currentPhoto)
+                    let resources = try await PhotoStorageService.shared.loadLivePhotoResources(from: currentPhoto)
                     let liveImageURL = resources.imageURL
                     let liveVideoURL = resources.videoURL
                     try await saveLivePhotoToLibrary(for: currentPhoto, imageURL: liveImageURL, videoURL: liveVideoURL)
                 } else if currentPhoto.fullImageAssetName != nil {
-                    let stillURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)
+                    let stillURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)
                     try await saveStillPhotoToLibrary(for: currentPhoto, imageURL: stillURL)
                 } else {
                     throw PhotoStorageError.noImageAsset
@@ -470,7 +470,7 @@ struct PhotoPagerView: View {
 
         Task {
             do {
-                let stillURL = try PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)
+                let stillURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)
                 let previewImage = makeSharePreviewImage(from: stillURL) ?? UIImage(data: currentPhoto.thumbnailData ?? Data())
                 let shareItem = URLActivityItemSource(
                     url: stillURL,
@@ -496,7 +496,7 @@ struct PhotoPagerView: View {
 
         Task {
             do {
-                let items = try PhotoStorageService.shared.prepareLivePhotoShareItemURLs(for: currentPhoto)
+                let items = try await PhotoStorageService.shared.prepareLivePhotoShareItemURLs(for: currentPhoto)
                 await MainActor.run {
                     sharePayload = SharePayload(items: items)
                     isPreparingShare = false
@@ -633,7 +633,7 @@ private struct PhotoPagerPageView: View {
         }
         .task(id: photo.objectID) {
             await loadFullImage()
-            loadLivePhotoResources()
+            await loadLivePhotoResources()
         }
     }
 
@@ -655,18 +655,22 @@ private struct PhotoPagerPageView: View {
         }
     }
 
-    private func loadLivePhotoResources() {
+    private func loadLivePhotoResources() async {
         #if targetEnvironment(simulator)
         livePhotoImageURL = nil
         livePhotoVideoURL = nil
         #else
         do {
-            let resources = try PhotoStorageService.shared.loadLivePhotoResources(from: photo)
-            livePhotoImageURL = resources.imageURL
-            livePhotoVideoURL = resources.videoURL
+            let resources = try await PhotoStorageService.shared.loadLivePhotoResources(from: photo)
+            await MainActor.run {
+                livePhotoImageURL = resources.imageURL
+                livePhotoVideoURL = resources.videoURL
+            }
         } catch {
-            livePhotoImageURL = nil
-            livePhotoVideoURL = nil
+            await MainActor.run {
+                livePhotoImageURL = nil
+                livePhotoVideoURL = nil
+            }
         }
         #endif
     }

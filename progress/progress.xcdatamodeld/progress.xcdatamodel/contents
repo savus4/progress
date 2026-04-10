@@ -16,6 +16,10 @@
         <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="modifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="importFingerprint" optional="YES" attributeType="String"/>
+        <attribute name="uploadAttemptCount" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES" syncable="NO"/>
+        <attribute name="uploadErrorMessage" optional="YES" attributeType="String" syncable="NO"/>
+        <attribute name="uploadRetryAfter" optional="YES" attributeType="Date" usesScalarValueType="NO" syncable="NO"/>
+        <attribute name="uploadStateRaw" optional="YES" attributeType="String" syncable="NO"/>
     </entity>
     <elements>
         <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="239"/>

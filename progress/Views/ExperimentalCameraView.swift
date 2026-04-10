@@ -57,6 +57,7 @@ struct ExperimentalCameraView: View {
     @State private var captureFeedbackStage: CaptureFeedbackStage?
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
+    private let processInfo = ProcessInfo.processInfo
 
     private var guideInteractionDisabled: Bool {
         isCapturing || isSaving || showingCapturePreview || captureFeedbackStage != nil
@@ -479,6 +480,8 @@ struct ExperimentalCameraView: View {
             location = nil
         }
 
+        let clock = ContinuousClock()
+        let saveStartedAt = clock.now
         do {
             _ = try await PhotoStorageService.shared.savePhoto(
                 image: image,
@@ -488,9 +491,26 @@ struct ExperimentalCameraView: View {
                 location: location,
                 context: viewContext
             )
+            try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
         } catch {
             print("Error saving photo: \(error.localizedDescription)")
+            try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
         }
+    }
+
+    private func enforceMinimumSaveDelay(startedAt: ContinuousClock.Instant, clock: ContinuousClock) async throws {
+        guard
+            let rawValue = processInfo.environment["UI_TEST_MIN_SAVE_DELAY"],
+            let delaySeconds = Double(rawValue),
+            delaySeconds > 0
+        else {
+            return
+        }
+
+        let elapsed = startedAt.duration(to: clock.now)
+        let minimum = Duration.seconds(delaySeconds)
+        guard elapsed < minimum else { return }
+        try await Task.sleep(for: minimum - elapsed)
     }
 
     private func makeTemporaryPreviewImageURL(from imageData: Data) -> URL? {
@@ -600,34 +620,50 @@ struct ExperimentalCapturePreviewOverlay: View {
                         }
 
                         HStack(spacing: 14) {
-                            Button(action: onRetake) {
-                                Text("Retake")
+                        Button(action: onRetake) {
+                            Text("Retake")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 15)
+                                .background(Color.white.opacity(0.1), in: Capsule())
+                        }
+                        .accessibilityIdentifier("capturePreviewRetakeButton")
+                        .disabled(isSaving)
+
+                        Button(action: onDone) {
+                            if isSaving {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                    Text("Saving…")
+                                        .font(.headline)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 15)
+                                .accessibilityIdentifier("capturePreviewSavingIndicator")
+                            } else {
+                                Text("Done")
                                     .font(.headline)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 15)
-                                    .background(Color.white.opacity(0.1), in: Capsule())
                             }
-                            .disabled(isSaving)
-
-                            Button(action: onDone) {
-                                if isSaving {
-                                    ProgressView()
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 15)
-                                } else {
-                                    Text("Done")
-                                        .font(.headline)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 15)
-                                }
-                            }
-                            .foregroundStyle(.black)
-                            .background(Color.white, in: Capsule())
-                            .disabled(isSaving)
                         }
-                        .foregroundStyle(.white)
+                        .accessibilityIdentifier("capturePreviewDoneButton")
+                        .foregroundStyle(.black)
+                        .background(Color.white, in: Capsule())
+                        .disabled(isSaving)
+                    }
+                    .foregroundStyle(.white)
                         .padding(.horizontal, 20)
                         .padding(.bottom, 28)
+
+                    if isSaving {
+                        Text("Uploading the original photo and saving metadata.")
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .padding(.horizontal, 24)
+                            .padding(.bottom, 8)
+                            .transition(.opacity)
+                    }
                     }
                     .padding(.top, max(geometry.safeAreaInsets.top - 4, 0))
                 } else {
@@ -660,6 +696,7 @@ struct ExperimentalCapturePreviewOverlay: View {
             }
         }
         .contentShape(Rectangle())
+        .accessibilityIdentifier("capturePreviewOverlay")
         .gesture(
             DragGesture(minimumDistance: 20)
                 .onEnded { value in
