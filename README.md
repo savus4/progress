@@ -1,203 +1,147 @@
-# Progress - Daily Photo Tracking App
+# Work in Progress
 
-A beautiful iOS app for capturing daily photos with alignment guides, Live Photos support, geolocation, and iCloud sync.
+`Work in Progress` is an iOS app for taking one photo a day, keeping the framing consistent with adjustable face guides, and building a personal visual timeline over time. The repository name is still `progress`, but the current in-app display name is `Work in Progress`.
 
-## Features
+## What The App Does Today
 
-### 📸 Camera with Alignment Guides
-- **Adjustable horizontal guidelines** for eyes and mouth positioning
-- **Fixed vertical center line** for consistent face alignment
-- **Transparent overlay** of previous photo for better consistency
-- **Front/back camera switching**
-- **Live Photo capture** with video recording
+- Capture still photos and Live Photos from a custom full-screen camera.
+- Adjust and persist eye and mouth alignment guides for more consistent framing.
+- Review photos in a scrollable grid with upload state badges and month overlays while scrolling.
+- Open photos in a full-screen pager with zoom, metadata, location info, and sharing actions.
+- Save photos to the system Photos library.
+- Import photos, Live Photos, and full albums from the user’s photo library.
+- Schedule up to three daily reminder notifications that can deep-link straight into the camera.
+- Export selected photos or the entire library through the system document picker.
+- Delete selected photos, delete photos in a date range, or wipe the library completely.
+- Sync photo metadata through Core Data + CloudKit, while original assets upload in the background.
 
-### 🖼️ Photo Grid
-- **Performant lazy loading** with thumbnail generation
-- **Infinite scroll** with date indicator
-- **Live Photo badges** on grid items
-- **Empty state** with call-to-action
-- **Tap to view** photo details
+## Main Screens
 
-### 📍 Photo Details
-- **Full-resolution image viewing**
-- **Live Photo playback** with video player
-- **Location display** with interactive map
-- **Photo metadata** (date, time, location)
-- **Share functionality**
-- **Delete capability**
+### Grid
 
-### ☁️ iCloud Sync
-- **Automatic CloudKit sync** across devices
-- **Efficient storage strategy**:
-  - Thumbnails stored in Core Data for fast grid loading
-  - Full-resolution images stored as CloudKit assets
-  - Live Photo videos stored as CloudKit assets
-- **Location data** synchronized with photos
+- The app launches into `PhotoGridView`.
+- Empty state includes a direct “Take Your First Photo” action.
+- Existing photos appear in an adaptive grid.
+- Tapping opens a paged fullscreen viewer.
+- Selection mode supports bulk export and bulk delete.
+- Photos show status badges such as uploading, retrying, paused, or downloading.
 
-### 🎨 Modern Design
-- **Liquid glass/glassmorphism** UI with 
-- **iOS 26 design language**
-- **Smooth animations** and transitions
-- **Dark mode support**
+### Camera
+
+- `ExperimentalCameraView` uses a custom `AVCaptureSession` flow.
+- Capture supports still photos and Live Photos when the device supports them.
+- Eye and mouth guides can be edited directly in the camera UI.
+- After capture, the app shows a preview step with retake/save before committing to storage.
+- Captured location is attached when permission is available.
+
+### Photo Viewer
+
+- `PhotoPagerView` presents photos fullscreen in a horizontal pager.
+- Still photos can be shared directly.
+- Live Photos can be shared as paired asset files.
+- Photos can be saved back to the system Photos library.
+- An info sheet shows timestamps, location name, coordinates, and a map when available.
+
+### Settings
+
+`NotificationSettingsView` currently acts as the app’s main settings and maintenance screen.
+
+- Daily reminder times with notification permission handling.
+- Photo import from picker, private import (experimental), and album import.
+- iCloud sync status and failed upload retry action.
+- Delete by date range.
+- Delete all local photo records and assets.
 
 ## Architecture
 
-### Core Data Model
-**DailyPhoto Entity:**
-- `id`: UUID - Unique identifier
-- `captureDate`: Date - When the photo was taken
-- `thumbnailData`: Binary Data - Compressed thumbnail for grid
-- `fullImageAssetName`: String - CloudKit asset identifier for full image
-- `livePhotoImageAssetName`: String - CloudKit asset for Live Photo still
-- `livePhotoVideoAssetName`: String - CloudKit asset for Live Photo video
-- `latitude`: Double - Photo location latitude
-- `longitude`: Double - Photo location longitude
-- `createdAt`: Date - Creation timestamp
-- `modifiedAt`: Date - Last modification timestamp
+### Stack
 
-### Services Layer
+- SwiftUI app
+- Core Data with `NSPersistentCloudKitContainer`
+- CloudKit private database for original asset storage
+- Background processing for deferred asset uploads
+- UserNotifications for reminders
+- Photos / PhotosUI for import, Live Photo handling, and save-back flows
 
-#### LocationService
-- Manages Core Location permissions and updates
-- Provides current location for photo capture
-- Handles authorization states
+### Storage Model
 
-#### CameraService
-- Manages AVCaptureSession and camera configuration
-- Handles Live Photo capture
-- Supports front/back camera switching
-- Photo quality prioritization
+The `DailyPhoto` Core Data entity currently stores:
 
-#### CloudKitService
-- Manages CloudKit asset storage and retrieval
-- Handles image and video file operations
-- Error handling for sync operations
+- `id`
+- `captureDate`
+- `thumbnailData`
+- `fullImageAssetName`
+- `livePhotoImageAssetName`
+- `livePhotoVideoAssetName`
+- `latitude`
+- `longitude`
+- `locationName`
+- `createdAt`
+- `modifiedAt`
+- `importFingerprint`
+- upload bookkeeping fields such as `uploadStateRaw`, `uploadAttemptCount`, `uploadErrorMessage`, and `uploadRetryAfter`
 
-#### ThumbnailService
-- Generates compressed thumbnails for grid performance
-- Configurable target sizes
-- JPEG compression optimization
+### Sync Model
 
-#### PhotoStorageService
-- High-level photo management API
-- Coordinates between Core Data and CloudKit
-- Handles full save/load/delete operations
+The current sync setup is split into two parts:
 
-### Views
+1. Core Data metadata sync uses `NSPersistentCloudKitContainer`.
+2. Original photo and Live Photo video files are staged locally and uploaded to CloudKit by `PhotoUploadService`.
 
-#### PhotoGridView
-- Main grid interface with LazyVGrid
-- Date-based scrolling with position indicator
-- Empty state handling
-- Navigation to camera and detail views
+That means the grid can show records immediately, while large original assets continue uploading in the background. The app also tracks retryable and paused uploads and surfaces those states in the UI.
 
-#### CameraView
-- Live camera preview with AVFoundation
-- Overlay alignment guides (adjustable)
-- Previous photo overlay (toggleable)
-- Settings sheet for guide customization
-- Location capture integration
+### Key Services
 
-#### PhotoDetailView
-- Full-screen photo display
-- Live Photo playback controls
-- Map view for photo location
-- Share and delete actions
+- `PhotoStorageService`: save, import, export, delete, and asset loading logic
+- `PhotoUploadService`: staged CloudKit uploads, retry handling, background processing
+- `CloudKitService`: asset staging, upload/download, local cache management
+- `CloudSyncMonitor`: sync/upload state exposed to the UI
+- `DailyReminderNotificationService`: recurring reminders and notification payload handling
+- `AlignmentGuideStore`: guide persistence via `UserDefaults` and iCloud key-value store
+- `LocationService`: capture-time location access
+- `LocationNameCacheService`: cached reverse-geocoded display names
 
-## Requirements
+## Project Requirements
 
-- iOS 18.0+ (or iOS 26.2 as configured)
-- Xcode 16.2+
-- Swift 5.0+
-- iCloud account for sync
+- iOS deployment target is currently `26.2` in the Xcode project
+- A physical device is strongly recommended for camera capture and Live Photos
+- An iCloud-capable signing setup is required for sync behavior
 
 ## Permissions
 
-The app requires the following permissions:
-- **Camera**: To capture photos
-- **Location (When In Use)**: To save location data with photos
-- **Photo Library (Add Only)**: Optional, for saving photos to library
+The app currently requests or uses:
+
+- Camera
+- Location When In Use
+- Photo Library access for imports
+- Photo Library Add Only for save-to-library actions
+- Notifications for daily reminders
 
 ## Setup
 
-1. **Open the project** in Xcode
-2. **Configure signing** with your Apple Developer account
-3. **Enable iCloud capability** in your App ID
-4. **Run on device** (camera requires physical device)
+1. Open `progress.xcodeproj` in Xcode.
+2. Configure signing for your team.
+3. Enable the capabilities used by the app:
+   - iCloud / CloudKit
+   - Push Notifications
+   - Background Modes
+     - `processing`
+     - `remote-notification`
+4. Run on a device if you want to test the full capture flow.
 
-### iCloud Configuration
+The app is configured to use the default CloudKit container:
 
-The app uses CloudKit with the default container:
-- Container ID: `iCloud.$(CFBundleIdentifier)`
-- Database: Private (user's iCloud account)
+- `iCloud.$(CFBundleIdentifier)`
 
-## Storage Strategy
+## Testing
 
-### Performance Optimization
-- **Grid**: Displays 300x300px JPEG thumbnails from Core Data
-- **Detail View**: Loads full-resolution images on demand from CloudKit
-- **Live Photos**: Video files loaded only when playback is initiated
+- `progressTests` uses Swift Testing for service and model coverage.
+- `progressUITests` includes a mocked capture flow that verifies saving from camera preview back into the grid.
+- UI tests support an in-memory store via the `UI_TEST_IN_MEMORY_STORE` launch argument.
 
-### CloudKit Sync
-- Automatic sync via `NSPersistentCloudKitContainer`
-- No manual sync code required
-- Works across all user's devices with the app installed
+## Current Notes
 
-## User Settings
-
-### Alignment Guides (Stored in UserDefaults)
-- `eyeLinePosition`: Default 0.35 (35% from top)
-- `mouthLinePosition`: Default 0.65 (65% from top)
-- `showOverlay`: Toggle for previous photo overlay
-
-## Future Enhancements
-
-- [ ] Movie creation from photo sequence
-- [ ] Time-lapse video export
-- [ ] Face detection for auto-alignment
-- [ ] Daily reminders/notifications
-- [ ] Photo editing capabilities
-- [ ] Multiple alignment guide presets
-- [ ] Photo filters/effects
-- [ ] Social sharing features
-- [ ] Statistics and insights
-- [ ] Search and filtering
-
-## Known Limitations
-
-1. **Live Photos** require physical device (not supported in simulator)
-2. **CloudKit sync** requires iCloud account and network connection
-3. **Location services** require user permission and GPS availability
-4. **Storage space** will grow with daily photos (plan accordingly)
-
-## Troubleshooting
-
-### Camera not working
-- Ensure camera permission is granted in Settings > Privacy > Camera
-- Must run on physical device (simulator doesn't support camera)
-
-### Photos not syncing
-- Verify iCloud account is signed in
-- Check iCloud Drive is enabled for the app
-- Ensure network connectivity
-- Check iCloud storage availability
-
-### Location not saving
-- Grant location permission in Settings > Privacy > Location Services
-- Ensure location services are enabled on device
-
-## Development Notes
-
-### Testing
-- Preview support in Xcode with sample data
-- In-memory Core Data for previews
-- Placeholder images for grid preview
-
-### Build Configuration
-- Bundle ID: `me.riepl.progress`
-- Development Team: AEHX3J775Q
-- Deployment Target: iOS 18.0+
-
-## License
-
-Copyright © 2026 Simon Riepl. All rights reserved.
+- Live Photo capture is device-dependent.
+- “Import Privately” is still marked experimental in the UI.
+- Asset uploads can be delayed and retried in the background depending on network/account state.
+- The repo still contains the old project name `progress` in code and paths, while the visible app name is `Work in Progress`.

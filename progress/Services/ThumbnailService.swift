@@ -102,19 +102,21 @@ final class DecodedThumbnailCache {
     func image(for objectID: NSManagedObjectID, data: Data?) async -> UIImage? {
         guard let data else { return nil }
 
-        let key = cacheKey(for: objectID)
+        let stringKey = objectID.uriRepresentation().absoluteString
+        let key = stringKey as NSString
         if let cachedImage = cache.object(forKey: key) {
             return cachedImage
         }
 
         return await withCheckedContinuation { continuation in
             workerQueue.async {
+                let cacheKey = stringKey as NSString
                 guard let image = UIImage(data: data) else {
                     continuation.resume(returning: nil)
                     return
                 }
 
-                self.cache.setObject(image, forKey: key, cost: self.cacheCost(for: image))
+                self.cache.setObject(image, forKey: cacheKey, cost: self.cacheCost(for: image))
                 continuation.resume(returning: image)
             }
         }

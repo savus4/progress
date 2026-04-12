@@ -30,9 +30,11 @@ final class CloudSyncMonitor: ObservableObject {
     @Published private(set) var pausedUploadCount = 0
     @Published private(set) var uploadingAssetCount = 0
     @Published private(set) var downloadingAssetCount = 0
+    @Published private(set) var isUploadProcessorActive = false
 
     private var observer: NSObjectProtocol?
     private var uploadObserver: NSObjectProtocol?
+    private var uploadProcessingObserver: NSObjectProtocol?
     private var contextSaveObserver: NSObjectProtocol?
     private var assetTransferObserver: NSObjectProtocol?
     private var activeDownloadAssetNames: Set<String> = []
@@ -59,6 +61,20 @@ final class CloudSyncMonitor: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 await self?.refreshUploadStatus()
+            }
+        }
+
+        uploadProcessingObserver = NotificationCenter.default.addObserver(
+            forName: PhotoUploadService.processingStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let isProcessing = notification.userInfo?["isProcessing"] as? Bool else {
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                self?.isUploadProcessorActive = isProcessing
             }
         }
 
@@ -101,6 +117,9 @@ final class CloudSyncMonitor: ObservableObject {
         }
         if let uploadObserver {
             NotificationCenter.default.removeObserver(uploadObserver)
+        }
+        if let uploadProcessingObserver {
+            NotificationCenter.default.removeObserver(uploadProcessingObserver)
         }
         if let contextSaveObserver {
             NotificationCenter.default.removeObserver(contextSaveObserver)
@@ -149,6 +168,10 @@ final class CloudSyncMonitor: ObservableObject {
         retryableUploadCount > 0
     }
 
+    var automaticOutstandingUploadCount: Int {
+        pendingUploadCount + uploadingAssetCount + failedUploadCount
+    }
+
     var statusTitle: String {
         if isRunningMigration {
             return "Preparing older photos for iCloud sync"
@@ -162,16 +185,22 @@ final class CloudSyncMonitor: ObservableObject {
             return "Some photo uploads are paused"
         }
 
-        if uploadingAssetCount > 0 {
-            return "Uploading original photos to iCloud"
-        }
+        if automaticOutstandingUploadCount > 0 {
+            if uploadingAssetCount > 0 || isUploadProcessorActive {
+                return automaticOutstandingUploadCount == 1
+                    ? "Uploading 1 original photo to iCloud"
+                    : "Uploading \(automaticOutstandingUploadCount) original photos to iCloud"
+            }
 
-        if pendingUploadCount > 0 {
-            return "Waiting to upload original photos"
-        }
+            if pendingUploadCount > 0 {
+                return automaticOutstandingUploadCount == 1
+                    ? "Waiting to upload 1 original photo"
+                    : "Waiting to upload \(automaticOutstandingUploadCount) original photos"
+            }
 
-        if failedUploadCount > 0 {
-            return "Some photo uploads will retry automatically"
+            return automaticOutstandingUploadCount == 1
+                ? "1 photo upload will retry automatically"
+                : "\(automaticOutstandingUploadCount) photo uploads will retry automatically"
         }
 
         switch syncState {
@@ -208,16 +237,22 @@ final class CloudSyncMonitor: ObservableObject {
             return "\(pausedUploadCount) photo\(pausedUploadCount == 1 ? "" : "s") need manual retry after account, quota, or asset issues are resolved."
         }
 
-        if uploadingAssetCount > 0 {
-            return "Currently uploading \(uploadingAssetCount) photo\(uploadingAssetCount == 1 ? "" : "s") in the background."
-        }
+        if automaticOutstandingUploadCount > 0 {
+            if uploadingAssetCount > 0 || isUploadProcessorActive {
+                return automaticOutstandingUploadCount == 1
+                    ? "1 photo is currently uploading in the background."
+                    : "\(automaticOutstandingUploadCount) photos are still queued for upload."
+            }
 
-        if pendingUploadCount > 0 {
-            return "Waiting to upload \(pendingUploadCount) photo\(pendingUploadCount == 1 ? "" : "s") when network and background time allow."
-        }
+            if pendingUploadCount > 0 {
+                return automaticOutstandingUploadCount == 1
+                    ? "1 photo is waiting to upload when network and background time allow."
+                    : "\(automaticOutstandingUploadCount) photos are still queued and will upload when network and background time allow."
+            }
 
-        if failedUploadCount > 0 {
-            return "\(failedUploadCount) photo\(failedUploadCount == 1 ? "" : "s") will retry automatically later."
+            return automaticOutstandingUploadCount == 1
+                ? "1 photo will retry automatically later."
+                : "\(automaticOutstandingUploadCount) photos are still in the automatic retry queue."
         }
 
         if let lastMigrationError {

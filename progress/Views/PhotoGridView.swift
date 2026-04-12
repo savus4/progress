@@ -10,7 +10,6 @@ struct PhotoGridView: View {
     private var photos: FetchedResults<DailyPhoto>
     
     @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
-    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
 
     @State private var showingCamera = false
     @State private var showingNotificationSettings = false
@@ -48,6 +47,7 @@ struct PhotoGridView: View {
     @State private var selectionSwipeOperation: SelectionSwipeOperation = .select
     @State private var lastAutoScrollTickDate: Date?
     @State private var didSyncExifMetadata = false
+    @State private var activeDownloadAssetNames: Set<String> = []
     private let autoScrollTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
     private let enableScrollDateDebugLogs = false
     
@@ -59,6 +59,7 @@ struct PhotoGridView: View {
         Array(photos)
     }
 
+    @MainActor
     private var photoGridItems: [PhotoGridItemSnapshot] {
         photos.map(PhotoGridItemSnapshot.init(photo:))
     }
@@ -99,7 +100,7 @@ struct PhotoGridView: View {
                                     item: item,
                                     isSelectionMode: isSelectionMode,
                                     isSelected: selectedPhotoIDs.contains(item.objectID),
-                                    isDownloading: cloudSyncMonitor.isDownloading(assetNames: item.assetNames)
+                                    isDownloading: item.assetNames.contains { activeDownloadAssetNames.contains($0) }
                                 )
                                 .equatable()
                                     .background {
@@ -311,15 +312,24 @@ struct PhotoGridView: View {
         .onDisappear {
         }
         .onAppear {
+            syncActiveDownloadSnapshot()
             openCameraIfNeededFromNotification()
         }
         .onChange(of: notificationNavigation.cameraOpenRequestToken) { _, token in
             guard token != nil else { return }
             openCameraIfNeededFromNotification()
         }
+        .onReceive(NotificationCenter.default.publisher(for: CloudKitService.assetTransferDidChangeNotification)) { notification in
+            handleAssetTransferNotification(notification)
+        }
         .task {
             await syncPhotoMetadataFromExifIfNeeded()
         }
+    }
+
+    @MainActor
+    private func syncActiveDownloadSnapshot() {
+        activeDownloadAssetNames = CloudSyncMonitor.shared.activeDownloadAssetNamesSnapshot
     }
 
     private func openCameraIfNeededFromNotification() {
@@ -327,6 +337,26 @@ struct PhotoGridView: View {
         showingCamera = true
         notificationNavigation.consumeCameraOpenRequest()
     }
+
+    @MainActor
+    private func handleAssetTransferNotification(_ notification: Notification) {
+        guard let kindRawValue = notification.userInfo?["kind"] as? String,
+              let phaseRawValue = notification.userInfo?["phase"] as? String,
+              let assetName = notification.userInfo?["assetName"] as? String,
+              let kind = CloudKitService.AssetTransferKind(rawValue: kindRawValue),
+              let phase = CloudKitService.AssetTransferPhase(rawValue: phaseRawValue),
+              kind == .download else {
+            return
+        }
+
+        switch phase {
+        case .started:
+            activeDownloadAssetNames.insert(assetName)
+        case .finished, .failed:
+            activeDownloadAssetNames.remove(assetName)
+        }
+    }
+
 
     private var floatingCaptureButton: some View {
         Button(action: { showingCamera = true }) {
@@ -379,16 +409,7 @@ struct PhotoGridView: View {
         guard !didSyncExifMetadata else { return }
         guard !photos.isEmpty else { return }
         didSyncExifMetadata = true
-
-        let photosNeedingMetadataSync = photos.filter { photo in
-            photo.captureDate == nil || (photo.latitude == 0 && photo.longitude == 0)
-        }
-        guard !photosNeedingMetadataSync.isEmpty else { return }
-
-        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded(
-            photos: photosNeedingMetadataSync,
-            context: viewContext
-        )
+        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded()
     }
 
     private func showScrollDateOverlay(for date: Date, direction: OverlayScrollDirection) {

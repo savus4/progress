@@ -54,6 +54,7 @@ final class PhotoStorageService {
     private let cloudKitService = CloudKitService.shared
     private let thumbnailService = ThumbnailService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoStorage")
+    private let metadataSyncBatchLimit = 50
 
     private init() {}
 
@@ -289,6 +290,36 @@ final class PhotoStorageService {
         )
     }
 
+    func syncPhotoMetadataFromAssetsIfNeeded(limit: Int? = nil) async {
+        let batchLimit = max(limit ?? metadataSyncBatchLimit, 1)
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+
+        let candidates: [PhotoMetadataSyncCandidate] = (try? await context.perform {
+            let request = NSFetchRequest<DailyPhoto>(entityName: "DailyPhoto")
+            request.fetchLimit = batchLimit
+            request.sortDescriptors = [
+                NSSortDescriptor(keyPath: \DailyPhoto.createdAt, ascending: false),
+                NSSortDescriptor(keyPath: \DailyPhoto.modifiedAt, ascending: false)
+            ]
+            request.predicate = NSPredicate(
+                format: "fullImageAssetName != nil AND (captureDate == nil OR (latitude == 0 AND longitude == 0))"
+            )
+
+            return try context.fetch(request).map {
+                PhotoMetadataSyncCandidate(
+                    objectID: $0.objectID,
+                    fullImageAssetName: $0.fullImageAssetName,
+                    captureDate: $0.captureDate,
+                    latitude: $0.latitude,
+                    longitude: $0.longitude
+                )
+            }
+        }) ?? []
+
+        guard !candidates.isEmpty else { return }
+        await syncPhotoMetadataFromAssetsIfNeeded(candidates: candidates, context: context)
+    }
+
     @MainActor
     func loadFullImage(from photo: DailyPhoto) async throws -> UIImage {
         let snapshot = snapshot(for: photo)
@@ -303,7 +334,7 @@ final class PhotoStorageService {
 
     @MainActor
     func syncPhotoMetadataFromAssetsIfNeeded(photos: [DailyPhoto], context: NSManagedObjectContext) async {
-        let candidates = photos.map {
+        let candidates = photos.prefix(metadataSyncBatchLimit).map {
             PhotoMetadataSyncCandidate(
                 objectID: $0.objectID,
                 fullImageAssetName: $0.fullImageAssetName,
@@ -312,13 +343,19 @@ final class PhotoStorageService {
                 longitude: $0.longitude
             )
         }
+        await syncPhotoMetadataFromAssetsIfNeeded(candidates: candidates, context: context)
+    }
+
+    private func syncPhotoMetadataFromAssetsIfNeeded(
+        candidates: [PhotoMetadataSyncCandidate],
+        context: NSManagedObjectContext
+    ) async {
         var updatesByObjectID: [NSManagedObjectID: PhotoMetadataUpdate] = [:]
 
         for candidate in candidates {
             guard let assetName = candidate.fullImageAssetName else { continue }
             guard let assetURL = try? await cloudKitService.loadAssetURL(named: assetName) else { continue }
-            guard let imageData = try? Data(contentsOf: assetURL) else { continue }
-            guard let metadata = exifMetadata(from: imageData) else { continue }
+            guard let metadata = exifMetadata(from: assetURL) else { continue }
 
             if let exifDate = metadata.captureDate {
                 let shouldUpdateDate: Bool
@@ -497,6 +534,7 @@ final class PhotoStorageService {
 
         guard remainingPhotoCount == 0 else { return }
         await PhotoUploadService.shared.cancelPendingWork()
+        cloudKitService.deleteAllLocalAssets()
         try await PersistenceController.shared.rebuildPersistentStore()
     }
 
@@ -689,6 +727,21 @@ final class PhotoStorageService {
         return (captureDate: captureDate, location: location)
     }
 
+    private func exifMetadata(from imageURL: URL) -> (captureDate: Date?, location: (latitude: Double, longitude: Double)?)? {
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+
+        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, sourceOptions as CFDictionary),
+              let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return nil
+        }
+
+        let captureDate = extractCaptureDate(from: metadata)
+        let location = extractLocation(from: metadata)
+        return (captureDate: captureDate, location: location)
+    }
+
     private func extractCaptureDate(from metadata: [CFString: Any]) -> Date? {
         let exif = metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let tiff = metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
@@ -763,9 +816,13 @@ final class PhotoStorageService {
     }
 
     private func deleteAssets(named assetNames: Set<String>) async {
+        guard !assetNames.isEmpty else { return }
+
         for assetName in assetNames {
-            await cloudKitService.deleteRemoteAsset(named: assetName)
+            cloudKitService.deleteAsset(named: assetName)
         }
+
+        await RemoteAssetDeletionService.shared.enqueue(assetNames: assetNames)
     }
 
     private func existingImportedPhotoFingerprints(
@@ -909,6 +966,221 @@ private struct PhotoMetadataUpdate: Sendable {
     var longitude: Double? = nil
 }
 
+private struct PendingRemoteAssetDeletion: Codable, Sendable {
+    let assetName: String
+    var attemptCount: Int
+    var retryAfter: Date?
+    var lastErrorDescription: String?
+}
+
+actor RemoteAssetDeletionService {
+    static let shared = RemoteAssetDeletionService()
+
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "RemoteAssetDeletion")
+    private let pathMonitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "progress.remote-asset-deletion.monitor")
+    private let storageURL: URL
+
+    private var didStart = false
+    private var didLoadQueue = false
+    private var isProcessing = false
+    private var queuedDeletionsByAssetName: [String: PendingRemoteAssetDeletion] = [:]
+
+    init() {
+        storageURL = Self.makeStorageURL()
+    }
+
+    func start() async {
+        guard !didStart else { return }
+        didStart = true
+
+        loadQueueIfNeeded()
+
+        pathMonitor.pathUpdateHandler = { path in
+            guard path.status == .satisfied else { return }
+            Task {
+                await RemoteAssetDeletionService.shared.processPendingDeletions(expeditingRetries: true)
+            }
+        }
+        pathMonitor.start(queue: monitorQueue)
+
+        await processPendingDeletions(expeditingRetries: true)
+    }
+
+    func enqueue(assetNames: Set<String>) async {
+        guard !assetNames.isEmpty else { return }
+        loadQueueIfNeeded()
+
+        var didChangeQueue = false
+        for assetName in assetNames {
+            if queuedDeletionsByAssetName[assetName] == nil {
+                queuedDeletionsByAssetName[assetName] = PendingRemoteAssetDeletion(
+                    assetName: assetName,
+                    attemptCount: 0,
+                    retryAfter: nil,
+                    lastErrorDescription: nil
+                )
+                didChangeQueue = true
+            }
+        }
+
+        if didChangeQueue {
+            persistQueue()
+        }
+
+        await processPendingDeletions()
+    }
+
+    func processPendingDeletions(expeditingRetries: Bool = false) async {
+        loadQueueIfNeeded()
+
+        guard !queuedDeletionsByAssetName.isEmpty else { return }
+        guard !isProcessing else { return }
+
+        if !expeditingRetries, pathMonitor.currentPath.status != .satisfied {
+            return
+        }
+
+        if expeditingRetries {
+            expediteRetryableDeletionsIfReachable()
+        }
+
+        isProcessing = true
+        defer { isProcessing = false }
+
+        let now = Date()
+        let orderedAssetNames = queuedDeletionsByAssetName.keys.sorted()
+        var didChangeQueue = false
+
+        for assetName in orderedAssetNames {
+            guard var pendingDeletion = queuedDeletionsByAssetName[assetName] else {
+                continue
+            }
+
+            if let retryAfter = pendingDeletion.retryAfter, retryAfter > now {
+                continue
+            }
+
+            do {
+                try await CloudKitService.shared.deleteRemoteAssetRecord(named: assetName)
+                queuedDeletionsByAssetName.removeValue(forKey: assetName)
+                didChangeQueue = true
+                logger.log("remote-asset-delete-succeeded name=\(assetName, privacy: .public)")
+            } catch {
+                pendingDeletion.attemptCount += 1
+                pendingDeletion.retryAfter = retryDate(for: error, attemptCount: pendingDeletion.attemptCount, now: now)
+                pendingDeletion.lastErrorDescription = describe(error)
+                queuedDeletionsByAssetName[assetName] = pendingDeletion
+                didChangeQueue = true
+                logger.error(
+                    "remote-asset-delete-failed name=\(assetName, privacy: .public) attempt=\(pendingDeletion.attemptCount, privacy: .public) error=\(self.describe(error), privacy: .public)"
+                )
+            }
+        }
+
+        if didChangeQueue {
+            persistQueue()
+        }
+    }
+
+    private func loadQueueIfNeeded() {
+        guard !didLoadQueue else { return }
+        defer { didLoadQueue = true }
+
+        guard let data = try? Data(contentsOf: storageURL) else { return }
+        guard let deletions = try? JSONDecoder().decode([PendingRemoteAssetDeletion].self, from: data) else {
+            return
+        }
+
+        queuedDeletionsByAssetName = Dictionary(uniqueKeysWithValues: deletions.map { ($0.assetName, $0) })
+    }
+
+    private func persistQueue() {
+        let deletions = queuedDeletionsByAssetName.values.sorted { $0.assetName < $1.assetName }
+
+        if deletions.isEmpty {
+            try? FileManager.default.removeItem(at: storageURL)
+            return
+        }
+
+        do {
+            let data = try JSONEncoder().encode(deletions)
+            try data.write(to: storageURL, options: .atomic)
+        } catch {
+            logger.error("remote-asset-delete-persist: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func expediteRetryableDeletionsIfReachable() {
+        guard pathMonitor.currentPath.status == .satisfied else { return }
+
+        var didChangeQueue = false
+        for assetName in queuedDeletionsByAssetName.keys {
+            guard var pendingDeletion = queuedDeletionsByAssetName[assetName],
+                  pendingDeletion.retryAfter != nil else {
+                continue
+            }
+
+            pendingDeletion.retryAfter = nil
+            queuedDeletionsByAssetName[assetName] = pendingDeletion
+            didChangeQueue = true
+        }
+
+        if didChangeQueue {
+            persistQueue()
+        }
+    }
+
+    private func retryDate(for error: Error, attemptCount: Int, now: Date) -> Date {
+        if let ckError = error as? CKError {
+            if let retryAfterSeconds = ckError.retryAfterSeconds {
+                return now.addingTimeInterval(retryAfterSeconds)
+            }
+
+            switch ckError.code {
+            case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy, .serverResponseLost, .accountTemporarilyUnavailable:
+                return backoffRetryDate(attemptCount: attemptCount, now: now)
+            case .notAuthenticated:
+                return now.addingTimeInterval(15 * 60)
+            case .permissionFailure, .badContainer, .missingEntitlement, .quotaExceeded:
+                return now.addingTimeInterval(60 * 60)
+            default:
+                return backoffRetryDate(attemptCount: attemptCount, now: now)
+            }
+        }
+
+        return backoffRetryDate(attemptCount: attemptCount, now: now)
+    }
+
+    private func backoffRetryDate(attemptCount: Int, now: Date) -> Date {
+        let clampedAttemptCount = max(1, min(attemptCount, 8))
+        let seconds = min(pow(2.0, Double(clampedAttemptCount)) * 30.0, 60.0 * 60.0)
+        return now.addingTimeInterval(seconds)
+    }
+
+    private func describe(_ error: Error) -> String {
+        if let ckError = error as? CKError {
+            return "CKError(\(ckError.code.rawValue)): \(ckError.localizedDescription)"
+        }
+        return error.localizedDescription
+    }
+
+    private static func makeStorageURL() -> URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "progress"
+        let directoryURL = baseURL
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("RemoteAssetDeletion", isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: directoryURL.path) {
+            try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        }
+
+        return directoryURL.appendingPathComponent("pending-deletions.json", isDirectory: false)
+    }
+}
+
 private struct PendingPhotoUpload {
     let objectID: NSManagedObjectID
     let photoID: UUID
@@ -926,6 +1198,7 @@ actor PhotoUploadService {
     static let shared = PhotoUploadService()
     static let backgroundTaskIdentifier = "me.riepl.progress.photo-upload"
     static let didCompleteUploadNotification = Notification.Name("PhotoUploadService.didCompleteUpload")
+    static let processingStateDidChangeNotification = Notification.Name("PhotoUploadService.processingStateDidChange")
     private static let maxUploadAttemptCount: Int16 = .max
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
@@ -1024,7 +1297,23 @@ actor PhotoUploadService {
         }
 
         isProcessing = true
-        defer { isProcessing = false }
+        await MainActor.run {
+            NotificationCenter.default.post(
+                name: Self.processingStateDidChangeNotification,
+                object: nil,
+                userInfo: ["isProcessing": true]
+            )
+        }
+        defer {
+            isProcessing = false
+            Task { @MainActor in
+                NotificationCenter.default.post(
+                    name: Self.processingStateDidChangeNotification,
+                    object: nil,
+                    userInfo: ["isProcessing": false]
+                )
+            }
+        }
 
         var processedCount = 0
 

@@ -262,20 +262,45 @@ final class CloudKitService {
 
     func deleteRemoteAsset(named assetName: String) async {
         deleteAsset(named: assetName)
+        try? await deleteRemoteAssetRecord(named: assetName)
+    }
 
+    func deleteRemoteAssetRecord(named assetName: String) async throws {
         let recordID = CKRecord.ID(recordName: assetName)
-        _ = try? await privateDatabase.modifyRecords(
-            saving: [],
-            deleting: [recordID],
-            savePolicy: .changedKeys,
-            atomically: false
-        )
+        do {
+            let results = try await privateDatabase.modifyRecords(
+                saving: [],
+                deleting: [recordID],
+                savePolicy: .changedKeys,
+                atomically: false
+            )
+
+            if case .failure(let error) = results.deleteResults[recordID] {
+                let normalizedError = cloudKitError(for: error)
+                if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
+                    return
+                }
+                throw normalizedError
+            }
+        } catch {
+            let normalizedError = cloudKitError(for: error)
+            if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
+                return
+            }
+            throw normalizedError
+        }
     }
 
     func storedPersistentAssetNames() -> Set<String> {
         let cachedNames = (try? fileManager.contentsOfDirectory(atPath: cacheDirectoryURL.path)) ?? []
         let stagedNames = (try? fileManager.contentsOfDirectory(atPath: stagingDirectoryURL.path)) ?? []
         return Set(cachedNames).union(stagedNames)
+    }
+
+    func deleteAllLocalAssets() {
+        deleteContents(of: cacheDirectoryURL)
+        deleteContents(of: stagingDirectoryURL)
+        UserDefaults.standard.removeObject(forKey: cacheIndexKey)
     }
 
     private func saveAssetData(
@@ -433,6 +458,20 @@ final class CloudKitService {
             try? fileManager.removeItem(at: assetURL)
             totalSize -= fileSizes[assetName] ?? 0
             removeCachedAccessDate(for: assetName)
+        }
+    }
+
+    private func deleteContents(of directoryURL: URL) {
+        guard let fileURLs = try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        for fileURL in fileURLs {
+            try? fileManager.removeItem(at: fileURL)
         }
     }
 

@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         Task {
             await PhotoUploadService.shared.start()
+            await RemoteAssetDeletionService.shared.start()
         }
 
         Task.detached(priority: .utility) {
@@ -68,6 +69,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 expeditingRetries: true,
                 forceRetryExpedite: true
             )
+            await RemoteAssetDeletionService.shared.processPendingDeletions(expeditingRetries: true)
         }
     }
 
