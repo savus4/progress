@@ -4,6 +4,26 @@ import MapKit
 import Photos
 import ImageIO
 
+private struct PhotoPagerSnapshot {
+    let captureDate: Date?
+    let latitude: Double
+    let longitude: Double
+    let thumbnailData: Data?
+    let fullImageAssetName: String?
+    let livePhotoImageAssetName: String?
+    let livePhotoVideoAssetName: String?
+
+    init(photo: DailyPhoto) {
+        captureDate = photo.captureDate
+        latitude = photo.latitude
+        longitude = photo.longitude
+        thumbnailData = photo.thumbnailData
+        fullImageAssetName = photo.fullImageAssetName
+        livePhotoImageAssetName = photo.livePhotoImageAssetName
+        livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+    }
+}
+
 struct PhotoPagerView: View {
     let photos: [DailyPhoto]
     @Binding var selectedIndex: Int
@@ -425,92 +445,91 @@ struct PhotoPagerView: View {
 
     private func saveToPhotosLibrary() {
         guard !isPreparingShare, let currentPhoto else { return }
+        let snapshot = PhotoPagerSnapshot(photo: currentPhoto)
         isPreparingShare = true
 
-        Task {
+        Task { @MainActor in
             do {
                 let authorizationStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
                 guard authorizationStatus == .authorized || authorizationStatus == .limited else {
-                    await MainActor.run {
-                        shareStatusMessage = "Photos permission is required to save."
-                        isPreparingShare = false
-                    }
+                    shareStatusMessage = "Photos permission is required to save."
+                    isPreparingShare = false
                     return
                 }
 
-                if currentPhoto.livePhotoImageAssetName != nil,
-                   currentPhoto.livePhotoVideoAssetName != nil {
-                    let resources = try await PhotoStorageService.shared.loadLivePhotoResources(from: currentPhoto)
+                if snapshot.livePhotoImageAssetName != nil,
+                   snapshot.livePhotoVideoAssetName != nil {
+                    let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
+                        imageAssetName: snapshot.livePhotoImageAssetName,
+                        videoAssetName: snapshot.livePhotoVideoAssetName
+                    )
                     let liveImageURL = resources.imageURL
                     let liveVideoURL = resources.videoURL
-                    try await saveLivePhotoToLibrary(for: currentPhoto, imageURL: liveImageURL, videoURL: liveVideoURL)
-                } else if currentPhoto.fullImageAssetName != nil {
-                    let stillURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)
-                    try await saveStillPhotoToLibrary(for: currentPhoto, imageURL: stillURL)
+                    try await saveLivePhotoToLibrary(for: snapshot, imageURL: liveImageURL, videoURL: liveVideoURL)
+                } else if snapshot.fullImageAssetName != nil {
+                    let stillURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
+                        fullImageAssetName: snapshot.fullImageAssetName
+                    )
+                    try await saveStillPhotoToLibrary(for: snapshot, imageURL: stillURL)
                 } else {
                     throw PhotoStorageError.noImageAsset
                 }
 
-                await MainActor.run {
-                    shareStatusMessage = "Saved to Photos."
-                    isPreparingShare = false
-                }
+                shareStatusMessage = "Saved to Photos."
+                isPreparingShare = false
             } catch {
-                await MainActor.run {
-                    shareStatusMessage = "Failed to save to Photos: \(error.localizedDescription)"
-                    isPreparingShare = false
-                }
+                shareStatusMessage = "Failed to save to Photos: \(error.localizedDescription)"
+                isPreparingShare = false
             }
         }
     }
 
     private func shareStillPhoto() {
         guard !isPreparingShare, let currentPhoto else { return }
+        let snapshot = PhotoPagerSnapshot(photo: currentPhoto)
         isPreparingShare = true
 
-        Task {
+        Task { @MainActor in
             do {
-                let stillURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(for: currentPhoto)
-                let previewImage = makeSharePreviewImage(from: stillURL) ?? UIImage(data: currentPhoto.thumbnailData ?? Data())
+                let stillURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
+                    fullImageAssetName: snapshot.fullImageAssetName
+                )
+                let previewImage = makeSharePreviewImage(from: stillURL) ?? UIImage(data: snapshot.thumbnailData ?? Data())
                 let shareItem = URLActivityItemSource(
                     url: stillURL,
                     title: navigationDateTitle,
                     previewImage: previewImage
                 )
-                await MainActor.run {
-                    sharePayload = SharePayload(items: [shareItem])
-                    isPreparingShare = false
-                }
+                sharePayload = SharePayload(items: [shareItem])
+                isPreparingShare = false
             } catch {
-                await MainActor.run {
-                    shareStatusMessage = "Failed to prepare photo share: \(error.localizedDescription)"
-                    isPreparingShare = false
-                }
+                shareStatusMessage = "Failed to prepare photo share: \(error.localizedDescription)"
+                isPreparingShare = false
             }
         }
     }
 
     private func shareLivePhotoFiles() {
         guard !isPreparingShare, let currentPhoto else { return }
+        let snapshot = PhotoPagerSnapshot(photo: currentPhoto)
         isPreparingShare = true
 
-        Task {
+        Task { @MainActor in
             do {
-                let items = try await PhotoStorageService.shared.prepareLivePhotoShareItemURLs(for: currentPhoto)
-                await MainActor.run {
-                    sharePayload = SharePayload(items: items)
-                    isPreparingShare = false
-                }
+                let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
+                    imageAssetName: snapshot.livePhotoImageAssetName,
+                    videoAssetName: snapshot.livePhotoVideoAssetName
+                )
+                sharePayload = SharePayload(items: [resources.imageURL, resources.videoURL])
+                isPreparingShare = false
             } catch {
-                await MainActor.run {
-                    shareStatusMessage = "No Live Photo files available for this item."
-                    isPreparingShare = false
-                }
+                shareStatusMessage = "No Live Photo files available for this item."
+                isPreparingShare = false
             }
         }
     }
 
-    private func saveLivePhotoToLibrary(for photo: DailyPhoto, imageURL: URL, videoURL: URL) async throws {
+    private func saveLivePhotoToLibrary(for photo: PhotoPagerSnapshot, imageURL: URL, videoURL: URL) async throws {
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             request.creationDate = photo.captureDate
@@ -522,7 +541,7 @@ struct PhotoPagerView: View {
         }
     }
 
-    private func saveStillPhotoToLibrary(for photo: DailyPhoto, imageURL: URL) async throws {
+    private func saveStillPhotoToLibrary(for photo: PhotoPagerSnapshot, imageURL: URL) async throws {
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             request.creationDate = photo.captureDate
@@ -563,19 +582,16 @@ struct PhotoPagerView: View {
 
     private func deletePhoto() {
         guard !isDeleting, let currentPhoto else { return }
+        let objectID = currentPhoto.objectID
 
         isDeleting = true
-        Task {
+        Task { @MainActor in
             do {
-                try await PhotoStorageService.shared.deletePhoto(currentPhoto, context: viewContext)
-                await MainActor.run {
-                    isDeleting = false
-                    dismiss()
-                }
+                try await PhotoStorageService.shared.deletePhoto(objectID, context: viewContext)
+                isDeleting = false
+                dismiss()
             } catch {
-                await MainActor.run {
-                    isDeleting = false
-                }
+                isDeleting = false
                 print("Failed to delete photo: \(error.localizedDescription)")
             }
         }
@@ -673,40 +689,43 @@ private struct PhotoPagerPageView: View {
         .frame(height: 400)
     }
 
+    @MainActor
     private func loadFullImage() async {
+        let fullImageAssetName = photo.fullImageAssetName
+        let thumbnailData = photo.thumbnailData
+
         do {
-            let image = try await PhotoStorageService.shared.loadFullImage(from: photo)
-            await MainActor.run {
-                fullImage = image
-                isLoadingImage = false
-            }
+            let image = try await PhotoStorageService.shared.loadFullImage(named: fullImageAssetName)
+            fullImage = image
+            isLoadingImage = false
         } catch {
-            if let thumbnailData = photo.thumbnailData,
+            if let thumbnailData,
                let thumbnail = UIImage(data: thumbnailData) {
-                await MainActor.run {
-                    fullImage = thumbnail
-                    isLoadingImage = false
-                }
+                fullImage = thumbnail
+                isLoadingImage = false
             }
         }
     }
 
+    @MainActor
     private func loadLivePhotoResources() async {
+        let livePhotoImageAssetName = photo.livePhotoImageAssetName
+        let livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+
         #if targetEnvironment(simulator)
         livePhotoImageURL = nil
         livePhotoVideoURL = nil
         #else
         do {
-            let resources = try await PhotoStorageService.shared.loadLivePhotoResources(from: photo)
-            await MainActor.run {
-                livePhotoImageURL = resources.imageURL
-                livePhotoVideoURL = resources.videoURL
-            }
+            let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
+                imageAssetName: livePhotoImageAssetName,
+                videoAssetName: livePhotoVideoAssetName
+            )
+            livePhotoImageURL = resources.imageURL
+            livePhotoVideoURL = resources.videoURL
         } catch {
-            await MainActor.run {
-                livePhotoImageURL = nil
-                livePhotoVideoURL = nil
-            }
+            livePhotoImageURL = nil
+            livePhotoVideoURL = nil
         }
         #endif
     }

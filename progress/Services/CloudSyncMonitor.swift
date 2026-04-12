@@ -27,6 +27,7 @@ final class CloudSyncMonitor: ObservableObject {
     @Published private(set) var lastMigrationError: String?
     @Published private(set) var pendingUploadCount = 0
     @Published private(set) var failedUploadCount = 0
+    @Published private(set) var pausedUploadCount = 0
     @Published private(set) var uploadingAssetCount = 0
     @Published private(set) var downloadingAssetCount = 0
 
@@ -113,11 +114,11 @@ final class CloudSyncMonitor: ObservableObject {
         if downloadingAssetCount > 0 {
             return "arrow.down.circle.icloud"
         }
-        if uploadingAssetCount > 0 || pendingUploadCount > 0 {
-            return "arrow.triangle.2.circlepath.icloud"
-        }
-        if failedUploadCount > 0 {
+        if pausedUploadCount > 0 {
             return "exclamationmark.icloud"
+        }
+        if uploadingAssetCount > 0 || pendingUploadCount > 0 || failedUploadCount > 0 {
+            return "arrow.triangle.2.circlepath.icloud"
         }
 
         switch syncState {
@@ -131,13 +132,21 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var isFailing: Bool {
-        if failedUploadCount > 0 {
+        if pausedUploadCount > 0 {
             return true
         }
         if case .failed = syncState {
             return true
         }
         return false
+    }
+
+    var retryableUploadCount: Int {
+        failedUploadCount + pausedUploadCount
+    }
+
+    var hasRetryableUploads: Bool {
+        retryableUploadCount > 0
     }
 
     var statusTitle: String {
@@ -149,6 +158,10 @@ final class CloudSyncMonitor: ObservableObject {
             return "Downloading original photos from iCloud"
         }
 
+        if pausedUploadCount > 0 {
+            return "Some photo uploads are paused"
+        }
+
         if uploadingAssetCount > 0 {
             return "Uploading original photos to iCloud"
         }
@@ -158,7 +171,7 @@ final class CloudSyncMonitor: ObservableObject {
         }
 
         if failedUploadCount > 0 {
-            return "Some photo uploads need attention"
+            return "Some photo uploads will retry automatically"
         }
 
         switch syncState {
@@ -189,6 +202,10 @@ final class CloudSyncMonitor: ObservableObject {
 
         if downloadingAssetCount > 0 {
             return "Currently downloading \(downloadingAssetCount) photo\(downloadingAssetCount == 1 ? "" : "s") from iCloud for viewing."
+        }
+
+        if pausedUploadCount > 0 {
+            return "\(pausedUploadCount) photo\(pausedUploadCount == 1 ? "" : "s") need manual retry after account, quota, or asset issues are resolved."
         }
 
         if uploadingAssetCount > 0 {
@@ -269,16 +286,19 @@ final class CloudSyncMonitor: ObservableObject {
                 let uploading = try count(for: [PhotoUploadState.uploading.rawValue])
                 let pending = try count(for: [PhotoUploadState.pending.rawValue])
                 let failed = try count(for: [PhotoUploadState.failed.rawValue])
-                return (pending, uploading, failed)
+                let paused = try count(for: [PhotoUploadState.paused.rawValue])
+                return (pending, uploading, failed, paused)
             }
 
             pendingUploadCount = counts.0
             uploadingAssetCount = counts.1
             failedUploadCount = counts.2
+            pausedUploadCount = counts.3
         } catch {
             pendingUploadCount = 0
             uploadingAssetCount = 0
             failedUploadCount = 0
+            pausedUploadCount = 0
         }
     }
 

@@ -511,24 +511,21 @@ struct PhotoGridView: View {
         }
 
         isDeletingSelection = true
+        let photoIDsToDelete = photosToDelete.map(\.objectID)
 
-        Task {
+        Task { @MainActor in
             do {
-                for photo in photosToDelete {
-                    try await PhotoStorageService.shared.deletePhoto(photo, context: viewContext)
+                for photoID in photoIDsToDelete {
+                    try await PhotoStorageService.shared.deletePhoto(photoID, context: viewContext)
                 }
 
-                await MainActor.run {
-                    isDeletingSelection = false
-                    isSelectionMode = false
-                    endSelectionSwipe()
-                    selectedPhotoIDs.removeAll()
-                }
+                isDeletingSelection = false
+                isSelectionMode = false
+                endSelectionSwipe()
+                selectedPhotoIDs.removeAll()
             } catch {
-                await MainActor.run {
-                    isDeletingSelection = false
-                    exportAlertMessage = "Delete failed: \(error.localizedDescription)"
-                }
+                isDeletingSelection = false
+                exportAlertMessage = "Delete failed: \(error.localizedDescription)"
             }
         }
     }
@@ -537,26 +534,22 @@ struct PhotoGridView: View {
         guard !isExporting else { return }
         isExporting = true
 
-        Task {
+        Task { @MainActor in
             do {
                 let urls = try await PhotoStorageService.shared.prepareExportFiles(for: photosToExport)
-                await MainActor.run {
-                    exportedFileURLs = urls
-                    showingExportPicker = !urls.isEmpty
-                    if urls.isEmpty {
-                        exportAlertMessage = "Nothing was exported."
-                    } else {
-                        isSelectionMode = false
-                        endSelectionSwipe()
-                        selectedPhotoIDs.removeAll()
-                    }
-                    isExporting = false
+                exportedFileURLs = urls
+                showingExportPicker = !urls.isEmpty
+                if urls.isEmpty {
+                    exportAlertMessage = "Nothing was exported."
+                } else {
+                    isSelectionMode = false
+                    endSelectionSwipe()
+                    selectedPhotoIDs.removeAll()
                 }
+                isExporting = false
             } catch {
-                await MainActor.run {
-                    exportAlertMessage = "Export failed: \(error.localizedDescription)"
-                    isExporting = false
-                }
+                exportAlertMessage = "Export failed: \(error.localizedDescription)"
+                isExporting = false
             }
         }
     }
@@ -773,6 +766,14 @@ struct PhotoGridItem: View {
                     .padding(.vertical, 5)
                     .background(.orange.opacity(0.9), in: Capsule())
                     .foregroundStyle(.black)
+                    .accessibilityIdentifier("photoGridUploadBadge")
+            case .paused:
+                Label("Upload paused", systemImage: "pause.circle")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.red.opacity(0.9), in: Capsule())
+                    .foregroundStyle(.white)
                     .accessibilityIdentifier("photoGridUploadBadge")
             case .uploaded:
                 EmptyView()

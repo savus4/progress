@@ -192,7 +192,8 @@ struct ProgressCoreFunctionalityTests {
         let image = makeImage(size: CGSize(width: 640, height: 480), color: .orange)
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
-        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let objectID = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
         await PhotoUploadService.shared.processPendingUploadsForTesting()
         let assetName = try #require(photo.fullImageAssetName)
         let assetURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
@@ -215,11 +216,12 @@ struct ProgressCoreFunctionalityTests {
         try Data([0x10, 0x20, 0x30]).write(to: videoURL)
         defer { try? FileManager.default.removeItem(at: videoURL) }
 
-        let photo = try await PhotoStorageService.shared.saveImportedLivePhoto(
+        let objectID = try await PhotoStorageService.shared.saveImportedLivePhoto(
             imageData: imageData,
             videoURL: videoURL,
             context: context
         )
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
         await PhotoUploadService.shared.processPendingUploadsForTesting()
 
         let fullImageAssetName = try #require(photo.fullImageAssetName)
@@ -246,7 +248,7 @@ struct ProgressCoreFunctionalityTests {
         try Data([0x40, 0x50, 0x60]).write(to: videoURL)
         defer { try? FileManager.default.removeItem(at: videoURL) }
 
-        let photo = try await PhotoStorageService.shared.savePhoto(
+        let objectID = try await PhotoStorageService.shared.savePhoto(
             image: image,
             imageData: nil,
             livePhotoImageData: livePhotoImageData,
@@ -254,6 +256,7 @@ struct ProgressCoreFunctionalityTests {
             location: nil,
             context: context
         )
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
         await PhotoUploadService.shared.processPendingUploadsForTesting()
 
         let fullImageAssetName = try #require(photo.fullImageAssetName)
@@ -359,7 +362,8 @@ struct ProgressCoreFunctionalityTests {
         let image = makeImage(size: CGSize(width: 900, height: 600), color: .brown)
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
-        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let objectID = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
 
         #expect(photo.fullImageAssetName != nil)
         #expect((photo.value(forKey: "fullImageData") as? Data) == nil)
@@ -374,7 +378,8 @@ struct ProgressCoreFunctionalityTests {
         let image = makeImage(size: CGSize(width: 640, height: 480), color: .systemTeal)
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
-        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let objectID = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
         await PhotoUploadService.shared.processPendingUploadsForTesting()
         let assetName = try #require(photo.fullImageAssetName)
 
@@ -431,11 +436,12 @@ struct ProgressCoreFunctionalityTests {
         try Data([0x01, 0x02, 0x03, 0x04]).write(to: videoURL)
         defer { try? FileManager.default.removeItem(at: videoURL) }
 
-        let photo = try await PhotoStorageService.shared.saveImportedLivePhoto(
+        let objectID = try await PhotoStorageService.shared.saveImportedLivePhoto(
             imageData: imageData,
             videoURL: videoURL,
             context: context
         )
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
         await PhotoUploadService.shared.processPendingUploadsForTesting()
 
         let imageAssetName = try #require(photo.livePhotoImageAssetName)
@@ -468,11 +474,12 @@ struct ProgressCoreFunctionalityTests {
         let image = makeImage(size: CGSize(width: 640, height: 480), color: .systemIndigo)
         let imageData = try #require(image.jpegData(compressionQuality: 0.9))
 
-        let photo = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let objectID = try await PhotoStorageService.shared.saveImportedPhoto(imageData: imageData, context: context)
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
         await PhotoUploadService.shared.processPendingUploadsForTesting()
         let assetName = try #require(photo.fullImageAssetName)
 
-        try await PhotoStorageService.shared.deletePhoto(photo, context: context)
+        try await PhotoStorageService.shared.deletePhoto(objectID, context: context)
 
         let request = DailyPhoto.fetchRequest()
         let storedCount = try context.count(for: request)

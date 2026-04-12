@@ -75,6 +75,10 @@ struct PersistenceController {
     init(inMemory: Bool = false) {
         let shouldUseInMemory = inMemory || ProcessInfo.processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
         container = NSPersistentCloudKitContainer(name: "progress")
+        for description in container.persistentStoreDescriptions {
+            description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+            description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        }
         if shouldUseInMemory {
             container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
         }
@@ -94,11 +98,14 @@ struct PersistenceController {
                 fatalError("Unresolved error \(error), \(error.userInfo)")
             }
         })
+        container.viewContext.name = "ViewContext"
+        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         container.viewContext.automaticallyMergesChangesFromParent = true
     }
 
     func makeBackgroundContext() -> NSManagedObjectContext {
         let context = container.newBackgroundContext()
+        context.name = "BackgroundContext"
         context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         context.automaticallyMergesChangesFromParent = true
         return context

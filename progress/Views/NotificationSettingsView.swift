@@ -40,6 +40,8 @@ struct NotificationSettingsView: View {
     @State private var isDeletingAllPhotos = false
     @State private var showingDeleteAllConfirmation = false
     @State private var deleteAllStatusMessage: String?
+    @State private var isRetryingUploads = false
+    @State private var uploadRetryStatusMessage: String?
 
     private let notificationService = DailyReminderNotificationService.shared
     private let importLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
@@ -165,6 +167,25 @@ struct NotificationSettingsView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
+                    }
+
+                    if cloudSyncMonitor.hasRetryableUploads || isRetryingUploads {
+                        Button {
+                            retryFailedUploads()
+                        } label: {
+                            if isRetryingUploads {
+                                Label("Retrying Uploads…", systemImage: "arrow.triangle.2.circlepath")
+                            } else {
+                                Label("Retry Failed Uploads Now", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .disabled(isRetryingUploads || !cloudSyncMonitor.hasRetryableUploads)
+                    }
+
+                    if let uploadRetryStatusMessage {
+                        Text(uploadRetryStatusMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -505,7 +526,7 @@ struct NotificationSettingsView: View {
 
         Task { @MainActor in
             do {
-                deleteRangeMatchCount = try PhotoStorageService.shared.photoCount(
+                deleteRangeMatchCount = try await PhotoStorageService.shared.photoCount(
                     from: startDate,
                     to: endDate,
                     context: viewContext
@@ -583,6 +604,28 @@ struct NotificationSettingsView: View {
             }
 
             isDeletingAllPhotos = false
+        }
+    }
+
+    private func retryFailedUploads() {
+        guard !isRetryingUploads else { return }
+
+        isRetryingUploads = true
+        uploadRetryStatusMessage = nil
+
+        Task { @MainActor in
+            let retriedCount = await PhotoUploadService.shared.retryFailedUploads()
+            await cloudSyncMonitor.refreshUploadStatus()
+
+            if retriedCount == 0 {
+                uploadRetryStatusMessage = "There were no uploads to retry."
+            } else if retriedCount == 1 {
+                uploadRetryStatusMessage = "Retried 1 upload."
+            } else {
+                uploadRetryStatusMessage = "Retried \(retriedCount) uploads."
+            }
+
+            isRetryingUploads = false
         }
     }
 

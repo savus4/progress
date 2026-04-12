@@ -64,7 +64,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         Task {
-            await PhotoUploadService.shared.enqueuePendingUploads()
+            await PhotoUploadService.shared.enqueuePendingUploads(
+                expeditingRetries: true,
+                forceRetryExpedite: true
+            )
         }
     }
 
