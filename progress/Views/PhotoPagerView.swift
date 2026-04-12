@@ -603,6 +603,7 @@ private struct PhotoPagerPageView: View {
     let bottomInset: CGFloat
 
     @State private var fullImage: UIImage?
+    @State private var thumbnailImage: UIImage?
     @State private var isLoadingImage = true
     @State private var livePhotoImageURL: URL?
     @State private var livePhotoVideoURL: URL?
@@ -647,6 +648,12 @@ private struct PhotoPagerPageView: View {
             .padding(.bottom, bottomInset)
         }
         .task(id: photo.objectID) {
+            fullImage = nil
+            thumbnailImage = nil
+            isLoadingImage = true
+            livePhotoImageURL = nil
+            livePhotoVideoURL = nil
+            await loadThumbnailImage()
             await loadFullImage()
             await loadLivePhotoResources()
         }
@@ -654,8 +661,6 @@ private struct PhotoPagerPageView: View {
 
     @ViewBuilder
     private var loadingPlaceholder: some View {
-        let thumbnailImage = photo.thumbnailData.flatMap(UIImage.init(data:))
-
         ZStack {
             if let thumbnailImage {
                 Image(uiImage: thumbnailImage)
@@ -690,18 +695,22 @@ private struct PhotoPagerPageView: View {
     }
 
     @MainActor
+    private func loadThumbnailImage() async {
+        thumbnailImage = nil
+        thumbnailImage = await DecodedThumbnailCache.shared.image(for: photo.objectID, data: photo.thumbnailData)
+    }
+
+    @MainActor
     private func loadFullImage() async {
         let fullImageAssetName = photo.fullImageAssetName
-        let thumbnailData = photo.thumbnailData
 
         do {
             let image = try await PhotoStorageService.shared.loadFullImage(named: fullImageAssetName)
             fullImage = image
             isLoadingImage = false
         } catch {
-            if let thumbnailData,
-               let thumbnail = UIImage(data: thumbnailData) {
-                fullImage = thumbnail
+            if let thumbnailImage {
+                fullImage = thumbnailImage
                 isLoadingImage = false
             }
         }

@@ -10,6 +10,7 @@ struct PhotoGridView: View {
     private var photos: FetchedResults<DailyPhoto>
     
     @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
+    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
 
     @State private var showingCamera = false
     @State private var showingNotificationSettings = false
@@ -58,6 +59,10 @@ struct PhotoGridView: View {
         Array(photos)
     }
 
+    private var photoGridItems: [PhotoGridItemSnapshot] {
+        photos.map(PhotoGridItemSnapshot.init(photo:))
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -89,34 +94,32 @@ struct PhotoGridView: View {
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 2) {
-                            ForEach(photos) { photo in
-                                PhotoGridItem(photo: photo)
-                                    .overlay(alignment: .topLeading) {
-                                        if isSelectionMode {
-                                            Image(systemName: selectedPhotoIDs.contains(photo.objectID) ? "checkmark.circle.fill" : "circle")
-                                                .font(.title3)
-                                                .foregroundStyle(selectedPhotoIDs.contains(photo.objectID) ? .blue : .white.opacity(0.85))
-                                                .padding(6)
-                                        }
-                                    }
+                            ForEach(Array(photoGridItems.enumerated()), id: \.element.objectID) { index, item in
+                                PhotoGridItem(
+                                    item: item,
+                                    isSelectionMode: isSelectionMode,
+                                    isSelected: selectedPhotoIDs.contains(item.objectID),
+                                    isDownloading: cloudSyncMonitor.isDownloading(assetNames: item.assetNames)
+                                )
+                                .equatable()
                                     .background {
                                         GeometryReader { proxy in
                                             Color.clear
                                                 .preference(
                                                     key: PhotoFrameMapPreferenceKey.self,
-                                                    value: [photo.objectID: proxy.frame(in: .named("photoGridSpace"))]
+                                                    value: [item.objectID: proxy.frame(in: .named("photoGridSpace"))]
                                                 )
                                                 .preference(
                                                     key: FirstGridItemFramePreferenceKey.self,
-                                                    value: photo.objectID == photos.first?.objectID ? proxy.frame(in: .global) : .zero
+                                                    value: index == 0 ? proxy.frame(in: .global) : .zero
                                                 )
                                         }
                                     }
-                                    .id(photo.objectID)
+                                    .id(item.objectID)
                                     .onTapGesture {
                                         if isSelectionMode {
-                                            toggleSelection(for: photo.objectID)
-                                        } else if let index = photosArray.firstIndex(where: { $0.objectID == photo.objectID }) {
+                                            toggleSelection(for: item.objectID)
+                                        } else {
                                             selectedIndex = index
                                             showingPhotoPager = true
                                         }
@@ -708,28 +711,43 @@ struct PhotoGridView: View {
 
 }
 
-struct PhotoGridItem: View {
-    @ObservedObject var photo: DailyPhoto
-    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
-    
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .topTrailing) {
-                if let thumbnailData = photo.thumbnailData,
-                   let thumbnail = UIImage(data: thumbnailData) {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: geometry.size.width, height: geometry.size.width)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(.gray.opacity(0.3))
-                        .frame(width: geometry.size.width, height: geometry.size.width)
-                    
-                    ProgressView()
-                }
+private struct PhotoGridItem: View, Equatable {
+    let item: PhotoGridItemSnapshot
+    let isSelectionMode: Bool
+    let isSelected: Bool
+    let isDownloading: Bool
 
+    static func == (lhs: PhotoGridItem, rhs: PhotoGridItem) -> Bool {
+        lhs.item == rhs.item &&
+        lhs.isSelectionMode == rhs.isSelectionMode &&
+        lhs.isSelected == rhs.isSelected &&
+        lhs.isDownloading == rhs.isDownloading
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            CachedThumbnailImageView(
+                objectID: item.objectID,
+                thumbnailData: item.thumbnailData,
+                contentMode: .fill
+            ) {
+                Rectangle()
+                    .fill(.gray.opacity(0.3))
+                    .overlay {
+                        ProgressView()
+                    }
+            }
+            .clipped()
+
+            if isSelectionMode {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? .blue : .white.opacity(0.85))
+                    .padding(6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+
+            if item.uploadState != .uploaded || isDownloading {
                 uploadBadge
                     .padding(8)
             }
@@ -741,7 +759,7 @@ struct PhotoGridItem: View {
 
     @ViewBuilder
     private var uploadBadge: some View {
-        if cloudSyncMonitor.isDownloading(photo: photo) {
+        if isDownloading {
             Label("Downloading", systemImage: "arrow.down.circle")
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 8)
@@ -750,7 +768,7 @@ struct PhotoGridItem: View {
                 .foregroundStyle(.white)
                 .accessibilityIdentifier("photoGridUploadBadge")
         } else {
-            switch photo.uploadState {
+            switch item.uploadState {
             case .pending, .uploading:
                 Label("Uploading", systemImage: "icloud.and.arrow.up")
                     .font(.caption2.weight(.semibold))
@@ -779,6 +797,65 @@ struct PhotoGridItem: View {
                 EmptyView()
             }
         }
+    }
+}
+
+private struct PhotoGridItemSnapshot: Identifiable, Equatable {
+    let objectID: NSManagedObjectID
+    let thumbnailData: Data?
+    let uploadState: PhotoUploadState
+    let assetNames: [String]
+
+    var id: NSManagedObjectID { objectID }
+
+    init(photo: DailyPhoto) {
+        objectID = photo.objectID
+        thumbnailData = photo.thumbnailData
+        uploadState = photo.uploadState
+        assetNames = [
+            photo.fullImageAssetName,
+            photo.livePhotoImageAssetName,
+            photo.livePhotoVideoAssetName
+        ].compactMap { $0 }
+    }
+}
+
+private struct CachedThumbnailImageView<Placeholder: View>: View {
+    let objectID: NSManagedObjectID
+    let thumbnailData: Data?
+    let contentMode: ContentMode
+    @ViewBuilder let placeholder: () -> Placeholder
+
+    @State private var image: UIImage?
+
+    private var taskID: String {
+        "\(objectID.uriRepresentation().absoluteString)-\(thumbnailData?.count ?? 0)"
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: contentMode)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                } else {
+                    placeholder()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .task(id: taskID) {
+            await loadImage()
+        }
+    }
+
+    @MainActor
+    private func loadImage() async {
+        image = nil
+        image = await DecodedThumbnailCache.shared.image(for: objectID, data: thumbnailData)
     }
 }
 

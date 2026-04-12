@@ -302,14 +302,20 @@ final class CloudSyncMonitor: ObservableObject {
         }
     }
 
+    var activeDownloadAssetNamesSnapshot: Set<String> {
+        activeDownloadAssetNames
+    }
+
+    func isDownloading(assetNames: [String]) -> Bool {
+        assetNames.contains { activeDownloadAssetNames.contains($0) }
+    }
+
     func isDownloading(photo: DailyPhoto) -> Bool {
-        let assetNames = [
+        isDownloading(assetNames: [
             photo.fullImageAssetName,
             photo.livePhotoImageAssetName,
             photo.livePhotoVideoAssetName
-        ].compactMap { $0 }
-
-        return assetNames.contains { activeDownloadAssetNames.contains($0) }
+        ].compactMap { $0 })
     }
 
     private func handle(event: NSPersistentCloudKitContainer.Event) {

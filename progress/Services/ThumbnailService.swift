@@ -84,3 +84,53 @@ class ThumbnailService {
         }
     }
 }
+
+final class DecodedThumbnailCache {
+    static let shared = DecodedThumbnailCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private let workerQueue = DispatchQueue(
+        label: "me.riepl.progress.thumbnail-decoding",
+        qos: .userInitiated
+    )
+
+    private init() {
+        cache.countLimit = 512
+        cache.totalCostLimit = 96 * 1_024 * 1_024
+    }
+
+    func image(for objectID: NSManagedObjectID, data: Data?) async -> UIImage? {
+        guard let data else { return nil }
+
+        let key = cacheKey(for: objectID)
+        if let cachedImage = cache.object(forKey: key) {
+            return cachedImage
+        }
+
+        return await withCheckedContinuation { continuation in
+            workerQueue.async {
+                guard let image = UIImage(data: data) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                self.cache.setObject(image, forKey: key, cost: self.cacheCost(for: image))
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    func removeImage(for objectID: NSManagedObjectID) {
+        cache.removeObject(forKey: cacheKey(for: objectID))
+    }
+
+    private func cacheKey(for objectID: NSManagedObjectID) -> NSString {
+        objectID.uriRepresentation().absoluteString as NSString
+    }
+
+    private func cacheCost(for image: UIImage) -> Int {
+        let pixelWidth = Int(image.size.width * image.scale)
+        let pixelHeight = Int(image.size.height * image.scale)
+        return max(pixelWidth * pixelHeight * 4, 1)
+    }
+}
