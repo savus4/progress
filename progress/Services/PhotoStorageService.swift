@@ -156,16 +156,18 @@ final class PhotoStorageService {
 
     func saveImportedPhotos(
         _ payloads: [ImportedPhotoPayload],
-        batchSize: Int = 12,
+        batchSize: Int = 4,
         context: NSManagedObjectContext? = nil
     ) async -> ImportedPhotoBatchResult {
         guard !payloads.isEmpty else {
             return ImportedPhotoBatchResult(importedCount: 0, duplicateCount: 0, failedCount: 0, failureMessages: [])
         }
 
+        let ownsContext = context == nil
         let importContext = context ?? PersistenceController.shared.makeBackgroundContext()
         let clock = ContinuousClock()
         let startedAt = clock.now
+        let effectiveBatchSize = max(batchSize, 1)
 
         var importedCount = 0
         var duplicateCount = 0
@@ -217,16 +219,20 @@ final class PhotoStorageService {
                 _ = try await makeImportedPhoto(
                     imageData: payload.imageData,
                     livePhotoVideoURL: payload.livePhotoVideoURL,
-                    context: importContext
+                    context: importContext,
+                    saveChanges: false
                 )
                 importedCount += 1
                 pendingInsertCount += 1
                 knownFingerprints.insert(fingerprint)
 
-                if importContext.hasChanges, importedCount.isMultiple(of: max(batchSize, 1)) {
+                if importContext.hasChanges, pendingInsertCount >= effectiveBatchSize {
                     do {
                         try await importContext.perform {
                             try importContext.save()
+                            if ownsContext {
+                                importContext.reset()
+                            }
                         }
                         pendingInsertCount = 0
                     } catch {
@@ -258,6 +264,9 @@ final class PhotoStorageService {
             if importContext.hasChanges {
                 try await importContext.perform {
                     try importContext.save()
+                    if ownsContext {
+                        importContext.reset()
+                    }
                 }
             }
         } catch {
@@ -862,7 +871,8 @@ final class PhotoStorageService {
     private func makeImportedPhoto(
         imageData: Data,
         livePhotoVideoURL: URL?,
-        context: NSManagedObjectContext
+        context: NSManagedObjectContext,
+        saveChanges: Bool = true
     ) async throws -> NSManagedObjectID {
         let photoID = UUID()
         let exifMetadata = exifMetadata(from: imageData)
@@ -905,7 +915,9 @@ final class PhotoStorageService {
             photo.uploadAttemptCount = 0
             photo.uploadErrorMessage = nil
             photo.uploadRetryAfter = nil
-            try context.save()
+            if saveChanges {
+                try context.save()
+            }
             return photo.objectID
         }
     }

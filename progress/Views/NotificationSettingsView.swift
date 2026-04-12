@@ -45,6 +45,7 @@ struct NotificationSettingsView: View {
 
     private let notificationService = DailyReminderNotificationService.shared
     private let importLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
+    private let importFlushSize = 3
 
     var body: some View {
         NavigationStack {
@@ -811,12 +812,11 @@ struct NotificationSettingsView: View {
     }
 
     private func importItems(_ items: [PhotosPickerItem], preserveLivePhotos: Bool) async {
-        let chunkSize = 10
         let clock = ContinuousClock()
         let startedAt = clock.now
 
         var pendingPayloads: [ImportedPhotoPayload] = []
-        pendingPayloads.reserveCapacity(chunkSize)
+        pendingPayloads.reserveCapacity(importFlushSize)
 
         for item in items {
             do {
@@ -838,7 +838,7 @@ struct NotificationSettingsView: View {
                 )
             }
 
-            if pendingPayloads.count >= chunkSize {
+            if pendingPayloads.count >= importFlushSize {
                 await flushImportedPayloads(&pendingPayloads)
             }
         }
@@ -857,12 +857,11 @@ struct NotificationSettingsView: View {
     }
 
     private func importAssets(_ assets: [PHAsset], preserveLivePhotos: Bool) async {
-        let chunkSize = 10
         let clock = ContinuousClock()
         let startedAt = clock.now
 
         var pendingPayloads: [ImportedPhotoPayload] = []
-        pendingPayloads.reserveCapacity(chunkSize)
+        pendingPayloads.reserveCapacity(importFlushSize)
 
         for asset in assets {
             do {
@@ -884,7 +883,7 @@ struct NotificationSettingsView: View {
                 )
             }
 
-            if pendingPayloads.count >= chunkSize {
+            if pendingPayloads.count >= importFlushSize {
                 await flushImportedPayloads(&pendingPayloads)
             }
         }
@@ -1049,7 +1048,7 @@ struct NotificationSettingsView: View {
         let chunk = payloads
         payloads.removeAll(keepingCapacity: true)
 
-        let result = await PhotoStorageService.shared.saveImportedPhotos(chunk)
+        let result = await PhotoStorageService.shared.saveImportedPhotos(chunk, batchSize: importFlushSize)
         await MainActor.run {
             importedCount += result.importedCount
             duplicateImportCount += result.duplicateCount
