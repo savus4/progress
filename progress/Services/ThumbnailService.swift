@@ -7,6 +7,11 @@ class ThumbnailService {
 
     private init() {}
 
+    private let workerQueue = DispatchQueue(
+        label: "me.riepl.progress.thumbnail-generation",
+        qos: .userInitiated
+    )
+
     /// Generate a thumbnail from an image
     /// - Parameters:
     ///   - image: Source image
@@ -65,5 +70,17 @@ class ThumbnailService {
             image.draw(in: CGRect(origin: .zero, size: renderSize))
         }
         return flattenedImage.jpegData(compressionQuality: 0.7)
+    }
+
+    func generateThumbnailAsync(
+        from imageData: Data,
+        targetSize: CGSize = CGSize(width: 300, height: 300)
+    ) async -> Data? {
+        await withCheckedContinuation { continuation in
+            workerQueue.async {
+                let thumbnail = self.generateThumbnail(from: imageData, targetSize: targetSize)
+                continuation.resume(returning: thumbnail)
+            }
+        }
     }
 }

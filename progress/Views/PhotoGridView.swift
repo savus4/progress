@@ -717,6 +717,7 @@ struct PhotoGridView: View {
 
 struct PhotoGridItem: View {
     @ObservedObject var photo: DailyPhoto
+    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     
     var body: some View {
         GeometryReader { geometry in
@@ -747,25 +748,35 @@ struct PhotoGridItem: View {
 
     @ViewBuilder
     private var uploadBadge: some View {
-        switch photo.uploadState {
-        case .pending, .uploading:
-            Label("Uploading", systemImage: "icloud.and.arrow.up")
+        if cloudSyncMonitor.isDownloading(photo: photo) {
+            Label("Downloading", systemImage: "arrow.down.circle")
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(.black.opacity(0.62), in: Capsule())
+                .background(.blue.opacity(0.82), in: Capsule())
                 .foregroundStyle(.white)
                 .accessibilityIdentifier("photoGridUploadBadge")
-        case .failed:
-            Label("Retrying later", systemImage: "exclamationmark.icloud")
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.orange.opacity(0.9), in: Capsule())
-                .foregroundStyle(.black)
-                .accessibilityIdentifier("photoGridUploadBadge")
-        case .uploaded:
-            EmptyView()
+        } else {
+            switch photo.uploadState {
+            case .pending, .uploading:
+                Label("Uploading", systemImage: "icloud.and.arrow.up")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .foregroundStyle(.white)
+                    .accessibilityIdentifier("photoGridUploadBadge")
+            case .failed:
+                Label("Retrying later", systemImage: "exclamationmark.icloud")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.orange.opacity(0.9), in: Capsule())
+                    .foregroundStyle(.black)
+                    .accessibilityIdentifier("photoGridUploadBadge")
+            case .uploaded:
+                EmptyView()
+            }
         }
     }
 }

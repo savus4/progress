@@ -590,6 +590,7 @@ private struct PhotoPagerPageView: View {
     @State private var isLoadingImage = true
     @State private var livePhotoImageURL: URL?
     @State private var livePhotoVideoURL: URL?
+    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
 
     var body: some View {
         ZStack {
@@ -622,9 +623,7 @@ private struct PhotoPagerPageView: View {
                         .frame(maxWidth: .infinity)
                     }
                 } else if isLoadingImage {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 400)
+                    loadingPlaceholder
                 }
 
                 Spacer(minLength: 0)
@@ -635,6 +634,43 @@ private struct PhotoPagerPageView: View {
             await loadFullImage()
             await loadLivePhotoResources()
         }
+    }
+
+    @ViewBuilder
+    private var loadingPlaceholder: some View {
+        let thumbnailImage = photo.thumbnailData.flatMap(UIImage.init(data:))
+
+        ZStack {
+            if let thumbnailImage {
+                Image(uiImage: thumbnailImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .blur(radius: cloudSyncMonitor.isDownloading(photo: photo) ? 10 : 6)
+                    .overlay {
+                        LinearGradient(
+                            colors: [.black.opacity(0.18), .black.opacity(0.42)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+            }
+
+            VStack(spacing: 12) {
+                ProgressView()
+                    .tint(.white)
+                    .controlSize(.large)
+
+                Text(cloudSyncMonitor.isDownloading(photo: photo) ? "Downloading original…" : "Loading photo…")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.92))
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+            .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 400)
     }
 
     private func loadFullImage() async {

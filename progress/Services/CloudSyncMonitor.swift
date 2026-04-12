@@ -282,6 +282,16 @@ final class CloudSyncMonitor: ObservableObject {
         }
     }
 
+    func isDownloading(photo: DailyPhoto) -> Bool {
+        let assetNames = [
+            photo.fullImageAssetName,
+            photo.livePhotoImageAssetName,
+            photo.livePhotoVideoAssetName
+        ].compactMap { $0 }
+
+        return assetNames.contains { activeDownloadAssetNames.contains($0) }
+    }
+
     private func handle(event: NSPersistentCloudKitContainer.Event) {
         if let endDate = event.endDate {
             if let error = event.error {

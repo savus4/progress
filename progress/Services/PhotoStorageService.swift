@@ -89,6 +89,7 @@ final class PhotoStorageService {
         }
 
         let importFingerprint = try fingerprint(imageData: sourceImageData, livePhotoVideoURL: livePhotoVideoURL)
+        let thumbnailData = await thumbnailService.generateThumbnailAsync(from: sourceImageData)
 
         let photo = DailyPhoto(context: context)
         photo.id = photoID
@@ -97,7 +98,7 @@ final class PhotoStorageService {
         photo.modifiedAt = Date()
         photo.latitude = resolvedLocation?.latitude ?? 0
         photo.longitude = resolvedLocation?.longitude ?? 0
-        photo.thumbnailData = thumbnailService.generateThumbnail(from: image)
+        photo.thumbnailData = thumbnailData
         photo.fullImageAssetName = stillAssetName
         photo.livePhotoImageAssetName = livePhotoVideoAssetName == nil ? nil : stillAssetName
         photo.livePhotoVideoAssetName = livePhotoVideoAssetName
@@ -390,6 +391,7 @@ final class PhotoStorageService {
 
         try context.save()
         await deleteAssets(named: assetNames)
+        try await reclaimPersistentStoreSpaceIfNeeded(context: context)
         return photos.count
     }
 
@@ -414,6 +416,17 @@ final class PhotoStorageService {
         for assetName in orphanedAssetNames {
             cloudKitService.deleteAsset(named: assetName)
         }
+    }
+
+    private func reclaimPersistentStoreSpaceIfNeeded(context: NSManagedObjectContext) async throws {
+        let remainingPhotoCount = try await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            return try context.count(for: request)
+        }
+
+        guard remainingPhotoCount == 0 else { return }
+        await PhotoUploadService.shared.cancelPendingWork()
+        try await PersistenceController.shared.rebuildPersistentStore()
     }
 
     func countPhotosMissingSyncedPayloads(context: NSManagedObjectContext) async -> Int {
@@ -673,7 +686,7 @@ final class PhotoStorageService {
     ) async throws -> DailyPhoto {
         let photoID = UUID()
         let exifMetadata = exifMetadata(from: imageData)
-        let thumbnailData = thumbnailService.generateThumbnail(from: imageData)
+        let thumbnailData = await thumbnailService.generateThumbnailAsync(from: imageData)
         let importFingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: livePhotoVideoURL)
         let imageAssetName = try stageStillAsset(
             data: imageData,
@@ -807,6 +820,10 @@ actor PhotoUploadService {
         _ = await processPendingUploads(maxCount: nil)
     }
 
+    func cancelPendingWork() {
+        isProcessing = false
+    }
+
     private func handleBackgroundProcessingTask(_ task: BGProcessingTask) async {
         Self.scheduleBackgroundProcessing()
 
@@ -914,7 +931,6 @@ actor PhotoUploadService {
             request.predicate = NSPredicate(
                 format: """
                 fullImageAssetName != nil AND (
-                    uploadStateRaw == nil OR
                     uploadStateRaw == %@ OR
                     uploadStateRaw == %@ OR
                     (uploadStateRaw == %@ AND (uploadRetryAfter == nil OR uploadRetryAfter <= %@))

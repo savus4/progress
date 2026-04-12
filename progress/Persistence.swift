@@ -105,6 +105,47 @@ struct PersistenceController {
     }
 
     @MainActor
+    func rebuildPersistentStore() async throws {
+        let coordinator = container.persistentStoreCoordinator
+        let descriptions = container.persistentStoreDescriptions
+        let viewContext = container.viewContext
+
+        if viewContext.hasChanges {
+            try viewContext.save()
+        }
+        viewContext.reset()
+
+        let stores = coordinator.persistentStores
+        for store in stores {
+            guard let storeURL = store.url else { continue }
+            try coordinator.remove(store)
+            try coordinator.destroyPersistentStore(at: storeURL, type: .sqlite)
+        }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            var remaining = descriptions.count
+            var firstError: Error?
+
+            container.loadPersistentStores { _, error in
+                if let error, firstError == nil {
+                    firstError = error
+                }
+
+                remaining -= 1
+                guard remaining == 0 else { return }
+
+                if let firstError {
+                    continuation.resume(throwing: firstError)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+
+        container.viewContext.automaticallyMergesChangesFromParent = true
+    }
+
+    @MainActor
     var cloudSyncMonitor: CloudSyncMonitor {
         CloudSyncMonitor.shared
     }
