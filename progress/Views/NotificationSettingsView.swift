@@ -356,7 +356,7 @@ struct NotificationSettingsView: View {
 
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will permanently delete every photo from Work in Progress and remove the stored local assets on this device.")
+                Text("This will permanently delete every photo from Work in Progress on this device and remove the matching records and stored assets from iCloud.")
             }
         }
     }
@@ -593,11 +593,9 @@ struct NotificationSettingsView: View {
 
         Task { @MainActor in
             do {
-                let deletedCount = try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
+                let result = try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
                 await PhotoStorageService.shared.purgeOrphanedAssets(context: viewContext)
-                deleteAllStatusMessage = deletedCount == 1
-                    ? "Deleted 1 photo."
-                    : "Deleted \(deletedCount) photos."
+                deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
             } catch {
@@ -605,6 +603,32 @@ struct NotificationSettingsView: View {
             }
 
             isDeletingAllPhotos = false
+        }
+    }
+
+    private func deleteAllStatusMessage(for result: DeleteAllPhotosResult) -> String {
+        let photoCountDescription = result.deletedCount == 1
+            ? "Deleted 1 photo"
+            : "Deleted \(result.deletedCount) photos"
+
+        guard result.deletedCount > 0 else {
+            return "There were no photos to delete."
+        }
+
+        guard !result.isCloudDeletionComplete else {
+            return "\(photoCountDescription) from this device and iCloud."
+        }
+
+        switch result.cloudMetadataDeletionState {
+        case .failed(let message):
+            return "\(photoCountDescription) locally. iCloud metadata deletion still needs attention: \(message)"
+        case .pending:
+            if result.pendingRemoteAssetDeletionCount > 0 {
+                return "\(photoCountDescription) locally. iCloud cleanup is still in progress for \(result.pendingRemoteAssetDeletionCount) asset\(result.pendingRemoteAssetDeletionCount == 1 ? "" : "s")."
+            }
+            return "\(photoCountDescription) locally. iCloud metadata deletion is still in progress."
+        case .confirmed:
+            return "\(photoCountDescription) locally. \(result.pendingRemoteAssetDeletionCount) iCloud asset deletion\(result.pendingRemoteAssetDeletionCount == 1 ? "" : "s") will keep retrying in the background."
         }
     }
 

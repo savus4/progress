@@ -26,6 +26,31 @@ struct ImportedPhotoBatchResult: Sendable {
     let failureMessages: [String]
 }
 
+struct DeleteAllPhotosResult: Sendable {
+    enum CloudMetadataDeletionState: Sendable {
+        case confirmed
+        case pending
+        case failed(String)
+    }
+
+    let deletedCount: Int
+    let cloudMetadataDeletionState: CloudMetadataDeletionState
+    let pendingRemoteAssetDeletionCount: Int
+
+    var isCloudDeletionComplete: Bool {
+        if pendingRemoteAssetDeletionCount > 0 {
+            return false
+        }
+
+        switch cloudMetadataDeletionState {
+        case .confirmed:
+            return true
+        case .pending, .failed:
+            return false
+        }
+    }
+}
+
 enum PhotoUploadState: String, Sendable {
     case pending
     case uploading
@@ -492,7 +517,26 @@ final class PhotoStorageService {
         return deletedCount
     }
 
-    func deleteAllPhotos(context: NSManagedObjectContext) async throws -> Int {
+    func deleteAllPhotos(context: NSManagedObjectContext) async throws -> DeleteAllPhotosResult {
+        let existingPhotoCount = try await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            return try context.count(for: request)
+        }
+
+        guard existingPhotoCount > 0 else {
+            return DeleteAllPhotosResult(
+                deletedCount: 0,
+                cloudMetadataDeletionState: .confirmed,
+                pendingRemoteAssetDeletionCount: 0
+            )
+        }
+
+        await PhotoUploadService.shared.cancelPendingWork()
+        let uploadsDrainedBeforeDeletion = await PhotoUploadService.shared.waitUntilIdle(timeout: .seconds(30))
+        let exportWaitTask = Task { @MainActor in
+            await CloudSyncMonitor.shared.waitForNextExportCompletion(timeout: .seconds(30))
+        }
+
         let (assetNames, deletedCount) = try await context.perform {
             let request = DailyPhoto.fetchRequest()
             let photos = try context.fetch(request)
@@ -507,9 +551,30 @@ final class PhotoStorageService {
             return (assetNames, photos.count)
         }
 
-        await deleteAssets(named: assetNames)
-        try await reclaimPersistentStoreSpaceIfNeeded(context: context)
-        return deletedCount
+        let cloudMetadataDeletionState: DeleteAllPhotosResult.CloudMetadataDeletionState
+        switch await exportWaitTask.value {
+        case .completed:
+            cloudMetadataDeletionState = .confirmed
+        case .failed(let message):
+            cloudMetadataDeletionState = .failed(message)
+        case .timedOut:
+            cloudMetadataDeletionState = .pending
+        }
+
+        let pendingRemoteAssetDeletionCount: Int
+        if uploadsDrainedBeforeDeletion {
+            let pendingAssetNames = await deleteAssetsAndWaitForRemoteCleanup(named: assetNames)
+            pendingRemoteAssetDeletionCount = pendingAssetNames.count
+        } else {
+            await deleteAssets(named: assetNames)
+            pendingRemoteAssetDeletionCount = assetNames.count
+        }
+
+        return DeleteAllPhotosResult(
+            deletedCount: deletedCount,
+            cloudMetadataDeletionState: cloudMetadataDeletionState,
+            pendingRemoteAssetDeletionCount: pendingRemoteAssetDeletionCount
+        )
     }
 
     func purgeOrphanedAssets(context: NSManagedObjectContext) async {
@@ -533,18 +598,6 @@ final class PhotoStorageService {
         for assetName in orphanedAssetNames {
             cloudKitService.deleteAsset(named: assetName)
         }
-    }
-
-    private func reclaimPersistentStoreSpaceIfNeeded(context: NSManagedObjectContext) async throws {
-        let remainingPhotoCount = try await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            return try context.count(for: request)
-        }
-
-        guard remainingPhotoCount == 0 else { return }
-        await PhotoUploadService.shared.cancelPendingWork()
-        cloudKitService.deleteAllLocalAssets()
-        try await PersistenceController.shared.rebuildPersistentStore()
     }
 
     func countPhotosMissingSyncedPayloads(context: NSManagedObjectContext) async -> Int {
@@ -644,6 +697,25 @@ final class PhotoStorageService {
         async let imageURL = cloudKitService.loadAssetURL(named: imageAssetName)
         async let videoURL = cloudKitService.loadAssetURL(named: videoAssetName)
         return try await (imageURL, videoURL)
+    }
+
+    func prefetchPagerAssets(
+        fullImageAssetName: String?,
+        livePhotoImageAssetName: String?,
+        livePhotoVideoAssetName: String?
+    ) async {
+        let assetNames = Array(
+            NSOrderedSet(array: [
+                fullImageAssetName,
+                livePhotoImageAssetName,
+                livePhotoVideoAssetName
+            ].compactMap { $0 })
+        ).compactMap { $0 as? String }
+
+        for assetName in assetNames {
+            guard !Task.isCancelled else { return }
+            _ = try? await cloudKitService.loadAssetURL(named: assetName)
+        }
     }
 
     func prepareStillPhotoShareURL(fullImageAssetName: String?) async throws -> URL {
@@ -834,6 +906,16 @@ final class PhotoStorageService {
         await RemoteAssetDeletionService.shared.enqueue(assetNames: assetNames)
     }
 
+    private func deleteAssetsAndWaitForRemoteCleanup(named assetNames: Set<String>) async -> Set<String> {
+        guard !assetNames.isEmpty else { return [] }
+
+        for assetName in assetNames {
+            cloudKitService.deleteAsset(named: assetName)
+        }
+
+        return await RemoteAssetDeletionService.shared.enqueueAndAttemptImmediateDeletion(assetNames: assetNames)
+    }
+
     private func existingImportedPhotoFingerprints(
         matching fingerprints: Set<String>,
         context: NSManagedObjectContext
@@ -992,6 +1074,7 @@ actor RemoteAssetDeletionService {
     private let pathMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "progress.remote-asset-deletion.monitor")
     private let storageURL: URL
+    private let deletionBatchSize = 100
 
     private var didStart = false
     private var didLoadQueue = false
@@ -1043,6 +1126,15 @@ actor RemoteAssetDeletionService {
         await processPendingDeletions()
     }
 
+    func enqueueAndAttemptImmediateDeletion(assetNames: Set<String>) async -> Set<String> {
+        guard !assetNames.isEmpty else { return [] }
+
+        await enqueue(assetNames: assetNames)
+        await processPendingDeletions(expeditingRetries: true)
+
+        return Set(assetNames.filter { queuedDeletionsByAssetName[$0] != nil })
+    }
+
     func processPendingDeletions(expeditingRetries: Bool = false) async {
         loadQueueIfNeeded()
 
@@ -1061,33 +1153,60 @@ actor RemoteAssetDeletionService {
         defer { isProcessing = false }
 
         let now = Date()
-        let orderedAssetNames = queuedDeletionsByAssetName.keys.sorted()
+        let eligibleAssetNames = queuedDeletionsByAssetName.keys
+            .sorted()
+            .filter { assetName in
+                guard let pendingDeletion = queuedDeletionsByAssetName[assetName] else {
+                    return false
+                }
+                guard let retryAfter = pendingDeletion.retryAfter else {
+                    return true
+                }
+                return retryAfter <= now
+            }
         var didChangeQueue = false
 
-        for assetName in orderedAssetNames {
-            guard var pendingDeletion = queuedDeletionsByAssetName[assetName] else {
-                continue
-            }
+        var batchStartIndex = 0
+        while batchStartIndex < eligibleAssetNames.count {
+            let batchEndIndex = Swift.min(batchStartIndex + deletionBatchSize, eligibleAssetNames.count)
+            let assetNameBatch = Array(eligibleAssetNames[batchStartIndex..<batchEndIndex])
+            let results = await CloudKitService.shared.deleteRemoteAssetRecords(named: assetNameBatch)
 
-            if let retryAfter = pendingDeletion.retryAfter, retryAfter > now {
-                continue
-            }
+            for assetName in assetNameBatch {
+                guard var pendingDeletion = queuedDeletionsByAssetName[assetName] else {
+                    continue
+                }
 
-            do {
-                try await CloudKitService.shared.deleteRemoteAssetRecord(named: assetName)
-                queuedDeletionsByAssetName.removeValue(forKey: assetName)
-                didChangeQueue = true
-                logger.log("remote-asset-delete-succeeded name=\(assetName, privacy: .public)")
-            } catch {
-                pendingDeletion.attemptCount += 1
-                pendingDeletion.retryAfter = retryDate(for: error, attemptCount: pendingDeletion.attemptCount, now: now)
-                pendingDeletion.lastErrorDescription = describe(error)
-                queuedDeletionsByAssetName[assetName] = pendingDeletion
-                didChangeQueue = true
-                logger.error(
-                    "remote-asset-delete-failed name=\(assetName, privacy: .public) attempt=\(pendingDeletion.attemptCount, privacy: .public) error=\(self.describe(error), privacy: .public)"
+                let outcome = results[assetName] ?? .failure(
+                    RemoteAssetDeletionFailure(
+                        ckErrorCodeRawValue: nil,
+                        retryAfterSeconds: nil,
+                        description: "CloudKit did not return a deletion result for this asset."
+                    )
                 )
+
+                switch outcome {
+                case .success:
+                    queuedDeletionsByAssetName.removeValue(forKey: assetName)
+                    didChangeQueue = true
+                    logger.log("remote-asset-delete-succeeded name=\(assetName, privacy: .public)")
+                case .failure(let failure):
+                    pendingDeletion.attemptCount += 1
+                    pendingDeletion.retryAfter = retryDate(
+                        for: failure,
+                        attemptCount: pendingDeletion.attemptCount,
+                        now: now
+                    )
+                    pendingDeletion.lastErrorDescription = describe(failure)
+                    queuedDeletionsByAssetName[assetName] = pendingDeletion
+                    didChangeQueue = true
+                    logger.error(
+                        "remote-asset-delete-failed name=\(assetName, privacy: .public) attempt=\(pendingDeletion.attemptCount, privacy: .public) error=\(self.describe(failure), privacy: .public)"
+                    )
+                }
             }
+
+            batchStartIndex = batchEndIndex
         }
 
         if didChangeQueue {
@@ -1143,13 +1262,14 @@ actor RemoteAssetDeletionService {
         }
     }
 
-    private func retryDate(for error: Error, attemptCount: Int, now: Date) -> Date {
-        if let ckError = error as? CKError {
-            if let retryAfterSeconds = ckError.retryAfterSeconds {
-                return now.addingTimeInterval(retryAfterSeconds)
-            }
+    private func retryDate(for failure: RemoteAssetDeletionFailure, attemptCount: Int, now: Date) -> Date {
+        if let retryAfterSeconds = failure.retryAfterSeconds {
+            return now.addingTimeInterval(retryAfterSeconds)
+        }
 
-            switch ckError.code {
+        if let ckErrorCodeRawValue = failure.ckErrorCodeRawValue,
+           let ckErrorCode = CKError.Code(rawValue: ckErrorCodeRawValue) {
+            switch ckErrorCode {
             case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited, .zoneBusy, .serverResponseLost, .accountTemporarilyUnavailable:
                 return backoffRetryDate(attemptCount: attemptCount, now: now)
             case .notAuthenticated:
@@ -1170,11 +1290,8 @@ actor RemoteAssetDeletionService {
         return now.addingTimeInterval(seconds)
     }
 
-    private func describe(_ error: Error) -> String {
-        if let ckError = error as? CKError {
-            return "CKError(\(ckError.code.rawValue)): \(ckError.localizedDescription)"
-        }
-        return error.localizedDescription
+    private func describe(_ failure: RemoteAssetDeletionFailure) -> String {
+        failure.description
     }
 
     private static func makeStorageURL() -> URL {
@@ -1219,6 +1336,9 @@ actor PhotoUploadService {
 
     private var didStart = false
     private var isProcessing = false
+    private var cancelProcessingRequested = false
+    private var activeUploadCount = 0
+    private var idleWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
     nonisolated static func registerBackgroundTask() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { task in
@@ -1272,6 +1392,7 @@ actor PhotoUploadService {
     }
 
     func enqueuePendingUploads(expeditingRetries: Bool = false, forceRetryExpedite: Bool = false) async {
+        cancelProcessingRequested = false
         if expeditingRetries {
             await expediteRetryableUploadsIfPossible(force: forceRetryExpedite)
         }
@@ -1280,11 +1401,29 @@ actor PhotoUploadService {
     }
 
     func processPendingUploadsForTesting() async {
+        cancelProcessingRequested = false
         _ = await processPendingUploads(maxCount: nil)
     }
 
     func cancelPendingWork() {
-        isProcessing = false
+        cancelProcessingRequested = true
+        signalIdleIfNeeded()
+    }
+
+    func waitUntilIdle(timeout: Duration = .seconds(30)) async -> Bool {
+        if !isProcessing && activeUploadCount == 0 {
+            return true
+        }
+
+        let waiterID = UUID()
+        return await withCheckedContinuation { continuation in
+            idleWaiters[waiterID] = continuation
+
+            Task {
+                try? await Task.sleep(for: timeout)
+                self.resolveIdleWaiter(id: waiterID, result: false)
+            }
+        }
     }
 
     private func handleBackgroundProcessingTask(_ task: BGProcessingTask) async {
@@ -1318,6 +1457,7 @@ actor PhotoUploadService {
         }
         defer {
             isProcessing = false
+            signalIdleIfNeeded()
             Task { @MainActor in
                 NotificationCenter.default.post(
                     name: Self.processingStateDidChangeNotification,
@@ -1330,6 +1470,10 @@ actor PhotoUploadService {
         var processedCount = 0
 
         while !Task.isCancelled {
+            if cancelProcessingRequested {
+                break
+            }
+
             if let maxCount, processedCount >= maxCount {
                 break
             }
@@ -1339,6 +1483,12 @@ actor PhotoUploadService {
             }
 
             do {
+                activeUploadCount += 1
+                defer {
+                    activeUploadCount -= 1
+                    signalIdleIfNeeded()
+                }
+
                 try await upload(candidate)
                 await markUploadCompleted(for: candidate.objectID)
                 processedCount += 1
@@ -1372,6 +1522,22 @@ actor PhotoUploadService {
             Self.scheduleBackgroundProcessing(earliestBeginDate: await nextRetryDate())
         }
         return remaining
+    }
+
+    private func resolveIdleWaiter(id: UUID, result: Bool) {
+        guard let continuation = idleWaiters.removeValue(forKey: id) else { return }
+        continuation.resume(returning: result)
+    }
+
+    private func signalIdleIfNeeded() {
+        guard !isProcessing && activeUploadCount == 0 else { return }
+
+        let waiters = idleWaiters.values
+        idleWaiters.removeAll()
+
+        for continuation in waiters {
+            continuation.resume(returning: true)
+        }
     }
 
     private func upload(_ candidate: PendingPhotoUpload) async throws {
@@ -1656,6 +1822,7 @@ enum PhotoStorageError: LocalizedError {
     case noLivePhotoAssets
     case missingImageData
     case saveFailed
+    case cloudDeletionPending
 
     var errorDescription: String? {
         switch self {
@@ -1669,6 +1836,8 @@ enum PhotoStorageError: LocalizedError {
             return "No encoded image data available to store"
         case .saveFailed:
             return "Failed to save photo"
+        case .cloudDeletionPending:
+            return "Photo deletion is still waiting on iCloud cleanup"
         }
     }
 }

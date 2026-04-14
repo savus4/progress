@@ -103,6 +103,7 @@ struct PhotoGridView: View {
                                     isDownloading: item.assetNames.contains { activeDownloadAssetNames.contains($0) }
                                 )
                                 .equatable()
+                                    .contentShape(Rectangle())
                                     .background {
                                         GeometryReader { proxy in
                                             Color.clear
@@ -774,6 +775,7 @@ private struct PhotoGridItem: View, Equatable {
             }
         }
         .aspectRatio(1, contentMode: .fit)
+        .contentShape(Rectangle())
         .clipShape(RoundedRectangle(cornerRadius: 0))
         .accessibilityIdentifier("photoGridItem")
     }

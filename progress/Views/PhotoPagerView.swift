@@ -4,7 +4,7 @@ import MapKit
 import Photos
 import ImageIO
 
-private struct PhotoPagerSnapshot {
+private struct PhotoPagerSnapshot: Sendable {
     let captureDate: Date?
     let latitude: Double
     let longitude: Double
@@ -13,6 +13,7 @@ private struct PhotoPagerSnapshot {
     let livePhotoImageAssetName: String?
     let livePhotoVideoAssetName: String?
 
+    @MainActor
     init(photo: DailyPhoto) {
         captureDate = photo.captureDate
         latitude = photo.latitude
@@ -40,6 +41,7 @@ struct PhotoPagerView: View {
     @State private var shareStatusToastTask: Task<Void, Never>?
     @State private var showingDeleteConfirmation = false
     @State private var isDeleting = false
+    @State private var adjacentPrefetchTask: Task<Void, Never>?
 
     private static let navigationDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -174,6 +176,7 @@ struct PhotoPagerView: View {
         .onChange(of: currentPage) { _, newValue in
             guard let newValue else { return }
             selectedIndex = newValue
+            scheduleAdjacentPrefetch(around: newValue)
             Task {
                 await loadLocationName()
             }
@@ -182,6 +185,9 @@ struct PhotoPagerView: View {
             if currentPage != newValue {
                 currentPage = newValue
             }
+        }
+        .onDisappear {
+            adjacentPrefetchTask?.cancel()
         }
         .sheet(item: $sharePayload) { payload in
             ActivityView(activityItems: payload.items)
@@ -594,6 +600,33 @@ struct PhotoPagerView: View {
                 isDeleting = false
                 print("Failed to delete photo: \(error.localizedDescription)")
             }
+        }
+    }
+
+    @MainActor
+    private func scheduleAdjacentPrefetch(around index: Int) {
+        adjacentPrefetchTask?.cancel()
+        let snapshots = adjacentSnapshots(around: index)
+        guard !snapshots.isEmpty else { return }
+
+        adjacentPrefetchTask = Task(priority: .utility) {
+            for snapshot in snapshots {
+                guard !Task.isCancelled else { return }
+                await PhotoStorageService.shared.prefetchPagerAssets(
+                    fullImageAssetName: snapshot.fullImageAssetName,
+                    livePhotoImageAssetName: snapshot.livePhotoImageAssetName,
+                    livePhotoVideoAssetName: snapshot.livePhotoVideoAssetName
+                )
+            }
+        }
+    }
+
+    @MainActor
+    private func adjacentSnapshots(around index: Int) -> [PhotoPagerSnapshot] {
+        let preferredIndices = [index + 1, index - 1]
+        return preferredIndices.compactMap { candidateIndex in
+            guard photos.indices.contains(candidateIndex) else { return nil }
+            return PhotoPagerSnapshot(photo: photos[candidateIndex])
         }
     }
 }

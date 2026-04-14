@@ -19,6 +19,17 @@ final class CloudSyncMonitor: ObservableObject {
         case failed(String)
     }
 
+    enum ExportWaitResult: Sendable {
+        case completed
+        case failed(String)
+        case timedOut
+    }
+
+    private struct ExportWaiter {
+        let registeredAt: Date
+        let continuation: CheckedContinuation<ExportWaitResult, Never>
+    }
+
     @Published private(set) var syncState: SyncState = .idle
     @Published private(set) var lastSyncDate: Date?
     @Published private(set) var pendingMigrationCount = 0
@@ -38,6 +49,7 @@ final class CloudSyncMonitor: ObservableObject {
     private var contextSaveObserver: NSObjectProtocol?
     private var assetTransferObserver: NSObjectProtocol?
     private var activeDownloadAssetNames: Set<String> = []
+    private var exportWaiters: [UUID: ExportWaiter] = [:]
 
     private init() {
         observer = NotificationCenter.default.addObserver(
@@ -353,7 +365,32 @@ final class CloudSyncMonitor: ObservableObject {
         ].compactMap { $0 })
     }
 
+    func waitForNextExportCompletion(timeout: Duration = .seconds(30)) async -> ExportWaitResult {
+        let waiterID = UUID()
+        let registeredAt = Date()
+
+        return await withCheckedContinuation { continuation in
+            exportWaiters[waiterID] = ExportWaiter(
+                registeredAt: registeredAt,
+                continuation: continuation
+            )
+
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: timeout)
+                self?.resolveExportWaiter(id: waiterID, result: .timedOut)
+            }
+        }
+    }
+
     private func handle(event: NSPersistentCloudKitContainer.Event) {
+        if event.type == .export, let endDate = event.endDate {
+            if let error = event.error {
+                resolveExportWaiters(completedAt: endDate, result: .failed(error.localizedDescription))
+            } else {
+                resolveExportWaiters(completedAt: endDate, result: .completed)
+            }
+        }
+
         if let endDate = event.endDate {
             if let error = event.error {
                 syncState = .failed(error.localizedDescription)
@@ -381,5 +418,22 @@ final class CloudSyncMonitor: ObservableObject {
         }
 
         downloadingAssetCount = activeDownloadAssetNames.count
+    }
+
+    private func resolveExportWaiters(completedAt completionDate: Date, result: ExportWaitResult) {
+        let eligibleWaiterIDs = exportWaiters.compactMap { waiterID, waiter in
+            waiter.registeredAt <= completionDate ? waiterID : nil
+        }
+
+        guard !eligibleWaiterIDs.isEmpty else { return }
+
+        for waiterID in eligibleWaiterIDs {
+            resolveExportWaiter(id: waiterID, result: result)
+        }
+    }
+
+    private func resolveExportWaiter(id: UUID, result: ExportWaitResult) {
+        guard let waiter = exportWaiters.removeValue(forKey: id) else { return }
+        waiter.continuation.resume(returning: result)
     }
 }

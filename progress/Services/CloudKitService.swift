@@ -291,6 +291,97 @@ final class CloudKitService {
         }
     }
 
+    func deleteRemoteAssetRecords(named assetNames: [String]) async -> [String: RemoteAssetDeletionOutcome] {
+        let orderedAssetNames = Self.uniqueAssetNames(from: assetNames)
+        guard !orderedAssetNames.isEmpty else { return [:] }
+
+        let recordIDsByAssetName = Dictionary(
+            uniqueKeysWithValues: orderedAssetNames.map { ($0, CKRecord.ID(recordName: $0)) }
+        )
+        let recordIDs = orderedAssetNames.compactMap { recordIDsByAssetName[$0] }
+
+        do {
+            let results = try await privateDatabase.modifyRecords(
+                saving: [],
+                deleting: recordIDs,
+                savePolicy: .changedKeys,
+                atomically: false
+            )
+
+            var outcomes: [String: RemoteAssetDeletionOutcome] = [:]
+            for assetName in orderedAssetNames {
+                guard let recordID = recordIDsByAssetName[assetName] else {
+                    outcomes[assetName] = .failure(
+                        RemoteAssetDeletionFailure(
+                            ckErrorCodeRawValue: nil,
+                            retryAfterSeconds: nil,
+                            description: "Missing CloudKit record identifier for remote asset deletion."
+                        )
+                    )
+                    continue
+                }
+
+                guard let result = results.deleteResults[recordID] else {
+                    outcomes[assetName] = .failure(
+                        RemoteAssetDeletionFailure(
+                            ckErrorCodeRawValue: nil,
+                            retryAfterSeconds: nil,
+                            description: "CloudKit did not report a deletion result for this asset."
+                        )
+                    )
+                    continue
+                }
+
+                switch result {
+                case .success:
+                    outcomes[assetName] = .success
+                case .failure(let error):
+                    outcomes[assetName] = deletionOutcome(for: error)
+                }
+            }
+
+            return outcomes
+        } catch {
+            let normalizedError = cloudKitError(for: error)
+
+            if let ckError = normalizedError as? CKError,
+               let partialErrors = ckError.partialErrorsByItemID {
+                var outcomes: [String: RemoteAssetDeletionOutcome] = [:]
+
+                for assetName in orderedAssetNames {
+                    guard let recordID = recordIDsByAssetName[assetName] else {
+                        outcomes[assetName] = .failure(
+                            RemoteAssetDeletionFailure(
+                                ckErrorCodeRawValue: nil,
+                                retryAfterSeconds: nil,
+                                description: "Missing CloudKit record identifier for remote asset deletion."
+                            )
+                        )
+                        continue
+                    }
+
+                    if let partialError = partialErrors[recordID] {
+                        outcomes[assetName] = deletionOutcome(for: partialError)
+                    } else {
+                        outcomes[assetName] = .success
+                    }
+                }
+
+                return outcomes
+            }
+
+            let failure = RemoteAssetDeletionFailure(
+                ckErrorCodeRawValue: (normalizedError as? CKError)?.code.rawValue,
+                retryAfterSeconds: (normalizedError as? CKError)?.retryAfterSeconds,
+                description: Self.describe(normalizedError)
+            )
+
+            return Dictionary(
+                uniqueKeysWithValues: orderedAssetNames.map { ($0, .failure(failure)) }
+            )
+        }
+    }
+
     func storedPersistentAssetNames() -> Set<String> {
         let cachedNames = (try? fileManager.contentsOfDirectory(atPath: cacheDirectoryURL.path)) ?? []
         let stagedNames = (try? fileManager.contentsOfDirectory(atPath: stagingDirectoryURL.path)) ?? []
@@ -560,6 +651,34 @@ final class CloudKitService {
         return String(describing: error)
     }
 
+    private func deletionOutcome(for error: Error) -> RemoteAssetDeletionOutcome {
+        let normalizedError = cloudKitError(for: error)
+        if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
+            return .success
+        }
+
+        return .failure(
+            RemoteAssetDeletionFailure(
+                ckErrorCodeRawValue: (normalizedError as? CKError)?.code.rawValue,
+                retryAfterSeconds: (normalizedError as? CKError)?.retryAfterSeconds,
+                description: Self.describe(normalizedError)
+            )
+        )
+    }
+
+    private static func uniqueAssetNames(from assetNames: [String]) -> [String] {
+        var seenAssetNames = Set<String>()
+        var orderedAssetNames: [String] = []
+
+        for assetName in assetNames {
+            if seenAssetNames.insert(assetName).inserted {
+                orderedAssetNames.append(assetName)
+            }
+        }
+
+        return orderedAssetNames
+    }
+
     private func ensureDirectoryExists(at directoryURL: URL) throws {
         if !fileManager.fileExists(atPath: directoryURL.path) {
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
@@ -571,6 +690,17 @@ private enum SHA256Hasher {
     static func hexDigest(for data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
+}
+
+enum RemoteAssetDeletionOutcome: Sendable {
+    case success
+    case failure(RemoteAssetDeletionFailure)
+}
+
+struct RemoteAssetDeletionFailure: Sendable {
+    let ckErrorCodeRawValue: Int?
+    let retryAfterSeconds: Double?
+    let description: String
 }
 
 private extension UIImage.Orientation {
