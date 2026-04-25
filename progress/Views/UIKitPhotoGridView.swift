@@ -227,17 +227,28 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var currentChangeToken: Int?
     private var lastReportedTopVisibleMonth: DateComponents?
     private var isScrollMotionActive = false
+    private var lastContentOffsetY: CGFloat = 0
+    private var preheatDirection: ScrollPreheatDirection = .none
     private var lastTopVisibleReportUptime: TimeInterval = 0
     private var lastVisibleThumbnailKickUptime: TimeInterval = 0
     private let thumbnailDataProvider = PhotoGridThumbnailDataProvider()
     private let maxInflightThumbnailTasks = 48
-    private let maxInflightThumbnailTasksDuringScroll = 8
+    private let maxInflightThumbnailTasksDuringScroll = 22
+    private let maxNearVisiblePrefetchPerKick = 56
+    private let maxCollectionPrefetchPerPass = 24
+    private let nearVisiblePreheatWindowMultiplier: CGFloat = 2.0
     private let topVisibleReportInterval: TimeInterval = 0.08
-    private let visibleThumbnailKickInterval: TimeInterval = 0.12
+    private let visibleThumbnailKickInterval: TimeInterval = 0.04
 
     private enum SelectionPanOperation {
         case select
         case deselect
+    }
+
+    private enum ScrollPreheatDirection {
+        case up
+        case down
+        case none
     }
 
     init() {
@@ -264,11 +275,13 @@ final class PhotoGridCollectionViewController: UIViewController {
         collectionView.alwaysBounceVertical = true
         collectionView.contentInsetAdjustmentBehavior = .always
         collectionView.delegate = self
+        collectionView.prefetchDataSource = self
         collectionView.allowsMultipleSelection = true
         collectionView.contentInset = UIEdgeInsets(top: 1, left: 0, bottom: 104, right: 0)
         collectionView.scrollIndicatorInsets = UIEdgeInsets(top: 1, left: 0, bottom: 104, right: 0)
         collectionView.translatesAutoresizingMaskIntoConstraints = false
-        collectionView.isPrefetchingEnabled = false
+        collectionView.isPrefetchingEnabled = true
+        lastContentOffsetY = collectionView.contentOffset.y
 
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -494,11 +507,11 @@ final class PhotoGridCollectionViewController: UIViewController {
     }
 
     private func prefetchThumbnail(for item: UIKitPhotoGridItem) {
-        guard !isScrollMotionActive else { return }
         let objectID = item.objectID
         if DecodedThumbnailCache.shared.cachedImage(for: objectID) != nil { return }
         guard thumbnailTasks[objectID] == nil else { return }
-        guard thumbnailTasks.count < maxInflightThumbnailTasks else { return }
+        let maxInflight = isScrollMotionActive ? maxInflightThumbnailTasksDuringScroll : maxInflightThumbnailTasks
+        guard thumbnailTasks.count < maxInflight else { return }
         let thumbnailDataProvider = thumbnailDataProvider
         thumbnailTasks[objectID] = Task.detached(priority: .utility) { [weak self] in
             guard !Task.isCancelled else {
@@ -571,6 +584,79 @@ final class PhotoGridCollectionViewController: UIViewController {
                 continue
             }
             loadThumbnail(for: items[indexPath.item], into: cell)
+        }
+    }
+
+    private func prefetchNearVisibleThumbnails() {
+        let bounds = collectionView.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        let forwardMultiplier: CGFloat = isScrollMotionActive ? 3.8 : 2.8
+        let backwardMultiplier: CGFloat = 1.4
+        let symmetricMultiplier: CGFloat = nearVisiblePreheatWindowMultiplier
+
+        let topExtra: CGFloat
+        let bottomExtra: CGFloat
+        switch preheatDirection {
+        case .down:
+            topExtra = bounds.height * backwardMultiplier
+            bottomExtra = bounds.height * forwardMultiplier
+        case .up:
+            topExtra = bounds.height * forwardMultiplier
+            bottomExtra = bounds.height * backwardMultiplier
+        case .none:
+            topExtra = bounds.height * symmetricMultiplier
+            bottomExtra = bounds.height * symmetricMultiplier
+        }
+
+        let preheatRect = CGRect(
+            x: bounds.minX,
+            y: bounds.minY - topExtra,
+            width: bounds.width,
+            height: bounds.height + topExtra + bottomExtra
+        )
+        guard let attributes = collectionView.collectionViewLayout.layoutAttributesForElements(in: preheatRect) else {
+            return
+        }
+
+        let visibleIndexPaths = Set(collectionView.indexPathsForVisibleItems)
+        let candidates: [(indexPath: IndexPath, isAhead: Bool, distance: CGFloat)] = attributes.compactMap { attributes in
+            guard attributes.representedElementCategory == .cell else { return nil }
+            let indexPath = attributes.indexPath
+            guard !visibleIndexPaths.contains(indexPath),
+                  items.indices.contains(indexPath.item) else {
+                return nil
+            }
+
+            let isAhead: Bool
+            let distance: CGFloat
+            switch preheatDirection {
+            case .down:
+                isAhead = attributes.center.y >= bounds.maxY
+                distance = isAhead
+                    ? max(0, attributes.center.y - bounds.maxY)
+                    : max(0, bounds.minY - attributes.center.y)
+            case .up:
+                isAhead = attributes.center.y <= bounds.minY
+                distance = isAhead
+                    ? max(0, bounds.minY - attributes.center.y)
+                    : max(0, attributes.center.y - bounds.maxY)
+            case .none:
+                isAhead = true
+                distance = abs(attributes.center.y - bounds.midY)
+            }
+            return (indexPath, isAhead, distance)
+        }
+
+        for candidate in candidates
+            .sorted(by: { lhs, rhs in
+                if lhs.isAhead != rhs.isAhead {
+                    return lhs.isAhead && !rhs.isAhead
+                }
+                return lhs.distance < rhs.distance
+            })
+            .prefix(maxNearVisiblePrefetchPerKick) {
+            prefetchThumbnail(for: items[candidate.indexPath.item])
         }
     }
 
@@ -681,7 +767,9 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
-        // Intentionally disabled to avoid scroll hitching under fast flicks.
+        for indexPath in indexPaths.prefix(maxCollectionPrefetchPerPass) where indexPath.item < items.count {
+            prefetchThumbnail(for: items[indexPath.item])
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
@@ -703,6 +791,14 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        let delta = scrollView.contentOffset.y - lastContentOffsetY
+        if delta > 0.5 {
+            preheatDirection = .down
+        } else if delta < -0.5 {
+            preheatDirection = .up
+        }
+        lastContentOffsetY = scrollView.contentOffset.y
+
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastTopVisibleReportUptime >= topVisibleReportInterval {
             lastTopVisibleReportUptime = now
@@ -713,26 +809,38 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
            now - lastVisibleThumbnailKickUptime >= visibleThumbnailKickInterval {
             lastVisibleThumbnailKickUptime = now
             loadVisibleThumbnails()
+            prefetchNearVisibleThumbnails()
         }
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         isScrollMotionActive = true
+        let velocityY = collectionView.panGestureRecognizer.velocity(in: collectionView).y
+        if velocityY < 0 {
+            preheatDirection = .down
+        } else if velocityY > 0 {
+            preheatDirection = .up
+        }
         loadVisibleThumbnails()
+        prefetchNearVisibleThumbnails()
         delegate?.photoGridController(self, didChangeScrollActivity: true)
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         if !decelerate {
             isScrollMotionActive = false
+            preheatDirection = .none
             loadVisibleThumbnails()
+            prefetchNearVisibleThumbnails()
             delegate?.photoGridController(self, didChangeScrollActivity: false)
         }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         isScrollMotionActive = false
+        preheatDirection = .none
         loadVisibleThumbnails()
+        prefetchNearVisibleThumbnails()
         delegate?.photoGridController(self, didChangeScrollActivity: false)
     }
 }

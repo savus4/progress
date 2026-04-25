@@ -702,8 +702,8 @@ final class PhotoStorageService {
             throw PhotoStorageError.noImageAsset
         }
 
-        let cacheKey = fullImageAssetName as NSString
-        if let cachedImage = decodedFullImageCache.object(forKey: cacheKey) {
+        let cacheKey = fullImageAssetName
+        if let cachedImage = decodedFullImageCache.object(forKey: cacheKey as NSString) {
             return cachedImage
         }
 
@@ -774,7 +774,7 @@ final class PhotoStorageService {
         return assetName
     }
 
-    private func decodeAndCacheFullImage(from fileURL: URL, cacheKey: NSString) async throws -> UIImage {
+    private func decodeAndCacheFullImage(from fileURL: URL, cacheKey: String) async throws -> UIImage {
         try await withCheckedThrowingContinuation { continuation in
             fullImageDecodeQueue.async {
                 guard let image = UIImage(contentsOfFile: fileURL.path) else {
@@ -785,7 +785,7 @@ final class PhotoStorageService {
                 let preparedImage = image.preparingForDisplay() ?? image
                 self.decodedFullImageCache.setObject(
                     preparedImage,
-                    forKey: cacheKey,
+                    forKey: cacheKey as NSString,
                     cost: self.cacheCost(for: preparedImage)
                 )
                 continuation.resume(returning: preparedImage)
