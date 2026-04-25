@@ -131,9 +131,16 @@ final class CloudKitService {
         try await loadAssetURL(named: assetName)
     }
 
-    func loadAssetURL(named assetName: String) async throws -> URL {
+    func loadAssetURL(
+        named assetName: String,
+        reportsTransferEvents: Bool = true,
+        updatesAccessLog: Bool = true,
+        prunesCache: Bool = true
+    ) async throws -> URL {
         if let cachedURL = cachedAssetURL(named: assetName) {
-            markAssetAccessed(named: assetName)
+            if updatesAccessLog {
+                markAssetAccessed(named: assetName)
+            }
             return cachedURL
         }
 
@@ -141,9 +148,13 @@ final class CloudKitService {
             return stagedURL
         }
 
-        postAssetTransferChange(kind: .download, phase: .started, assetName: assetName)
+        if reportsTransferEvents {
+            postAssetTransferChange(kind: .download, phase: .started, assetName: assetName)
+        }
         defer {
-            postAssetTransferChange(kind: .download, phase: .finished, assetName: assetName)
+            if reportsTransferEvents {
+                postAssetTransferChange(kind: .download, phase: .finished, assetName: assetName)
+            }
         }
 
         let recordID = CKRecord.ID(recordName: assetName)
@@ -158,13 +169,17 @@ final class CloudKitService {
         case .success(let fetchedRecord):
             record = fetchedRecord
         case .failure(let error):
-            postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
+            if reportsTransferEvents {
+                postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
+            }
             throw cloudKitError(for: error)
         }
 
         guard let asset = record[RecordKey.fileAsset] as? CKAsset,
               let stagedURL = asset.fileURL else {
-            postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
+            if reportsTransferEvents {
+                postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
+            }
             throw CloudKitError.assetNotFound
         }
 
@@ -173,8 +188,12 @@ final class CloudKitService {
             try? fileManager.removeItem(at: destinationURL)
         }
         try fileManager.copyItem(at: stagedURL, to: destinationURL)
-        markAssetAccessed(named: assetName)
-        pruneCacheIfNeeded(excluding: [assetName])
+        if updatesAccessLog {
+            markAssetAccessed(named: assetName)
+        }
+        if prunesCache {
+            pruneCacheIfNeeded(excluding: [assetName])
+        }
         return destinationURL
     }
 

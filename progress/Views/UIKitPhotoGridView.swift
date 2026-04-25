@@ -94,7 +94,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let activeDownloadAssetNames: Set<String>
     @Binding var isSelectionMode: Bool
     @Binding var selectedPhotoIDs: Set<NSManagedObjectID>
-    let onOpenPhoto: (NSManagedObjectID) -> Void
+    let onOpenPhoto: (NSManagedObjectID, Int) -> Void
     let onFirstItemFrameChanged: (CGRect) -> Void
     let onTopVisibleDateChanged: (Date?) -> Void
     let onScrollActivityChanged: (Bool) -> Void
@@ -127,8 +127,8 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             self.parent = parent
         }
 
-        func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID) {
-            parent.onOpenPhoto(objectID)
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int) {
+            parent.onOpenPhoto(objectID, index)
         }
 
         func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>) {
@@ -198,7 +198,7 @@ private final class PhotoGridThumbnailDataProvider {
 
 @MainActor
 protocol PhotoGridCollectionViewControllerDelegate: AnyObject {
-    func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateTopVisibleDate date: Date?)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateFirstItemFrame frame: CGRect)
@@ -747,7 +747,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             }
         } else {
             collectionView.deselectItem(at: indexPath, animated: false)
-            delegate?.photoGridController(self, didOpenPhotoWith: objectID)
+            delegate?.photoGridController(self, didOpenPhotoWith: objectID, at: indexPath.item)
         }
     }
 

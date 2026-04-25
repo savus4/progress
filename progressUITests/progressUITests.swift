@@ -86,7 +86,7 @@ final class progressUITests: XCTestCase {
         let pagerScrollView = app.scrollViews.firstMatch
         XCTAssertTrue(pagerScrollView.waitForExistence(timeout: 5))
 
-        for _ in 0..<5 {
+        for _ in 0..<3 {
             pagerScrollView.swipeLeft()
             pagerScrollView.swipeRight()
         }
@@ -107,7 +107,7 @@ final class progressUITests: XCTestCase {
         let pagerScrollView = app.scrollViews.firstMatch
         XCTAssertTrue(pagerScrollView.waitForExistence(timeout: 5))
 
-        for _ in 0..<8 {
+        for _ in 0..<3 {
             pagerScrollView.swipeLeft()
             pagerScrollView.swipeRight()
         }

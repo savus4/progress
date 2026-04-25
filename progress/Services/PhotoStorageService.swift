@@ -398,7 +398,12 @@ final class PhotoStorageService {
 
         for candidate in candidates {
             guard let assetName = candidate.fullImageAssetName else { continue }
-            guard let assetURL = try? await cloudKitService.loadAssetURL(named: assetName) else { continue }
+            guard let assetURL = try? await cloudKitService.loadAssetURL(
+                named: assetName,
+                reportsTransferEvents: false,
+                updatesAccessLog: false,
+                prunesCache: false
+            ) else { continue }
             guard let metadata = exifMetadata(from: assetURL) else { continue }
 
             if let exifDate = metadata.captureDate {

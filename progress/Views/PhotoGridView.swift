@@ -4,6 +4,7 @@ import Combine
 
 private struct PhotoPagerSelection: Identifiable {
     let objectID: NSManagedObjectID
+    let initialIndex: Int
     var id: String { objectID.uriRepresentation().absoluteString }
 }
 
@@ -28,6 +29,7 @@ struct PhotoGridView: View {
     @State private var showingDeleteConfirmation = false
     @State private var isDeletingSelection = false
     @State private var didSyncExifMetadata = false
+    @State private var metadataSyncTask: Task<Void, Never>?
     @State private var activeDownloadAssetNames: Set<String> = []
     private let enableScrollDateDebugLogs = false
 
@@ -66,8 +68,8 @@ struct PhotoGridView: View {
                         activeDownloadAssetNames: activeDownloadAssetNames,
                         isSelectionMode: $isSelectionMode,
                         selectedPhotoIDs: $selectedPhotoIDs,
-                        onOpenPhoto: { objectID in
-                            photoPagerSelection = PhotoPagerSelection(objectID: objectID)
+                        onOpenPhoto: { objectID, index in
+                            photoPagerSelection = PhotoPagerSelection(objectID: objectID, initialIndex: index)
                         },
                         onFirstItemFrameChanged: { frame in
                             if frame != .zero {
@@ -169,7 +171,8 @@ struct PhotoGridView: View {
             .sheet(item: $photoPagerSelection) { selection in
                 PhotoPagerView(
                     photos: dataController.allPhotos,
-                    initialPhotoID: selection.objectID
+                    initialPhotoID: selection.objectID,
+                    initialIndex: selection.initialIndex
                 )
             }
             .sheet(isPresented: $showingNotificationSettings) {
@@ -203,12 +206,22 @@ struct PhotoGridView: View {
                 Text("This action cannot be undone.")
             }
         }
-        .onDisappear {
-        }
         .onAppear {
             dataController.configureIfNeeded(context: viewContext)
             syncActiveDownloadSnapshot()
             openCameraIfNeededFromNotification()
+            scheduleMetadataSyncIfNeeded()
+        }
+        .onChange(of: dataController.changeToken) { _, _ in
+            scheduleMetadataSyncIfNeeded()
+        }
+        .onChange(of: photoPagerSelection?.id) { _, newValue in
+            if newValue == nil {
+                scheduleMetadataSyncIfNeeded()
+            } else {
+                metadataSyncTask?.cancel()
+                metadataSyncTask = nil
+            }
         }
         .onChange(of: notificationNavigation.cameraOpenRequestToken) { _, token in
             guard token != nil else { return }
@@ -217,8 +230,9 @@ struct PhotoGridView: View {
         .onReceive(NotificationCenter.default.publisher(for: CloudKitService.assetTransferDidChangeNotification)) { notification in
             handleAssetTransferNotification(notification)
         }
-        .task {
-            await syncPhotoMetadataFromExifIfNeeded()
+        .onDisappear {
+            metadataSyncTask?.cancel()
+            metadataSyncTask = nil
         }
     }
 
@@ -300,11 +314,34 @@ struct PhotoGridView: View {
         }
     }
 
+    @MainActor
+    private func scheduleMetadataSyncIfNeeded() {
+        guard photoPagerSelection == nil else { return }
+        guard !didSyncExifMetadata else { return }
+        guard !dataController.isEmpty else { return }
+        guard metadataSyncTask == nil else { return }
+
+        metadataSyncTask = Task(priority: .utility) {
+            defer {
+                Task { @MainActor in
+                    metadataSyncTask = nil
+                }
+            }
+
+            try? await Task.sleep(for: .seconds(0.8))
+            guard !Task.isCancelled else { return }
+            await syncPhotoMetadataFromExifIfNeeded()
+        }
+    }
+
     private func syncPhotoMetadataFromExifIfNeeded() async {
         guard !didSyncExifMetadata else { return }
         guard !dataController.isEmpty else { return }
-        didSyncExifMetadata = true
-        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded()
+        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded(limit: 24)
+        guard !Task.isCancelled else { return }
+        await MainActor.run {
+            didSyncExifMetadata = true
+        }
     }
 
     private func showScrollDateOverlay(for date: Date, direction: OverlayScrollDirection) {
