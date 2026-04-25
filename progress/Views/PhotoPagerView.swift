@@ -25,14 +25,27 @@ private struct PhotoPagerSnapshot: Sendable {
     }
 }
 
+private struct AdjacentPrefetchTarget: Sendable {
+    let fullImageAssetName: String?
+    let livePhotoImageAssetName: String?
+    let livePhotoVideoAssetName: String?
+
+    @MainActor
+    init(photo: DailyPhoto) {
+        fullImageAssetName = photo.fullImageAssetName
+        livePhotoImageAssetName = photo.livePhotoImageAssetName
+        livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+    }
+}
+
 struct PhotoPagerView: View {
     let photos: [DailyPhoto]
-    @Binding var selectedIndex: Int
+    let initialPhotoID: NSManagedObjectID?
 
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
 
-    @State private var currentPage: Int?
+    @State private var selectedIndex: Int
     @State private var locationName = "Unknown location"
     @State private var showsMetadataPanel = false
     @State private var sharePayload: SharePayload?
@@ -42,6 +55,20 @@ struct PhotoPagerView: View {
     @State private var showingDeleteConfirmation = false
     @State private var isDeleting = false
     @State private var adjacentPrefetchTask: Task<Void, Never>?
+
+    init(photos: [DailyPhoto], initialPhotoID: NSManagedObjectID?) {
+        self.photos = photos
+        self.initialPhotoID = initialPhotoID
+
+        let initialIndex: Int
+        if let initialPhotoID,
+           let resolvedIndex = photos.firstIndex(where: { $0.objectID == initialPhotoID }) {
+            initialIndex = resolvedIndex
+        } else {
+            initialIndex = 0
+        }
+        self._selectedIndex = State(initialValue: initialIndex)
+    }
 
     private static let navigationDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -60,22 +87,17 @@ struct PhotoPagerView: View {
                 ZStack(alignment: .bottom) {
                     Color.black.ignoresSafeArea()
 
-                    ScrollView(.horizontal) {
-                        LazyHStack(spacing: 0) {
-                            ForEach(photos.indices, id: \.self) { index in
-                                PhotoPagerPageView(
-                                    photo: photos[index],
-                                    bottomInset: 16
-                                )
-                                .frame(width: proxy.size.width, height: proxy.size.height)
-                                .tag(index)
-                            }
+                    TabView(selection: $selectedIndex) {
+                        ForEach(photos.indices, id: \.self) { index in
+                            PhotoPagerPageView(
+                                photo: photos[index],
+                                bottomInset: 16
+                            )
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .tag(index)
                         }
-                        .scrollTargetLayout()
                     }
-                    .scrollTargetBehavior(.paging)
-                    .scrollIndicators(.hidden)
-                    .scrollPosition(id: $currentPage)
+                    .tabViewStyle(.page(indexDisplayMode: .never))
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -168,22 +190,19 @@ struct PhotoPagerView: View {
             metadataSheet
         }
         .onAppear {
-            currentPage = selectedIndex
-            Task {
-                await loadLocationName()
+            if !photos.isEmpty, !photos.indices.contains(selectedIndex) {
+                selectedIndex = 0
             }
-        }
-        .onChange(of: currentPage) { _, newValue in
-            guard let newValue else { return }
-            selectedIndex = newValue
-            scheduleAdjacentPrefetch(around: newValue)
+            scheduleAdjacentPrefetch(around: selectedIndex)
             Task {
                 await loadLocationName()
             }
         }
         .onChange(of: selectedIndex) { _, newValue in
-            if currentPage != newValue {
-                currentPage = newValue
+            guard photos.indices.contains(newValue) else { return }
+            scheduleAdjacentPrefetch(around: newValue)
+            Task {
+                await loadLocationName()
             }
         }
         .onDisappear {
@@ -606,27 +625,27 @@ struct PhotoPagerView: View {
     @MainActor
     private func scheduleAdjacentPrefetch(around index: Int) {
         adjacentPrefetchTask?.cancel()
-        let snapshots = adjacentSnapshots(around: index)
-        guard !snapshots.isEmpty else { return }
+        let targets = adjacentPrefetchTargets(around: index)
+        guard !targets.isEmpty else { return }
 
         adjacentPrefetchTask = Task(priority: .utility) {
-            for snapshot in snapshots {
+            for target in targets {
                 guard !Task.isCancelled else { return }
                 await PhotoStorageService.shared.prefetchPagerAssets(
-                    fullImageAssetName: snapshot.fullImageAssetName,
-                    livePhotoImageAssetName: snapshot.livePhotoImageAssetName,
-                    livePhotoVideoAssetName: snapshot.livePhotoVideoAssetName
+                    fullImageAssetName: target.fullImageAssetName,
+                    livePhotoImageAssetName: target.livePhotoImageAssetName,
+                    livePhotoVideoAssetName: target.livePhotoVideoAssetName
                 )
             }
         }
     }
 
     @MainActor
-    private func adjacentSnapshots(around index: Int) -> [PhotoPagerSnapshot] {
+    private func adjacentPrefetchTargets(around index: Int) -> [AdjacentPrefetchTarget] {
         let preferredIndices = [index + 1, index - 1]
         return preferredIndices.compactMap { candidateIndex in
             guard photos.indices.contains(candidateIndex) else { return nil }
-            return PhotoPagerSnapshot(photo: photos[candidateIndex])
+            return AdjacentPrefetchTarget(photo: photos[candidateIndex])
         }
     }
 }
@@ -640,7 +659,7 @@ private struct PhotoPagerPageView: View {
     @State private var isLoadingImage = true
     @State private var livePhotoImageURL: URL?
     @State private var livePhotoVideoURL: URL?
-    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
+    @State private var isDownloadingFromCloud = false
 
     var body: some View {
         ZStack {
@@ -686,9 +705,9 @@ private struct PhotoPagerPageView: View {
             isLoadingImage = true
             livePhotoImageURL = nil
             livePhotoVideoURL = nil
+            isDownloadingFromCloud = CloudSyncMonitor.shared.isDownloading(photo: photo)
             await loadThumbnailImage()
-            await loadFullImage()
-            await loadLivePhotoResources()
+            await loadPageAssets()
         }
     }
 
@@ -700,7 +719,7 @@ private struct PhotoPagerPageView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .blur(radius: cloudSyncMonitor.isDownloading(photo: photo) ? 10 : 6)
+                    .blur(radius: isDownloadingFromCloud ? 10 : 6)
                     .overlay {
                         LinearGradient(
                             colors: [.black.opacity(0.18), .black.opacity(0.42)],
@@ -715,7 +734,7 @@ private struct PhotoPagerPageView: View {
                     .tint(.white)
                     .controlSize(.large)
 
-                Text(cloudSyncMonitor.isDownloading(photo: photo) ? "Downloading original…" : "Loading photo…")
+                Text(isDownloadingFromCloud ? "Downloading original…" : "Loading photo…")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white.opacity(0.92))
             }
@@ -734,48 +753,44 @@ private struct PhotoPagerPageView: View {
     }
 
     @MainActor
-    private func loadFullImage() async {
+    private func loadPageAssets() async {
         let fullImageAssetName = photo.fullImageAssetName
-
-        do {
-            let image = try await PhotoStorageService.shared.loadFullImage(named: fullImageAssetName)
-            fullImage = image
-            isLoadingImage = false
-        } catch {
-            if let thumbnailImage {
-                fullImage = thumbnailImage
-                isLoadingImage = false
-            }
-        }
-    }
-
-    @MainActor
-    private func loadLivePhotoResources() async {
         let livePhotoImageAssetName = photo.livePhotoImageAssetName
         let livePhotoVideoAssetName = photo.livePhotoVideoAssetName
 
+        async let resolvedFullImage: UIImage? = try? await PhotoStorageService.shared.loadFullImage(named: fullImageAssetName)
+
         #if targetEnvironment(simulator)
-        livePhotoImageURL = nil
-        livePhotoVideoURL = nil
+        let resolvedLiveResources: (imageURL: URL, videoURL: URL)? = nil
         #else
-        do {
-            let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
-                imageAssetName: livePhotoImageAssetName,
-                videoAssetName: livePhotoVideoAssetName
-            )
+        let resolvedLiveResources: (imageURL: URL, videoURL: URL)? = try? await PhotoStorageService.shared.loadLivePhotoResources(
+            imageAssetName: livePhotoImageAssetName,
+            videoAssetName: livePhotoVideoAssetName
+        )
+        #endif
+
+        if let image = await resolvedFullImage {
+            fullImage = image
+        } else if let thumbnailImage {
+            fullImage = thumbnailImage
+        }
+
+        if let resources = resolvedLiveResources {
             livePhotoImageURL = resources.imageURL
             livePhotoVideoURL = resources.videoURL
-        } catch {
+        } else {
             livePhotoImageURL = nil
             livePhotoVideoURL = nil
         }
-        #endif
+
+        isLoadingImage = false
+        isDownloadingFromCloud = false
     }
 }
 
 #Preview {
     PhotoPagerView(
         photos: [],
-        selectedIndex: .constant(0)
+        initialPhotoID: nil
     )
 }

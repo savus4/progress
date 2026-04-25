@@ -80,6 +80,16 @@ final class PhotoStorageService {
     private let thumbnailService = ThumbnailService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoStorage")
     private let metadataSyncBatchLimit = 50
+    private let fullImageDecodeQueue = DispatchQueue(
+        label: "me.riepl.progress.full-image-decoding",
+        qos: .userInitiated
+    )
+    private let decodedFullImageCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 18
+        cache.totalCostLimit = 320 * 1_024 * 1_024
+        return cache
+    }()
 
     private init() {}
 
@@ -582,9 +592,29 @@ final class PhotoStorageService {
 
         do {
             referencedAssetNames = try await context.perform {
-                let request = DailyPhoto.fetchRequest()
-                let photos = try context.fetch(request)
-                return Set(photos.flatMap(self.assetNames(for:)))
+                let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
+                request.resultType = .dictionaryResultType
+                request.propertiesToFetch = [
+                    "objectID",
+                    "fullImageAssetName",
+                    "livePhotoImageAssetName",
+                    "livePhotoVideoAssetName"
+                ]
+                request.fetchBatchSize = 500
+
+                let rows = try context.fetch(request)
+                var assetNames = Set<String>()
+                assetNames.reserveCapacity(rows.count)
+
+                for row in rows {
+                    for key in ["fullImageAssetName", "livePhotoImageAssetName", "livePhotoVideoAssetName"] {
+                        if let assetName = row[key] as? String {
+                            assetNames.insert(assetName)
+                        }
+                    }
+                }
+
+                return assetNames
             }
         } catch {
             logger.error("orphan-asset-fetch: \(error.localizedDescription, privacy: .public)")
@@ -671,11 +701,14 @@ final class PhotoStorageService {
         guard let fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
-        let fileURL = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
-        guard let image = UIImage(contentsOfFile: fileURL.path) else {
-            throw CloudKitError.assetNotFound
+
+        let cacheKey = fullImageAssetName as NSString
+        if let cachedImage = decodedFullImageCache.object(forKey: cacheKey) {
+            return cachedImage
         }
-        return image
+
+        let fileURL = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
+        return try await decodeAndCacheFullImage(from: fileURL, cacheKey: cacheKey)
     }
 
     func loadLivePhotoVideo(named livePhotoVideoAssetName: String?) async throws -> URL {
@@ -704,17 +737,19 @@ final class PhotoStorageService {
         livePhotoImageAssetName: String?,
         livePhotoVideoAssetName: String?
     ) async {
-        let assetNames = Array(
-            NSOrderedSet(array: [
-                fullImageAssetName,
-                livePhotoImageAssetName,
-                livePhotoVideoAssetName
-            ].compactMap { $0 })
-        ).compactMap { $0 as? String }
-
-        for assetName in assetNames {
+        if let fullImageAssetName {
             guard !Task.isCancelled else { return }
-            _ = try? await cloudKitService.loadAssetURL(named: assetName)
+            _ = try? await loadFullImage(named: fullImageAssetName)
+        }
+
+        if let livePhotoImageAssetName, livePhotoImageAssetName != fullImageAssetName {
+            guard !Task.isCancelled else { return }
+            _ = try? await loadFullImage(named: livePhotoImageAssetName)
+        }
+
+        if let livePhotoVideoAssetName {
+            guard !Task.isCancelled else { return }
+            _ = try? await cloudKitService.loadAssetURL(named: livePhotoVideoAssetName)
         }
     }
 
@@ -737,6 +772,31 @@ final class PhotoStorageService {
         let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
         _ = try cloudKitService.stageAssetFile(from: videoURL, named: assetName)
         return assetName
+    }
+
+    private func decodeAndCacheFullImage(from fileURL: URL, cacheKey: NSString) async throws -> UIImage {
+        try await withCheckedThrowingContinuation { continuation in
+            fullImageDecodeQueue.async {
+                guard let image = UIImage(contentsOfFile: fileURL.path) else {
+                    continuation.resume(throwing: CloudKitError.assetNotFound)
+                    return
+                }
+
+                let preparedImage = image.preparingForDisplay() ?? image
+                self.decodedFullImageCache.setObject(
+                    preparedImage,
+                    forKey: cacheKey,
+                    cost: self.cacheCost(for: preparedImage)
+                )
+                continuation.resume(returning: preparedImage)
+            }
+        }
+    }
+
+    private func cacheCost(for image: UIImage) -> Int {
+        let pixelWidth = Int(image.size.width * image.scale)
+        let pixelHeight = Int(image.size.height * image.scale)
+        return max(pixelWidth * pixelHeight * 4, 1)
     }
 
     private func makeExportRootDirectory() throws -> URL {

@@ -50,6 +50,7 @@ final class CloudSyncMonitor: ObservableObject {
     private var assetTransferObserver: NSObjectProtocol?
     private var activeDownloadAssetNames: Set<String> = []
     private var exportWaiters: [UUID: ExportWaiter] = [:]
+    private var uploadStatusRefreshTask: Task<Void, Never>?
 
     private init() {
         observer = NotificationCenter.default.addObserver(
@@ -72,7 +73,7 @@ final class CloudSyncMonitor: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.refreshUploadStatus()
+                self?.scheduleUploadStatusRefresh(delay: .zero)
             }
         }
 
@@ -96,7 +97,7 @@ final class CloudSyncMonitor: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                await self?.refreshUploadStatus()
+                self?.scheduleUploadStatusRefresh()
             }
         }
 
@@ -119,11 +120,12 @@ final class CloudSyncMonitor: ObservableObject {
         }
 
         Task { @MainActor [weak self] in
-            await self?.refreshUploadStatus()
+            self?.scheduleUploadStatusRefresh(delay: .zero)
         }
     }
 
     deinit {
+        uploadStatusRefreshTask?.cancel()
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -319,22 +321,59 @@ final class CloudSyncMonitor: ObservableObject {
         lastMigrationError = message
     }
 
+    private func scheduleUploadStatusRefresh(delay: Duration = .milliseconds(250)) {
+        uploadStatusRefreshTask?.cancel()
+        uploadStatusRefreshTask = Task { @MainActor [weak self] in
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+            }
+            guard !Task.isCancelled else { return }
+            await self?.refreshUploadStatus()
+        }
+    }
+
     func refreshUploadStatus() async {
         let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
 
         do {
             let counts = try await context.perform {
-                func count(for states: [String]) throws -> Int {
-                    let request = DailyPhoto.fetchRequest()
-                    request.predicate = NSPredicate(format: "uploadStateRaw IN %@", states)
-                    return try context.count(for: request)
+                let states = [
+                    PhotoUploadState.pending.rawValue,
+                    PhotoUploadState.uploading.rawValue,
+                    PhotoUploadState.failed.rawValue,
+                    PhotoUploadState.paused.rawValue
+                ]
+
+                let countExpression = NSExpressionDescription()
+                countExpression.name = "count"
+                countExpression.expression = NSExpression(
+                    forFunction: "count:",
+                    arguments: [NSExpression(forKeyPath: "uploadStateRaw")]
+                )
+                countExpression.expressionResultType = .integer64AttributeType
+
+                let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
+                request.resultType = .dictionaryResultType
+                request.propertiesToFetch = ["uploadStateRaw", countExpression]
+                request.propertiesToGroupBy = ["uploadStateRaw"]
+                request.predicate = NSPredicate(format: "uploadStateRaw IN %@", states)
+
+                let rows = try context.fetch(request)
+                var countsByState: [String: Int] = [:]
+
+                for row in rows {
+                    guard let state = row["uploadStateRaw"] as? String else { continue }
+                    if let count = row["count"] as? NSNumber {
+                        countsByState[state] = count.intValue
+                    }
                 }
 
-                let uploading = try count(for: [PhotoUploadState.uploading.rawValue])
-                let pending = try count(for: [PhotoUploadState.pending.rawValue])
-                let failed = try count(for: [PhotoUploadState.failed.rawValue])
-                let paused = try count(for: [PhotoUploadState.paused.rawValue])
-                return (pending, uploading, failed, paused)
+                return (
+                    countsByState[PhotoUploadState.pending.rawValue] ?? 0,
+                    countsByState[PhotoUploadState.uploading.rawValue] ?? 0,
+                    countsByState[PhotoUploadState.failed.rawValue] ?? 0,
+                    countsByState[PhotoUploadState.paused.rawValue] ?? 0
+                )
             }
 
             pendingUploadCount = counts.0
@@ -385,7 +424,9 @@ final class CloudSyncMonitor: ObservableObject {
     private func handle(event: NSPersistentCloudKitContainer.Event) {
         if event.type == .export, let endDate = event.endDate {
             if let error = event.error {
-                resolveExportWaiters(completedAt: endDate, result: .failed(error.localizedDescription))
+                if !isSystemDeferredCloudKitError(error) {
+                    resolveExportWaiters(completedAt: endDate, result: .failed(error.localizedDescription))
+                }
             } else {
                 resolveExportWaiters(completedAt: endDate, result: .completed)
             }
@@ -393,7 +434,11 @@ final class CloudSyncMonitor: ObservableObject {
 
         if let endDate = event.endDate {
             if let error = event.error {
-                syncState = .failed(error.localizedDescription)
+                if isSystemDeferredCloudKitError(error) {
+                    syncState = .idle
+                } else {
+                    syncState = .failed(error.localizedDescription)
+                }
             } else {
                 syncState = .idle
                 lastSyncDate = endDate
@@ -401,6 +446,23 @@ final class CloudSyncMonitor: ObservableObject {
         } else {
             syncState = .syncing(event.type)
         }
+    }
+
+    private func isSystemDeferredCloudKitError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == 134419 {
+            return true
+        }
+
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isSystemDeferredCloudKitError(underlyingError)
+        }
+
+        if let detailedErrors = nsError.userInfo["NSDetailedErrors"] as? [Error] {
+            return detailedErrors.contains(where: isSystemDeferredCloudKitError)
+        }
+
+        return false
     }
 
     private func handleAssetTransfer(

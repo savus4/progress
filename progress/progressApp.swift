@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
 
         Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(5))
             let context = await MainActor.run {
                 PersistenceController.shared.makeBackgroundContext()
             }

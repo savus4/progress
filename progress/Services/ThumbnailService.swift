@@ -96,7 +96,7 @@ final class DecodedThumbnailCache {
 
     private init() {
         cache.countLimit = 512
-        cache.totalCostLimit = 96 * 1_024 * 1_024
+        cache.totalCostLimit = 128 * 1_024 * 1_024
     }
 
     func image(for objectID: NSManagedObjectID, data: Data?) async -> UIImage? {
@@ -111,23 +111,53 @@ final class DecodedThumbnailCache {
         return await withCheckedContinuation { continuation in
             workerQueue.async {
                 let cacheKey = stringKey as NSString
-                guard let image = UIImage(data: data) else {
+                guard let image = self.decodeThumbnailImage(from: data) else {
                     continuation.resume(returning: nil)
                     return
                 }
 
-                self.cache.setObject(image, forKey: cacheKey, cost: self.cacheCost(for: image))
-                continuation.resume(returning: image)
+                let preparedImage = image.preparingForDisplay() ?? image
+                self.cache.setObject(preparedImage, forKey: cacheKey, cost: self.cacheCost(for: preparedImage))
+                continuation.resume(returning: preparedImage)
             }
         }
+    }
+
+    func cachedImage(for objectID: NSManagedObjectID) -> UIImage? {
+        cache.object(forKey: cacheKey(for: objectID))
     }
 
     func removeImage(for objectID: NSManagedObjectID) {
         cache.removeObject(forKey: cacheKey(for: objectID))
     }
 
+    func removeAllImages() {
+        cache.removeAllObjects()
+    }
+
     private func cacheKey(for objectID: NSManagedObjectID) -> NSString {
         objectID.uriRepresentation().absoluteString as NSString
+    }
+
+    private func decodeThumbnailImage(from data: Data) -> UIImage? {
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+            return nil
+        }
+
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: false,
+            kCGImageSourceThumbnailMaxPixelSize: 320
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else {
+            return nil
+        }
+
+        return UIImage(cgImage: cgImage)
     }
 
     private func cacheCost(for image: UIImage) -> Int {
