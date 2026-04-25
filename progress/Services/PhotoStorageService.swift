@@ -1401,7 +1401,8 @@ actor PhotoUploadService {
     private var idleWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
     nonisolated static func registerBackgroundTask() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { task in
+        let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
+        let didRegister = BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { task in
             guard let processingTask = task as? BGProcessingTask else {
                 task.setTaskCompleted(success: false)
                 return
@@ -1411,18 +1412,52 @@ actor PhotoUploadService {
                 await PhotoUploadService.shared.handleBackgroundProcessingTask(processingTask)
             }
         }
+        logger.log(
+            "bg-register identifier=\(backgroundTaskIdentifier, privacy: .public) success=\(didRegister, privacy: .public)"
+        )
     }
 
-    nonisolated static func scheduleBackgroundProcessing(earliestBeginDate: Date? = nil) {
+    nonisolated static func scheduleBackgroundProcessing(
+        earliestBeginDate: Date? = nil,
+        source: String = #function
+    ) {
+        let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
         let request = BGProcessingTaskRequest(identifier: backgroundTaskIdentifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
         request.earliestBeginDate = earliestBeginDate
+        logger.log(
+            "bg-submit-attempt identifier=\(backgroundTaskIdentifier, privacy: .public) source=\(source, privacy: .public) earliest=\(String(describing: earliestBeginDate), privacy: .public)"
+        )
         do {
             try BGTaskScheduler.shared.submit(request)
+            logger.log(
+                "bg-submit-success identifier=\(backgroundTaskIdentifier, privacy: .public) source=\(source, privacy: .public)"
+            )
+            logPendingTaskRequests(reason: "post-submit-success", source: source)
         } catch {
-            let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
-            logger.error("bg-submit: \(error.localizedDescription, privacy: .public)")
+            let nsError = error as NSError
+            logger.error(
+                """
+                bg-submit-failure identifier=\(backgroundTaskIdentifier, privacy: .public) source=\(source, privacy: .public) \
+                domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public) \
+                description=\(nsError.localizedDescription, privacy: .public) userInfo=\(String(describing: nsError.userInfo), privacy: .public)
+                """
+            )
+            logPendingTaskRequests(reason: "post-submit-failure", source: source)
+        }
+    }
+
+    nonisolated private static func logPendingTaskRequests(reason: String, source: String) {
+        let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
+        BGTaskScheduler.shared.getPendingTaskRequests { requests in
+            let summary = requests.map { request in
+                let beginDateDescription = String(describing: request.earliestBeginDate)
+                return "\(request.identifier) earliest=\(beginDateDescription)"
+            }.joined(separator: "; ")
+            logger.log(
+                "bg-pending reason=\(reason, privacy: .public) source=\(source, privacy: .public) count=\(requests.count, privacy: .public) requests=\(summary, privacy: .public)"
+            )
         }
     }
 

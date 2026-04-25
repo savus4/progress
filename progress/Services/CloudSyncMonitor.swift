@@ -1,6 +1,7 @@
 import CoreData
 import Combine
 import Foundation
+import OSLog
 
 struct LegacyPayloadMigrationResult: Sendable {
     let scannedCount: Int
@@ -51,6 +52,7 @@ final class CloudSyncMonitor: ObservableObject {
     private var activeDownloadAssetNames: Set<String> = []
     private var exportWaiters: [UUID: ExportWaiter] = [:]
     private var uploadStatusRefreshTask: Task<Void, Never>?
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudSync")
 
     private init() {
         observer = NotificationCenter.default.addObserver(
@@ -434,6 +436,7 @@ final class CloudSyncMonitor: ObservableObject {
 
         if let endDate = event.endDate {
             if let error = event.error {
+                logCloudKitEventError(error, eventType: event.type)
                 if isSystemDeferredCloudKitError(error) {
                     syncState = .idle
                 } else {
@@ -463,6 +466,43 @@ final class CloudSyncMonitor: ObservableObject {
         }
 
         return false
+    }
+
+    private func logCloudKitEventError(_ error: Error, eventType: NSPersistentCloudKitContainer.EventType) {
+        let primary = error as NSError
+        let chain = describeErrorChain(primary)
+        logger.error(
+            """
+            cloudkit-event-error type=\(String(describing: eventType), privacy: .public) \
+            domain=\(primary.domain, privacy: .public) code=\(primary.code, privacy: .public) \
+            description=\(primary.localizedDescription, privacy: .public) chain=\(chain, privacy: .public)
+            """
+        )
+    }
+
+    private func describeErrorChain(_ error: NSError) -> String {
+        var fragments: [String] = []
+        appendErrorDescription(error, to: &fragments, depth: 0)
+        return fragments.joined(separator: " -> ")
+    }
+
+    private func appendErrorDescription(_ error: NSError, to fragments: inout [String], depth: Int) {
+        guard depth < 8 else {
+            fragments.append("depth-limit")
+            return
+        }
+
+        fragments.append("\(error.domain)#\(error.code):\(error.localizedDescription)")
+
+        if let detailedErrors = error.userInfo["NSDetailedErrors"] as? [NSError], !detailedErrors.isEmpty {
+            for detailedError in detailedErrors {
+                appendErrorDescription(detailedError, to: &fragments, depth: depth + 1)
+            }
+        }
+
+        if let underlyingError = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            appendErrorDescription(underlyingError, to: &fragments, depth: depth + 1)
+        }
     }
 
     private func handleAssetTransfer(
