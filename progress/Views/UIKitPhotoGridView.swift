@@ -71,6 +71,12 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
 struct UIKitPhotoGridItem: Identifiable, Equatable {
     let objectID: NSManagedObjectID
     let captureDate: Date?
+    let fullImageAssetName: String?
+    let livePhotoImageAssetName: String?
+    let livePhotoVideoAssetName: String?
+    let locationName: String?
+    let latitude: Double
+    let longitude: Double
     let uploadState: PhotoUploadState
     let assetNames: [String]
 
@@ -79,11 +85,17 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
     init(photo: DailyPhoto) {
         objectID = photo.objectID
         captureDate = photo.captureDate
+        fullImageAssetName = photo.fullImageAssetName
+        livePhotoImageAssetName = photo.livePhotoImageAssetName
+        livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+        locationName = photo.locationName
+        latitude = photo.latitude
+        longitude = photo.longitude
         uploadState = photo.uploadState
         assetNames = [
-            photo.fullImageAssetName,
-            photo.livePhotoImageAssetName,
-            photo.livePhotoVideoAssetName
+            fullImageAssetName,
+            livePhotoImageAssetName,
+            livePhotoVideoAssetName
         ].compactMap { $0 }
     }
 }
@@ -170,7 +182,7 @@ private enum UIKitPhotoGridSection: Int, Hashable, Sendable {
     case main
 }
 
-private final class PhotoGridThumbnailDataProvider {
+final class PhotoThumbnailDataProvider {
     private let context = PersistenceController.shared.makeBackgroundContext()
     private var readCount = 0
     private let resetInterval = 192
@@ -251,7 +263,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var preheatDirection: ScrollPreheatDirection = .none
     private var lastTopVisibleReportUptime: TimeInterval = 0
     private var lastVisibleThumbnailKickUptime: TimeInterval = 0
-    private let thumbnailDataProvider = PhotoGridThumbnailDataProvider()
+    private let thumbnailDataProvider = PhotoThumbnailDataProvider()
     private let maxInflightThumbnailTasks = 48
     private let maxInflightThumbnailTasksDuringScroll = 22
     private let maxNearVisiblePrefetchPerKick = 56
@@ -705,9 +717,9 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
         let indexPath = IndexPath(item: index, section: 0)
         collectionView.layoutIfNeeded()
-        collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: true)
+        collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.collectionView.layoutIfNeeded()
             let frame = self.frameForPhoto(with: objectID)

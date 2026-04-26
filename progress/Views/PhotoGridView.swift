@@ -22,6 +22,8 @@ struct PhotoGridView: View {
     @State private var showingCamera = false
     @State private var showingNotificationSettings = false
     @State private var photoDetailPresentation: PhotoDetailPresentation?
+    @State private var activePhotoDetailObjectID: NSManagedObjectID?
+    @State private var pendingDetailDismissObjectID: NSManagedObjectID?
     @State private var gridCenteringRequest: PhotoGridCenteringRequest?
     @State private var visibleScrollDate: Date?
     @State private var isScrollDateVisible = false
@@ -43,95 +45,87 @@ struct PhotoGridView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                if dataController.isEmpty {
-                    // Empty state
-                    VStack(spacing: 20) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 60))
-                            .foregroundStyle(.secondary)
-                        
-                        Text("No Photos Yet")
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                        
-                        Text("Start capturing your daily moments")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                        
-                        Button(action: { showingCamera = true }) {
-                            Label("Take Your First Photo", systemImage: "camera")
-                                .font(.headline)
-                                .padding()
-                                .background(.blue.gradient, in: Capsule())
-                                .foregroundStyle(.white)
+                    if dataController.isEmpty {
+                        // Empty state
+                        VStack(spacing: 20) {
+                            Image(systemName: "camera.fill")
+                                .font(.system(size: 60))
+                                .foregroundStyle(.secondary)
+                            
+                            Text("No Photos Yet")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                            
+                            Text("Start capturing your daily moments")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                            
+                            Button(action: { showingCamera = true }) {
+                                Label("Take Your First Photo", systemImage: "camera")
+                                    .font(.headline)
+                                    .padding()
+                                    .background(.blue.gradient, in: Capsule())
+                                    .foregroundStyle(.white)
+                            }
+                            .accessibilityIdentifier("emptyStateCaptureButton")
+                            .padding(.top)
                         }
-                        .accessibilityIdentifier("emptyStateCaptureButton")
-                        .padding(.top)
-                    }
-                } else {
-                    UIKitPhotoGridView(
-                        dataController: dataController,
-                        changeToken: dataController.changeToken,
-                        activeDownloadAssetNames: activeDownloadAssetNames,
-                        centeringRequest: gridCenteringRequest,
-                        isSelectionMode: $isSelectionMode,
-                        selectedPhotoIDs: $selectedPhotoIDs,
-                        onOpenPhoto: { objectID, _, _ in
-                            openPhotoDetail(for: objectID)
-                        },
-                        onPhotoFrameChanged: { _, _ in },
-                        onPhotoCentered: { _, _ in },
-                        onFirstItemFrameChanged: { frame in
-                            if frame != .zero {
-                                firstGridItemFrameInGlobal = frame
-                            }
-                        },
-                        onTopVisibleDateChanged: { date in
-                            guard let date else { return }
-                            if isScrollGestureActive {
-                                showScrollDateOverlay(for: date, direction: .none)
-                            } else if visibleScrollDate == nil {
-                                visibleScrollDate = date
-                            }
-                        },
-                        onScrollActivityChanged: { isActive in
-                            isScrollGestureActive = isActive
-                            if !isActive {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    isScrollDateVisible = false
+                    } else {
+                        UIKitPhotoGridView(
+                            dataController: dataController,
+                            changeToken: dataController.changeToken,
+                            activeDownloadAssetNames: activeDownloadAssetNames,
+                            centeringRequest: gridCenteringRequest,
+                            isSelectionMode: $isSelectionMode,
+                            selectedPhotoIDs: $selectedPhotoIDs,
+                            onOpenPhoto: { objectID, _, _ in
+                                openPhotoDetail(for: objectID)
+                            },
+                            onPhotoFrameChanged: { _, _ in },
+                            onPhotoCentered: { objectID, frame in
+                                handlePhotoCenteredForDetailDismiss(objectID: objectID, frame: frame)
+                            },
+                            onFirstItemFrameChanged: { frame in
+                                if frame != .zero {
+                                    firstGridItemFrameInGlobal = frame
+                                }
+                            },
+                            onTopVisibleDateChanged: { date in
+                                guard let date else { return }
+                                if isScrollGestureActive {
+                                    showScrollDateOverlay(for: date, direction: .none)
+                                } else if visibleScrollDate == nil {
+                                    visibleScrollDate = date
+                                }
+                            },
+                            onScrollActivityChanged: { isActive in
+                                isScrollGestureActive = isActive
+                                if !isActive {
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        isScrollDateVisible = false
+                                    }
                                 }
                             }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .ignoresSafeArea(.container, edges: [.top, .bottom])
+                        .overlay(alignment: .top) {
+                            if isScrollDateVisible, let visibleScrollDate {
+                                ScrollMonthOverlay(date: visibleScrollDate)
+                                    .padding(.top, 12)
+                                    .transition(.move(edge: .top).combined(with: .opacity))
+                            }
                         }
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .ignoresSafeArea(.container, edges: [.top, .bottom])
-                    .overlay(alignment: .top) {
-                        if isScrollDateVisible, let visibleScrollDate {
-                            ScrollMonthOverlay(date: visibleScrollDate)
-                                .padding(.top, 12)
-                                .transition(.move(edge: .top).combined(with: .opacity))
+                        .overlay(alignment: .bottom) {
+                            if !isSelectionMode {
+                                floatingCaptureButton
+                                    .padding(.bottom, 20)
+                            }
                         }
                     }
-                    .overlay(alignment: .bottom) {
-                        if !isSelectionMode {
-                            floatingCaptureButton
-                                .padding(.bottom, 20)
-                        }
-                    }
-                }
 
-                if let photoDetailPresentation {
-                    PhotoDetailView(
-                        items: photoDetailPresentation.items,
-                        initialIndex: photoDetailPresentation.initialIndex,
-                        onClose: closePhotoDetail
-                    )
-                    .ignoresSafeArea()
-                    .zIndex(20)
-                }
             }
             .navigationTitle("Work in Progress")
-            .toolbar(photoDetailPresentation == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !dataController.isEmpty {
@@ -191,6 +185,16 @@ struct PhotoGridView: View {
             }
             .sheet(isPresented: $showingNotificationSettings) {
                 NotificationSettingsView()
+            }
+            .fullScreenCover(item: $photoDetailPresentation) { presentation in
+                PhotoDetailView(
+                    items: presentation.items,
+                    initialIndex: presentation.initialIndex,
+                    onClose: closePhotoDetail,
+                    onCurrentItemChanged: { objectID in
+                        activePhotoDetailObjectID = objectID
+                    }
+                )
             }
             .sheet(isPresented: $showingExportPicker, onDismiss: {
                 exportedFileURLs = []
@@ -263,21 +267,41 @@ struct PhotoGridView: View {
 
     @MainActor
     private func openPhotoDetail(for objectID: NSManagedObjectID) {
-        let items = dataController.allPhotos.map(PhotoDetailItem.init(photo:))
+        let items = dataController.itemsSnapshot.map(PhotoDetailItem.init(gridItem:))
         guard let index = items.firstIndex(where: { $0.objectID == objectID }) else {
             return
         }
 
-        photoDetailPresentation = PhotoDetailPresentation(
-            items: items,
-            initialIndex: index
-        )
+        activePhotoDetailObjectID = objectID
+        withAnimation(.easeInOut(duration: 0.2)) {
+            photoDetailPresentation = PhotoDetailPresentation(
+                items: items,
+                initialIndex: index
+            )
+        }
     }
 
     private func closePhotoDetail(_ objectID: NSManagedObjectID?) {
-        if let objectID {
-            gridCenteringRequest = PhotoGridCenteringRequest(objectID: objectID, token: UUID())
+        guard photoDetailPresentation != nil else { return }
+        guard let objectID else {
+            finalizePhotoDetailDismissal()
+            return
         }
+
+        pendingDetailDismissObjectID = objectID
+        gridCenteringRequest = PhotoGridCenteringRequest(objectID: objectID, token: UUID())
+    }
+
+    private func handlePhotoCenteredForDetailDismiss(objectID: NSManagedObjectID, frame: CGRect) {
+        guard pendingDetailDismissObjectID == objectID else { return }
+        pendingDetailDismissObjectID = nil
+        withAnimation(.easeInOut(duration: 0.18)) {
+            finalizePhotoDetailDismissal()
+        }
+    }
+
+    private func finalizePhotoDetailDismissal() {
+        activePhotoDetailObjectID = nil
         photoDetailPresentation = nil
     }
 

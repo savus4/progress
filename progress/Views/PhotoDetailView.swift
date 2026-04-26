@@ -1,5 +1,7 @@
 import SwiftUI
 import CoreData
+import CoreLocation
+import MapKit
 import Photos
 import PhotosUI
 import UIKit
@@ -210,20 +212,37 @@ struct LivePhotoContainerView: UIViewRepresentable {
 
 struct PhotoDetailItem: Identifiable, Equatable {
     let objectID: NSManagedObjectID
-    let thumbnailData: Data?
     let fullImageAssetName: String?
     let livePhotoImageAssetName: String?
     let livePhotoVideoAssetName: String?
+    let captureDate: Date?
+    let locationName: String?
+    let latitude: Double
+    let longitude: Double
 
     var id: NSManagedObjectID { objectID }
 
     @MainActor
     init(photo: DailyPhoto) {
         objectID = photo.objectID
-        thumbnailData = photo.thumbnailData
         fullImageAssetName = photo.fullImageAssetName
         livePhotoImageAssetName = photo.livePhotoImageAssetName
         livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+        captureDate = photo.captureDate
+        locationName = photo.locationName
+        latitude = photo.latitude
+        longitude = photo.longitude
+    }
+
+    init(gridItem: UIKitPhotoGridItem) {
+        objectID = gridItem.objectID
+        fullImageAssetName = gridItem.fullImageAssetName
+        livePhotoImageAssetName = gridItem.livePhotoImageAssetName
+        livePhotoVideoAssetName = gridItem.livePhotoVideoAssetName
+        captureDate = gridItem.captureDate
+        locationName = gridItem.locationName
+        latitude = gridItem.latitude
+        longitude = gridItem.longitude
     }
 }
 
@@ -231,42 +250,52 @@ struct PhotoDetailView: View {
     let items: [PhotoDetailItem]
     let initialIndex: Int
     let onClose: (NSManagedObjectID?) -> Void
+    let onCurrentItemChanged: (NSManagedObjectID?) -> Void
 
     @State private var selectedIndex: Int
+    @State private var resolvedLocationName = "Unknown location"
+    @State private var verticalDismissOffset: CGFloat = 0
 
     init(
         items: [PhotoDetailItem],
         initialIndex: Int,
-        onClose: @escaping (NSManagedObjectID?) -> Void
+        onClose: @escaping (NSManagedObjectID?) -> Void,
+        onCurrentItemChanged: @escaping (NSManagedObjectID?) -> Void
     ) {
         self.items = items
         self.initialIndex = initialIndex
         self.onClose = onClose
+        self.onCurrentItemChanged = onCurrentItemChanged
         _selectedIndex = State(initialValue: initialIndex)
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.black.ignoresSafeArea()
+        ZStack {
+            Color.black
+                .opacity(backgroundOpacity)
+                .ignoresSafeArea()
 
             PhotoDetailPagingView(
                 items: items,
                 currentIndex: $selectedIndex
             )
-
-            Button(action: { onClose(currentItem?.objectID) }) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
-                    .background(.black.opacity(0.45), in: Circle())
-            }
-            .padding(.leading, 12)
-            .padding(.top, 8)
-            .accessibilityLabel("Close")
         }
         .statusBarHidden()
+        .safeAreaInset(edge: .top) {
+            detailTopBar
+        }
+        .offset(y: verticalDismissOffset)
+        .simultaneousGesture(verticalDismissGesture)
         .onAppear(perform: clampSelectedIndex)
+        .onAppear {
+            onCurrentItemChanged(currentItem?.objectID)
+        }
+        .onChange(of: selectedIndex) { _, _ in
+            onCurrentItemChanged(currentItem?.objectID)
+        }
+        .task(id: currentItem?.objectID) {
+            await updateLocationName()
+        }
     }
 
     private var currentItem: PhotoDetailItem? {
@@ -278,11 +307,246 @@ struct PhotoDetailView: View {
         guard !items.isEmpty else { return }
         selectedIndex = min(max(selectedIndex, 0), items.count - 1)
     }
+
+    private var backgroundOpacity: Double {
+        let progress = min(max(verticalDismissOffset / 240, 0), 1)
+        return 1 - (Double(progress) * 0.22)
+    }
+
+    @ViewBuilder
+    private var detailTopBar: some View {
+        ZStack {
+            HStack {
+                Button(action: { onClose(currentItem?.objectID) }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                }
+                .modifier(DetailTopBarButtonModifier())
+                .foregroundStyle(.primary)
+                .accessibilityLabel("Back")
+
+                Spacer()
+
+                Button(action: {}) {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                }
+                .modifier(DetailTopBarButtonModifier())
+                .foregroundStyle(.primary)
+                .accessibilityLabel("More")
+            }
+
+            VStack(spacing: 1) {
+                Text(resolvedLocationName)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
+
+                Text(currentDateText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .frame(height: Self.topBarBubbleHeight)
+            .modifier(DetailTopBarGlassModifier())
+            .foregroundStyle(.primary)
+            .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(.clear)
+    }
+
+    private var verticalDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                let horizontalDistance = abs(value.translation.width)
+                let verticalDistance = value.translation.height
+                let isPredominantlyVertical = verticalDistance > 0 && abs(verticalDistance) > (horizontalDistance * 1.15)
+
+                guard isPredominantlyVertical else {
+                    if verticalDismissOffset != 0 {
+                        verticalDismissOffset = 0
+                    }
+                    return
+                }
+
+                verticalDismissOffset = verticalDistance
+            }
+            .onEnded { value in
+                let horizontalDistance = abs(value.translation.width)
+                let verticalDistance = value.translation.height
+                let predictedVerticalDistance = value.predictedEndTranslation.height
+                let isPredominantlyVertical = verticalDistance > 0 && abs(verticalDistance) > (horizontalDistance * 1.15)
+
+                guard isPredominantlyVertical else {
+                    resetVerticalDismissOffset()
+                    return
+                }
+
+                if verticalDistance > 120 || predictedVerticalDistance > 220 {
+                    verticalDismissOffset = max(verticalDistance, 160)
+                    onClose(currentItem?.objectID)
+                } else {
+                    resetVerticalDismissOffset()
+                }
+            }
+    }
+
+    private func resetVerticalDismissOffset() {
+        guard verticalDismissOffset != 0 else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+            verticalDismissOffset = 0
+        }
+    }
+
+    private var currentDateText: String {
+        guard let captureDate = currentItem?.captureDate else { return "Unknown date" }
+        return Self.dateTimeFormatter.string(from: captureDate)
+    }
+
+    @MainActor
+    private func updateLocationName() async {
+        guard let currentItem else {
+            resolvedLocationName = "Unknown location"
+            return
+        }
+
+        if let storedLocationName = currentItem.locationName, !storedLocationName.isEmpty {
+            resolvedLocationName = storedLocationName
+            return
+        }
+
+        guard currentItem.latitude != 0 || currentItem.longitude != 0 else {
+            resolvedLocationName = "No location"
+            return
+        }
+
+        if let cachedLocationName = await LocationNameCacheService.shared.cachedName(
+            for: currentItem.latitude,
+            longitude: currentItem.longitude
+        ) {
+            resolvedLocationName = cachedLocationName
+            return
+        }
+
+        let location = CLLocation(latitude: currentItem.latitude, longitude: currentItem.longitude)
+
+        do {
+            let resolvedName = try await resolveLocationName(for: location)
+
+            await LocationNameCacheService.shared.setCachedName(
+                resolvedName,
+                for: currentItem.latitude,
+                longitude: currentItem.longitude
+            )
+            if self.currentItem?.objectID == currentItem.objectID {
+                resolvedLocationName = resolvedName
+            }
+        } catch {
+            if self.currentItem?.objectID == currentItem.objectID {
+                resolvedLocationName = "Pinned location"
+            }
+        }
+    }
+
+    private func resolveLocationName(for location: CLLocation) async throws -> String {
+        if #available(iOS 26.0, *),
+           let request = MKReverseGeocodingRequest(location: location) {
+            return try await withCheckedThrowingContinuation { continuation in
+                request.getMapItems { mapItems, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+
+                    let resolvedName = mapItems?
+                        .compactMap { mapItem in
+                            [
+                                mapItem.addressRepresentations?.cityWithContext(.short),
+                                mapItem.addressRepresentations?.cityName,
+                                mapItem.address?.shortAddress,
+                                mapItem.name,
+                                mapItem.addressRepresentations?.fullAddress(includingRegion: false, singleLine: true)
+                            ].compactMap { $0 }
+                                .first(where: { !$0.isEmpty })
+                        }
+                        .first ?? "Pinned location"
+
+                    continuation.resume(returning: resolvedName)
+                }
+            }
+        } else {
+            let geocoder = CLGeocoder()
+            let placemarks = try await geocoder.reverseGeocodeLocation(location)
+            return placemarks
+                .compactMap { placemark in
+                    [
+                        placemark.locality,
+                        placemark.subLocality,
+                        placemark.name
+                    ].compactMap { $0 }
+                        .first(where: { !$0.isEmpty })
+                }
+                .first ?? "Pinned location"
+        }
+    }
+
+    private static let dateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    static let topBarBubbleHeight: CGFloat = 44
+}
+
+private struct DetailTopBarGlassModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        } else {
+            content
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(.white.opacity(0.16), lineWidth: 1)
+                )
+        }
+    }
+}
+
+private struct DetailTopBarButtonModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .buttonStyle(.glass(.regular.interactive()))
+        } else {
+            content
+                .buttonStyle(.plain)
+                .frame(width: PhotoDetailView.topBarBubbleHeight, height: PhotoDetailView.topBarBubbleHeight)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(.white.opacity(0.16), lineWidth: 1)
+                )
+        }
+    }
 }
 
 private struct PhotoDetailPageView: View {
     let item: PhotoDetailItem
     let isCurrentPage: Bool
+
+    private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
 
     @State private var displayedImage: UIImage?
     @State private var isLoadingFullImage = false
@@ -326,12 +590,17 @@ private struct PhotoDetailPageView: View {
 
         if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: item.objectID) {
             displayedImage = cachedThumbnail
-        } else if displayedImage == nil,
-                  let decodedThumbnail = await DecodedThumbnailCache.shared.image(
-                    for: item.objectID,
-                    data: item.thumbnailData
-                  ) {
-            displayedImage = decodedThumbnail
+        } else if displayedImage == nil {
+            let thumbnailData = await Self.thumbnailDataProvider.thumbnailData(for: item.objectID)
+            guard !Task.isCancelled else { return }
+
+            if let decodedThumbnail = await DecodedThumbnailCache.shared.image(
+                for: item.objectID,
+                data: thumbnailData
+            ) {
+                guard !Task.isCancelled else { return }
+                displayedImage = decodedThumbnail
+            }
         }
 
         guard !isLoadingFullImage else { return }
