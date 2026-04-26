@@ -88,13 +88,21 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
     }
 }
 
+struct PhotoGridCenteringRequest: Equatable {
+    let objectID: NSManagedObjectID
+    let token: UUID
+}
+
 struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let dataController: PhotoGridDataController
     let changeToken: Int
     let activeDownloadAssetNames: Set<String>
+    let centeringRequest: PhotoGridCenteringRequest?
     @Binding var isSelectionMode: Bool
     @Binding var selectedPhotoIDs: Set<NSManagedObjectID>
-    let onOpenPhoto: (NSManagedObjectID, Int) -> Void
+    let onOpenPhoto: (NSManagedObjectID, Int, CGRect) -> Void
+    let onPhotoFrameChanged: (NSManagedObjectID, CGRect) -> Void
+    let onPhotoCentered: (NSManagedObjectID, CGRect) -> Void
     let onFirstItemFrameChanged: (CGRect) -> Void
     let onTopVisibleDateChanged: (Date?) -> Void
     let onScrollActivityChanged: (Bool) -> Void
@@ -115,6 +123,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             items: dataController.itemsSnapshot,
             changeToken: changeToken,
             activeDownloadAssetNames: activeDownloadAssetNames,
+            centeringRequest: centeringRequest,
             isSelectionMode: isSelectionMode,
             selectedPhotoIDs: selectedPhotoIDs
         )
@@ -127,8 +136,16 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             self.parent = parent
         }
 
-        func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int) {
-            parent.onOpenPhoto(objectID, index)
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, frame: CGRect) {
+            parent.onOpenPhoto(objectID, index, frame)
+        }
+
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdatePhotoFrameFor objectID: NSManagedObjectID, frame: CGRect) {
+            parent.onPhotoFrameChanged(objectID, frame)
+        }
+
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didCenterPhotoWith objectID: NSManagedObjectID, frame: CGRect) {
+            parent.onPhotoCentered(objectID, frame)
         }
 
         func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>) {
@@ -198,7 +215,9 @@ private final class PhotoGridThumbnailDataProvider {
 
 @MainActor
 protocol PhotoGridCollectionViewControllerDelegate: AnyObject {
-    func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, frame: CGRect)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdatePhotoFrameFor objectID: NSManagedObjectID, frame: CGRect)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didCenterPhotoWith objectID: NSManagedObjectID, frame: CGRect)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateTopVisibleDate date: Date?)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateFirstItemFrame frame: CGRect)
@@ -225,6 +244,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var currentItemIDs: [NSManagedObjectID] = []
     private var itemIndexByID: [NSManagedObjectID: Int] = [:]
     private var currentChangeToken: Int?
+    private var handledCenteringRequestToken: UUID?
     private var lastReportedTopVisibleMonth: DateComponents?
     private var isScrollMotionActive = false
     private var lastContentOffsetY: CGFloat = 0
@@ -330,6 +350,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         items: [UIKitPhotoGridItem],
         changeToken: Int,
         activeDownloadAssetNames: Set<String>,
+        centeringRequest: PhotoGridCenteringRequest?,
         isSelectionMode: Bool,
         selectedPhotoIDs: Set<NSManagedObjectID>
     ) {
@@ -359,6 +380,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         if didChangeItems || didChangeActiveDownloads || didChangeSelectionMode {
             refreshVisibleCells()
         }
+        handleCenteringRequestIfNeeded(centeringRequest)
         reportTopVisibleDate()
         reportFirstItemFrameIfAvailable()
     }
@@ -669,6 +691,48 @@ final class PhotoGridCollectionViewController: UIViewController {
         delegate?.photoGridController(self, didUpdateFirstItemFrame: frameInView)
     }
 
+    private func handleCenteringRequestIfNeeded(_ request: PhotoGridCenteringRequest?) {
+        guard let request else { return }
+        guard handledCenteringRequestToken != request.token else { return }
+        handledCenteringRequestToken = request.token
+        centerPhoto(with: request.objectID)
+    }
+
+    private func centerPhoto(with objectID: NSManagedObjectID) {
+        guard let index = itemIndexByID[objectID] else {
+            delegate?.photoGridController(self, didCenterPhotoWith: objectID, frame: .zero)
+            return
+        }
+        let indexPath = IndexPath(item: index, section: 0)
+        collectionView.layoutIfNeeded()
+        collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) { [weak self] in
+            guard let self else { return }
+            self.collectionView.layoutIfNeeded()
+            let frame = self.frameForPhoto(with: objectID)
+            self.delegate?.photoGridController(self, didUpdatePhotoFrameFor: objectID, frame: frame)
+            self.delegate?.photoGridController(self, didCenterPhotoWith: objectID, frame: frame)
+        }
+    }
+
+    private func frameForPhoto(with objectID: NSManagedObjectID) -> CGRect {
+        guard let index = itemIndexByID[objectID] else { return .zero }
+        let indexPath = IndexPath(item: index, section: 0)
+
+        if let cell = collectionView.cellForItem(at: indexPath) {
+            let frame = collectionView.convert(cell.frame, to: view.window)
+            return frame == .zero ? fallbackFrameForItem(at: indexPath) : frame
+        }
+
+        return fallbackFrameForItem(at: indexPath)
+    }
+
+    private func fallbackFrameForItem(at indexPath: IndexPath) -> CGRect {
+        guard let attributes = collectionView.layoutAttributesForItem(at: indexPath) else { return .zero }
+        return collectionView.convert(attributes.frame, to: view.window)
+    }
+
     private func nearestIndexPath(to location: CGPoint) -> IndexPath? {
         if let hitIndexPath = collectionView.indexPathForItem(at: location) {
             return hitIndexPath
@@ -747,7 +811,9 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             }
         } else {
             collectionView.deselectItem(at: indexPath, animated: false)
-            delegate?.photoGridController(self, didOpenPhotoWith: objectID, at: indexPath.item)
+            let frame = frameForPhoto(with: objectID)
+            delegate?.photoGridController(self, didUpdatePhotoFrameFor: objectID, frame: frame)
+            delegate?.photoGridController(self, didOpenPhotoWith: objectID, at: indexPath.item, frame: frame)
         }
     }
 

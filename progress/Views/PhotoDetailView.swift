@@ -1,7 +1,8 @@
 import SwiftUI
-import AVKit
+import CoreData
 import Photos
 import PhotosUI
+import UIKit
 
 struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
     let content: Content
@@ -19,6 +20,8 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 4
+        scrollView.alwaysBounceHorizontal = false
+        scrollView.alwaysBounceVertical = false
         scrollView.bouncesZoom = true
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
@@ -31,6 +34,7 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
         hostedView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
         scrollView.addSubview(hostedView)
+        context.coordinator.updatePanGestureState(for: scrollView)
         return scrollView
     }
 
@@ -41,6 +45,7 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
             uiView.contentSize = uiView.bounds.size
             context.coordinator.centerContent(in: uiView)
         }
+        context.coordinator.updatePanGestureState(for: uiView)
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
@@ -56,6 +61,7 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             centerContent(in: scrollView)
+            updatePanGestureState(for: scrollView)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
@@ -70,6 +76,7 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
                 scrollView.contentOffset = .zero
             } completion: { _ in
                 self.centerContent(in: scrollView)
+                self.updatePanGestureState(for: scrollView)
             }
         }
 
@@ -87,60 +94,9 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
 
             contentView.frame = frameToCenter
         }
-    }
-}
 
-struct ShareStatusToast: View {
-    let message: String
-    let isError: Bool
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(isError ? .orange : .green)
-            Text(message)
-                .font(.subheadline)
-                .fontWeight(.medium)
-                .foregroundStyle(.primary)
-                .multilineTextAlignment(.leading)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(.white.opacity(0.18), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
-    }
-}
-
-struct SharePayload: Identifiable {
-    let id = UUID()
-    let items: [Any]
-}
-
-struct VideoPlayerView: View {
-    let videoURL: URL
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VideoPlayer(player: AVPlayer(url: videoURL))
-                .ignoresSafeArea()
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") {
-                            dismiss()
-                        }
-                    }
-                }
-                .onAppear {
-                    let player = AVPlayer(url: videoURL)
-                    player.play()
-                }
+        func updatePanGestureState(for scrollView: UIScrollView) {
+            scrollView.panGestureRecognizer.isEnabled = scrollView.zoomScale > 1.01
         }
     }
 }
@@ -149,6 +105,7 @@ struct LivePhotoContainerView: UIViewRepresentable {
     let imageURL: URL
     let videoURL: URL
     let fallbackImage: UIImage
+    var playsHintOnLoad = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -218,7 +175,9 @@ struct LivePhotoContainerView: UIViewRepresentable {
                     view.livePhoto = livePhoto
                     view.isHidden = false
                     fallbackImageView.isHidden = true
-                    view.startPlayback(with: .hint)
+                    if playsHintOnLoad {
+                        view.startPlayback(with: .hint)
+                    }
                 } else {
                     view.livePhoto = nil
                     view.isHidden = true
@@ -249,8 +208,465 @@ struct LivePhotoContainerView: UIViewRepresentable {
     }
 }
 
-extension Comparable {
-    func clamped(to limits: ClosedRange<Self>) -> Self {
-        min(max(self, limits.lowerBound), limits.upperBound)
+struct PhotoDetailItem: Identifiable, Equatable {
+    let objectID: NSManagedObjectID
+    let thumbnailData: Data?
+    let fullImageAssetName: String?
+    let livePhotoImageAssetName: String?
+    let livePhotoVideoAssetName: String?
+
+    var id: NSManagedObjectID { objectID }
+
+    @MainActor
+    init(photo: DailyPhoto) {
+        objectID = photo.objectID
+        thumbnailData = photo.thumbnailData
+        fullImageAssetName = photo.fullImageAssetName
+        livePhotoImageAssetName = photo.livePhotoImageAssetName
+        livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+    }
+}
+
+struct PhotoDetailView: View {
+    let items: [PhotoDetailItem]
+    let initialIndex: Int
+    let onClose: (NSManagedObjectID?) -> Void
+
+    @State private var selectedIndex: Int
+
+    init(
+        items: [PhotoDetailItem],
+        initialIndex: Int,
+        onClose: @escaping (NSManagedObjectID?) -> Void
+    ) {
+        self.items = items
+        self.initialIndex = initialIndex
+        self.onClose = onClose
+        _selectedIndex = State(initialValue: initialIndex)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.ignoresSafeArea()
+
+            PhotoDetailPagingView(
+                items: items,
+                currentIndex: $selectedIndex
+            )
+
+            Button(action: { onClose(currentItem?.objectID) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(.black.opacity(0.45), in: Circle())
+            }
+            .padding(.leading, 12)
+            .padding(.top, 8)
+            .accessibilityLabel("Close")
+        }
+        .statusBarHidden()
+        .onAppear(perform: clampSelectedIndex)
+    }
+
+    private var currentItem: PhotoDetailItem? {
+        guard items.indices.contains(selectedIndex) else { return nil }
+        return items[selectedIndex]
+    }
+
+    private func clampSelectedIndex() {
+        guard !items.isEmpty else { return }
+        selectedIndex = min(max(selectedIndex, 0), items.count - 1)
+    }
+}
+
+private struct PhotoDetailPageView: View {
+    let item: PhotoDetailItem
+    let isCurrentPage: Bool
+
+    @State private var displayedImage: UIImage?
+    @State private var isLoadingFullImage = false
+    @State private var livePhotoResources: LivePhotoResources?
+
+    var body: some View {
+        Group {
+            if isCurrentPage, let livePhotoResources, let displayedImage {
+                SnapBackZoomContainer {
+                    LivePhotoContainerView(
+                        imageURL: livePhotoResources.imageURL,
+                        videoURL: livePhotoResources.videoURL,
+                        fallbackImage: displayedImage,
+                        playsHintOnLoad: false
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+                }
+            } else if let displayedImage {
+                SnapBackZoomContainer {
+                    Image(uiImage: displayedImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                }
+            } else {
+                ProgressView()
+                    .tint(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
+            await loadImage()
+        }
+    }
+
+    @MainActor
+    private func loadImage() async {
+        livePhotoResources = nil
+
+        if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: item.objectID) {
+            displayedImage = cachedThumbnail
+        } else if displayedImage == nil,
+                  let decodedThumbnail = await DecodedThumbnailCache.shared.image(
+                    for: item.objectID,
+                    data: item.thumbnailData
+                  ) {
+            displayedImage = decodedThumbnail
+        }
+
+        guard !isLoadingFullImage else { return }
+        isLoadingFullImage = true
+        defer { isLoadingFullImage = false }
+
+        guard let fullImage = try? await PhotoStorageService.shared.loadFullImage(named: item.fullImageAssetName) else {
+            return
+        }
+
+        displayedImage = fullImage
+
+        guard isCurrentPage else {
+            return
+        }
+
+        guard let resources = try? await PhotoStorageService.shared.loadLivePhotoResources(
+            imageAssetName: item.livePhotoImageAssetName,
+            videoAssetName: item.livePhotoVideoAssetName
+        ) else {
+            return
+        }
+
+        livePhotoResources = LivePhotoResources(
+            imageURL: resources.imageURL,
+            videoURL: resources.videoURL
+        )
+    }
+}
+
+private struct PhotoDetailPageTaskKey: Hashable {
+    let objectID: NSManagedObjectID
+    let isCurrentPage: Bool
+}
+
+private struct LivePhotoResources {
+    let imageURL: URL
+    let videoURL: URL
+}
+
+private struct PhotoDetailPagingView: UIViewControllerRepresentable {
+    let items: [PhotoDetailItem]
+    @Binding var currentIndex: Int
+
+    func makeUIViewController(context: Context) -> PhotoDetailPagingViewController {
+        PhotoDetailPagingViewController(
+            items: items,
+            initialIndex: currentIndex,
+            onIndexChanged: { index in
+                currentIndex = index
+            }
+        )
+    }
+
+    func updateUIViewController(_ controller: PhotoDetailPagingViewController, context: Context) {
+        controller.onIndexChanged = { index in
+            currentIndex = index
+        }
+        controller.updateItems(items, currentIndex: currentIndex)
+    }
+}
+
+@MainActor
+private final class PhotoDetailPagingViewController: UIViewController {
+    var onIndexChanged: (Int) -> Void
+
+    private let collectionView: UICollectionView
+    private var items: [PhotoDetailItem]
+    private var currentIndex: Int
+    private var didSetInitialOffset = false
+    private var prefetchTasks: [Int: Task<Void, Never>] = [:]
+
+    init(
+        items: [PhotoDetailItem],
+        initialIndex: Int,
+        onIndexChanged: @escaping (Int) -> Void
+    ) {
+        self.items = items
+        self.currentIndex = items.indices.contains(initialIndex) ? initialIndex : 0
+        self.onIndexChanged = onIndexChanged
+
+        let layout = UICollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.minimumLineSpacing = 0
+        layout.minimumInteritemSpacing = 0
+        collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        prefetchTasks.values.forEach { $0.cancel() }
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        configureCollectionView()
+        schedulePrefetch(around: currentIndex)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        updateCollectionLayout()
+
+        guard !didSetInitialOffset, collectionView.bounds.width > 0 else { return }
+        didSetInitialOffset = true
+        scrollToIndex(currentIndex, animated: false)
+    }
+
+    func updateItems(_ nextItems: [PhotoDetailItem], currentIndex nextIndex: Int) {
+        items = nextItems
+        currentIndex = items.indices.contains(nextIndex) ? nextIndex : min(currentIndex, max(items.count - 1, 0))
+
+        collectionView.reloadData()
+        if didSetInitialOffset {
+            scrollToIndex(currentIndex, animated: false)
+        }
+        schedulePrefetch(around: currentIndex)
+        refreshVisibleCells()
+    }
+
+    private func configureCollectionView() {
+        collectionView.backgroundColor = .clear
+        collectionView.dataSource = self
+        collectionView.delegate = self
+        collectionView.prefetchDataSource = self
+        collectionView.isPagingEnabled = true
+        collectionView.decelerationRate = .fast
+        collectionView.showsHorizontalScrollIndicator = false
+        collectionView.showsVerticalScrollIndicator = false
+        collectionView.contentInsetAdjustmentBehavior = .never
+        collectionView.clipsToBounds = false
+        collectionView.register(PhotoDetailPagingCell.self, forCellWithReuseIdentifier: PhotoDetailPagingCell.reuseIdentifier)
+        collectionView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(collectionView)
+
+        NSLayoutConstraint.activate([
+            collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            collectionView.topAnchor.constraint(equalTo: view.topAnchor),
+            collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+    }
+
+    private func updateCollectionLayout() {
+        guard let layout = collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return }
+        let itemSize = collectionView.bounds.size
+        guard itemSize.width > 0, itemSize.height > 0, layout.itemSize != itemSize else { return }
+
+        layout.itemSize = itemSize
+        layout.invalidateLayout()
+        scrollToIndex(currentIndex, animated: false)
+    }
+
+    private func scrollToIndex(_ index: Int, animated: Bool) {
+        guard items.indices.contains(index), collectionView.bounds.width > 0 else { return }
+
+        collectionView.setContentOffset(
+            CGPoint(x: CGFloat(index) * collectionView.bounds.width, y: 0),
+            animated: animated
+        )
+    }
+
+    private func settleToNearestPage(animated: Bool) {
+        guard collectionView.bounds.width > 0, !items.isEmpty else { return }
+
+        let rawIndex = collectionView.contentOffset.x / collectionView.bounds.width
+        let nearestIndex = min(max(Int(round(rawIndex)), 0), items.count - 1)
+        currentIndex = nearestIndex
+        onIndexChanged(nearestIndex)
+        scrollToIndex(nearestIndex, animated: animated)
+        schedulePrefetch(around: nearestIndex)
+        refreshVisibleCells()
+    }
+
+    private func schedulePrefetch(around index: Int) {
+        let wanted = Set([index - 2, index - 1, index, index + 1, index + 2].filter { items.indices.contains($0) })
+
+        for (taskIndex, task) in prefetchTasks where !wanted.contains(taskIndex) {
+            task.cancel()
+            prefetchTasks[taskIndex] = nil
+        }
+
+        for prefetchIndex in wanted where prefetchTasks[prefetchIndex] == nil {
+            let item = items[prefetchIndex]
+            prefetchTasks[prefetchIndex] = Task(priority: .utility) { [weak self] in
+                await PhotoStorageService.shared.prefetchPagerAssets(
+                    fullImageAssetName: item.fullImageAssetName,
+                    livePhotoImageAssetName: item.livePhotoImageAssetName,
+                    livePhotoVideoAssetName: item.livePhotoVideoAssetName
+                )
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.prefetchTasks[prefetchIndex] = nil
+                }
+            }
+        }
+    }
+
+    private func refreshVisibleCells() {
+        for case let cell as PhotoDetailPagingCell in collectionView.visibleCells {
+            guard let indexPath = collectionView.indexPath(for: cell),
+                  items.indices.contains(indexPath.item) else {
+                continue
+            }
+
+            cell.configure(
+                with: items[indexPath.item],
+                isCurrentPage: indexPath.item == currentIndex
+            )
+        }
+    }
+}
+
+extension PhotoDetailPagingViewController: UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UICollectionViewDataSourcePrefetching {
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        items.count
+    }
+
+    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        let cell = collectionView.dequeueReusableCell(
+            withReuseIdentifier: PhotoDetailPagingCell.reuseIdentifier,
+            for: indexPath
+        )
+
+        guard let pagingCell = cell as? PhotoDetailPagingCell,
+              items.indices.contains(indexPath.item) else {
+            return cell
+        }
+
+        pagingCell.configure(
+            with: items[indexPath.item],
+            isCurrentPage: indexPath.item == currentIndex
+        )
+        return pagingCell
+    }
+
+    func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
+        for indexPath in indexPaths where items.indices.contains(indexPath.item) {
+            let item = items[indexPath.item]
+            if prefetchTasks[indexPath.item] == nil {
+                prefetchTasks[indexPath.item] = Task(priority: .utility) { [weak self] in
+                    await PhotoStorageService.shared.prefetchPagerAssets(
+                        fullImageAssetName: item.fullImageAssetName,
+                        livePhotoImageAssetName: item.livePhotoImageAssetName,
+                        livePhotoVideoAssetName: item.livePhotoVideoAssetName
+                    )
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        self?.prefetchTasks[indexPath.item] = nil
+                    }
+                }
+            }
+        }
+    }
+
+    func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
+        for indexPath in indexPaths {
+            prefetchTasks[indexPath.item]?.cancel()
+            prefetchTasks[indexPath.item] = nil
+        }
+    }
+
+    func scrollViewWillEndDragging(
+        _ scrollView: UIScrollView,
+        withVelocity velocity: CGPoint,
+        targetContentOffset: UnsafeMutablePointer<CGPoint>
+    ) {
+        guard scrollView.bounds.width > 0 else { return }
+
+        let targetIndex = min(
+            max(Int(round(targetContentOffset.pointee.x / scrollView.bounds.width)), 0),
+            max(items.count - 1, 0)
+        )
+        targetContentOffset.pointee.x = CGFloat(targetIndex) * scrollView.bounds.width
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        settleToNearestPage(animated: false)
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate {
+            settleToNearestPage(animated: true)
+        }
+    }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        settleToNearestPage(animated: false)
+    }
+}
+
+@MainActor
+private final class PhotoDetailPagingCell: UICollectionViewCell {
+    static let reuseIdentifier = "PhotoDetailPagingCell"
+
+    private var representedObjectID: NSManagedObjectID?
+    private var isCurrentPage = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = .clear
+        backgroundColor = .clear
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        representedObjectID = nil
+        isCurrentPage = false
+        contentConfiguration = nil
+    }
+
+    func configure(with item: PhotoDetailItem, isCurrentPage: Bool) {
+        guard representedObjectID != item.objectID || self.isCurrentPage != isCurrentPage else { return }
+
+        representedObjectID = item.objectID
+        self.isCurrentPage = isCurrentPage
+        contentConfiguration = UIHostingConfiguration {
+            PhotoDetailPageView(
+                item: item,
+                isCurrentPage: isCurrentPage
+            )
+            .background(Color.black)
+        }
+        .margins(.all, 0)
     }
 }

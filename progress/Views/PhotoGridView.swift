@@ -2,10 +2,16 @@ import SwiftUI
 import CoreData
 import Combine
 
-private struct PhotoPagerSelection: Identifiable {
-    let objectID: NSManagedObjectID
+private struct PhotoDetailPresentation: Identifiable {
+    let items: [PhotoDetailItem]
     let initialIndex: Int
-    var id: String { objectID.uriRepresentation().absoluteString }
+
+    var id: NSManagedObjectID {
+        guard items.indices.contains(initialIndex) else {
+            return items[0].objectID
+        }
+        return items[initialIndex].objectID
+    }
 }
 
 struct PhotoGridView: View {
@@ -15,7 +21,8 @@ struct PhotoGridView: View {
 
     @State private var showingCamera = false
     @State private var showingNotificationSettings = false
-    @State private var photoPagerSelection: PhotoPagerSelection?
+    @State private var photoDetailPresentation: PhotoDetailPresentation?
+    @State private var gridCenteringRequest: PhotoGridCenteringRequest?
     @State private var visibleScrollDate: Date?
     @State private var isScrollDateVisible = false
     @State private var isScrollGestureActive = false
@@ -66,11 +73,14 @@ struct PhotoGridView: View {
                         dataController: dataController,
                         changeToken: dataController.changeToken,
                         activeDownloadAssetNames: activeDownloadAssetNames,
+                        centeringRequest: gridCenteringRequest,
                         isSelectionMode: $isSelectionMode,
                         selectedPhotoIDs: $selectedPhotoIDs,
-                        onOpenPhoto: { objectID, index in
-                            photoPagerSelection = PhotoPagerSelection(objectID: objectID, initialIndex: index)
+                        onOpenPhoto: { objectID, _, _ in
+                            openPhotoDetail(for: objectID)
                         },
+                        onPhotoFrameChanged: { _, _ in },
+                        onPhotoCentered: { _, _ in },
                         onFirstItemFrameChanged: { frame in
                             if frame != .zero {
                                 firstGridItemFrameInGlobal = frame
@@ -109,8 +119,19 @@ struct PhotoGridView: View {
                         }
                     }
                 }
+
+                if let photoDetailPresentation {
+                    PhotoDetailView(
+                        items: photoDetailPresentation.items,
+                        initialIndex: photoDetailPresentation.initialIndex,
+                        onClose: closePhotoDetail
+                    )
+                    .ignoresSafeArea()
+                    .zIndex(20)
+                }
             }
             .navigationTitle("Work in Progress")
+            .toolbar(photoDetailPresentation == nil ? .visible : .hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !dataController.isEmpty {
@@ -168,13 +189,6 @@ struct PhotoGridView: View {
                     gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal
                 )
             }
-            .sheet(item: $photoPagerSelection) { selection in
-                PhotoPagerView(
-                    photos: dataController.allPhotos,
-                    initialPhotoID: selection.objectID,
-                    initialIndex: selection.initialIndex
-                )
-            }
             .sheet(isPresented: $showingNotificationSettings) {
                 NotificationSettingsView()
             }
@@ -215,7 +229,7 @@ struct PhotoGridView: View {
         .onChange(of: dataController.changeToken) { _, _ in
             scheduleMetadataSyncIfNeeded()
         }
-        .onChange(of: photoPagerSelection?.id) { _, newValue in
+        .onChange(of: photoDetailPresentation?.id) { _, newValue in
             if newValue == nil {
                 scheduleMetadataSyncIfNeeded()
             } else {
@@ -245,6 +259,26 @@ struct PhotoGridView: View {
         guard notificationNavigation.cameraOpenRequestToken != nil else { return }
         showingCamera = true
         notificationNavigation.consumeCameraOpenRequest()
+    }
+
+    @MainActor
+    private func openPhotoDetail(for objectID: NSManagedObjectID) {
+        let items = dataController.allPhotos.map(PhotoDetailItem.init(photo:))
+        guard let index = items.firstIndex(where: { $0.objectID == objectID }) else {
+            return
+        }
+
+        photoDetailPresentation = PhotoDetailPresentation(
+            items: items,
+            initialIndex: index
+        )
+    }
+
+    private func closePhotoDetail(_ objectID: NSManagedObjectID?) {
+        if let objectID {
+            gridCenteringRequest = PhotoGridCenteringRequest(objectID: objectID, token: UUID())
+        }
+        photoDetailPresentation = nil
     }
 
     @MainActor
@@ -316,7 +350,7 @@ struct PhotoGridView: View {
 
     @MainActor
     private func scheduleMetadataSyncIfNeeded() {
-        guard photoPagerSelection == nil else { return }
+        guard photoDetailPresentation == nil else { return }
         guard !didSyncExifMetadata else { return }
         guard !dataController.isEmpty else { return }
         guard metadataSyncTask == nil else { return }
