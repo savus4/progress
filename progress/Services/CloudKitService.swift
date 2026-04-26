@@ -45,7 +45,6 @@ final class CloudKitService {
     private let stagingDirectoryURL: URL
     private let fileManager = FileManager.default
     private let cacheIndexKey = "cachedAssetAccessDates"
-    private let maxCacheSizeBytes = 512 * 1_024 * 1_024
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudKitAsset")
 
     private init() {
@@ -184,6 +183,7 @@ final class CloudKitService {
         }
 
         let destinationURL = cacheFileURL(for: assetName)
+        try ensureDirectoryExists(at: cacheDirectoryURL)
         if fileManager.fileExists(atPath: destinationURL.path) {
             try? fileManager.removeItem(at: destinationURL)
         }
@@ -211,6 +211,7 @@ final class CloudKitService {
 
     func cacheAssetData(_ data: Data, named assetName: String) throws -> URL {
         let fileURL = cacheFileURL(for: assetName)
+        try ensureDirectoryExists(at: cacheDirectoryURL)
         if !fileManager.fileExists(atPath: fileURL.path) {
             try data.write(to: fileURL, options: .atomic)
         }
@@ -413,6 +414,32 @@ final class CloudKitService {
         UserDefaults.standard.removeObject(forKey: cacheIndexKey)
     }
 
+    func updateAssetCacheLimit(bytes: Int) {
+        PhotoAssetCacheSettings.currentLimitBytes = bytes
+        pruneCacheIfNeeded()
+    }
+
+    func localAssetStorageUsage() async -> LocalPhotoAssetStorageUsage {
+        let cacheDirectoryURL = cacheDirectoryURL
+        let stagingDirectoryURL = stagingDirectoryURL
+
+        let usage = await Task.detached(priority: .utility) {
+            (
+                cachedFullResolutionBytes: Self.allocatedSizeOfContents(at: cacheDirectoryURL),
+                pendingUploadBytes: Self.allocatedSizeOfContents(at: stagingDirectoryURL)
+            )
+        }.value
+
+        return LocalPhotoAssetStorageUsage(
+            cachedFullResolutionBytes: usage.cachedFullResolutionBytes,
+            pendingUploadBytes: usage.pendingUploadBytes
+        )
+    }
+
+    func localAssetDirectoryURLs() -> (cache: URL, staging: URL) {
+        (cacheDirectoryURL, stagingDirectoryURL)
+    }
+
     private func saveAssetData(
         _ data: Data,
         assetName: String,
@@ -531,17 +558,13 @@ final class CloudKitService {
             return
         }
 
+        let maxCacheSizeBytes = PhotoAssetCacheSettings.currentLimitBytes
         var totalSize = 0
         var fileSizes: [String: Int] = [:]
         for assetName in cachedAssetNames {
             let assetURL = cacheFileURL(for: assetName)
-            guard
-                let attributes = try? fileManager.attributesOfItem(atPath: assetURL.path),
-                let fileSize = attributes[.size] as? NSNumber
-            else {
-                continue
-            }
-            let bytes = fileSize.intValue
+            let bytes = Self.allocatedSize(of: assetURL)
+            guard bytes > 0 else { continue }
             totalSize += bytes
             fileSizes[assetName] = bytes
         }
@@ -646,6 +669,37 @@ final class CloudKitService {
         }
 
         return directoryURL
+    }
+
+    nonisolated private static func allocatedSizeOfContents(at directoryURL: URL) -> Int {
+        guard let fileURLs = FileManager.default.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+
+        var totalBytes = 0
+        for case let fileURL as URL in fileURLs {
+            totalBytes += allocatedSize(of: fileURL)
+        }
+        return totalBytes
+    }
+
+    nonisolated private static func allocatedSize(of fileURL: URL) -> Int {
+        guard
+            let values = try? fileURL.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .totalFileAllocatedSizeKey,
+                .fileAllocatedSizeKey
+            ]),
+            values.isRegularFile == true
+        else {
+            return 0
+        }
+
+        return values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0
     }
 
     private static func makeStagingDirectoryURL() -> URL {

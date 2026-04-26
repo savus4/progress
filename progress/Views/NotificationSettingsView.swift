@@ -11,10 +11,13 @@ struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
+    @AppStorage(PhotoAssetCacheSettings.limitUserDefaultsKey) private var fullResolutionCacheLimitBytes = PhotoAssetCacheSettings.defaultLimitBytes
 
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var didPersistChanges = false
+    @State private var localAssetStorageUsage = LocalPhotoAssetStorageUsage.empty
+    @State private var isLoadingLocalAssetStorageUsage = false
 
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var selectedPrivatePhotoItems: [PhotosPickerItem] = []
@@ -155,6 +158,63 @@ struct NotificationSettingsView: View {
                     }
                 }
 
+                Section("Storage") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Full-Resolution Copies")
+                            Spacer()
+                            Text(PhotoAssetCacheSettings.formattedByteCount(fullResolutionCacheLimitBytes))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(
+                            value: fullResolutionCacheLimitMegabytesBinding,
+                            in: Double(PhotoAssetCacheSettings.minimumLimitMegabytes)...Double(PhotoAssetCacheSettings.maximumLimitMegabytes),
+                            step: 50
+                        )
+                        .accessibilityLabel("Full-resolution copies cache limit")
+
+                        HStack {
+                            Text(PhotoAssetCacheSettings.formattedByteCount(PhotoAssetCacheSettings.minimumLimitBytes))
+                            Spacer()
+                            Text(PhotoAssetCacheSettings.formattedByteCount(PhotoAssetCacheSettings.maximumLimitBytes))
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Cached")
+                        Spacer()
+                        if isLoadingLocalAssetStorageUsage {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text(storageUsageDescription)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if localAssetStorageUsage.pendingUploadBytes > 0 {
+                        Text("Pending uploads use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) until iCloud has a copy.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        refreshLocalAssetStorageUsage()
+                    } label: {
+                        Label("Recalculate Storage", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isLoadingLocalAssetStorageUsage)
+
+                    NavigationLink {
+                        StorageDebugView()
+                    } label: {
+                        Label("Storage Debug", systemImage: "internaldrive")
+                    }
+                }
+
                 Section("iCloud Sync") {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: cloudSyncMonitor.statusSymbolName)
@@ -277,6 +337,7 @@ struct NotificationSettingsView: View {
                 await cloudSyncMonitor.refreshUploadStatus()
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
+                refreshLocalAssetStorageUsage()
             }
             .onChange(of: selectedPhotoItems) { _, items in
                 guard !items.isEmpty else { return }
@@ -285,6 +346,9 @@ struct NotificationSettingsView: View {
             .onChange(of: selectedPrivatePhotoItems) { _, items in
                 guard !items.isEmpty else { return }
                 importSelectedPhotosPrivately(items)
+            }
+            .onChange(of: fullResolutionCacheLimitBytes) { _, newValue in
+                applyFullResolutionCacheLimit(newValue)
             }
             .onDisappear {
                 persistChangesIfNeeded()
@@ -371,6 +435,42 @@ struct NotificationSettingsView: View {
             return "Notifications are turned off for this app. Enable them in Settings."
         @unknown default:
             return "Notification permission status is unavailable."
+        }
+    }
+
+    private var fullResolutionCacheLimitMegabytesBinding: Binding<Double> {
+        Binding(
+            get: {
+                Double(PhotoAssetCacheSettings.megabytes(forBytes: fullResolutionCacheLimitBytes))
+            },
+            set: { newValue in
+                let megabytes = Int(newValue.rounded())
+                fullResolutionCacheLimitBytes = PhotoAssetCacheSettings.bytes(forMegabytes: megabytes)
+            }
+        )
+    }
+
+    private var storageUsageDescription: String {
+        "\(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes)) of \(PhotoAssetCacheSettings.formattedByteCount(fullResolutionCacheLimitBytes))"
+    }
+
+    private func applyFullResolutionCacheLimit(_ bytes: Int) {
+        let normalizedBytes = PhotoAssetCacheSettings.normalizedLimitBytes(bytes)
+        if normalizedBytes != bytes {
+            fullResolutionCacheLimitBytes = normalizedBytes
+            return
+        }
+
+        CloudKitService.shared.updateAssetCacheLimit(bytes: normalizedBytes)
+        refreshLocalAssetStorageUsage()
+    }
+
+    private func refreshLocalAssetStorageUsage() {
+        isLoadingLocalAssetStorageUsage = true
+
+        Task { @MainActor in
+            localAssetStorageUsage = await CloudKitService.shared.localAssetStorageUsage()
+            isLoadingLocalAssetStorageUsage = false
         }
     }
 
@@ -577,6 +677,7 @@ struct NotificationSettingsView: View {
                     : "Deleted \(deletedCount) photos."
                 refreshDeleteRangeMatchCount()
                 await refreshTotalPhotoCount()
+                refreshLocalAssetStorageUsage()
             } catch {
                 deleteRangeStatusMessage = "Failed to delete matching photos."
             }
@@ -598,6 +699,7 @@ struct NotificationSettingsView: View {
                 deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
+                refreshLocalAssetStorageUsage()
             } catch {
                 deleteAllStatusMessage = "Failed to delete all photos."
             }
@@ -964,6 +1066,10 @@ struct NotificationSettingsView: View {
             }
 
             return (imported, duplicates, failed)
+        }
+
+        await MainActor.run {
+            refreshLocalAssetStorageUsage()
         }
 
         importLogger.log(
