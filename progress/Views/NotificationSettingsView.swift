@@ -11,7 +11,6 @@ struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
-    @AppStorage(PhotoAssetCacheSettings.limitUserDefaultsKey) private var fullResolutionCacheLimitBytes = PhotoAssetCacheSettings.defaultLimitBytes
 
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -161,25 +160,14 @@ struct NotificationSettingsView: View {
                 Section("Storage") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Full-Resolution Copies")
+                            Text("System CloudKit Cache")
                             Spacer()
-                            Text(PhotoAssetCacheSettings.formattedByteCount(fullResolutionCacheLimitBytes))
+                            Text(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes))
                                 .foregroundStyle(.secondary)
                         }
 
-                        Slider(
-                            value: fullResolutionCacheLimitMegabytesBinding,
-                            in: Double(PhotoAssetCacheSettings.minimumLimitMegabytes)...Double(PhotoAssetCacheSettings.maximumLimitMegabytes),
-                            step: 50
-                        )
-                        .accessibilityLabel("Full-resolution copies cache limit")
-
-                        HStack {
-                            Text(PhotoAssetCacheSettings.formattedByteCount(PhotoAssetCacheSettings.minimumLimitBytes))
-                            Spacer()
-                            Text(PhotoAssetCacheSettings.formattedByteCount(PhotoAssetCacheSettings.maximumLimitBytes))
-                        }
-                        .font(.caption)
+                        Text("Fetched originals live in CloudKit's system-managed cache. Pending Uploads stay local until iCloud has a copy.")
+                            .font(.caption)
                         .foregroundStyle(.secondary)
                     }
 
@@ -347,9 +335,6 @@ struct NotificationSettingsView: View {
                 guard !items.isEmpty else { return }
                 importSelectedPhotosPrivately(items)
             }
-            .onChange(of: fullResolutionCacheLimitBytes) { _, newValue in
-                applyFullResolutionCacheLimit(newValue)
-            }
             .onDisappear {
                 persistChangesIfNeeded()
             }
@@ -438,31 +423,8 @@ struct NotificationSettingsView: View {
         }
     }
 
-    private var fullResolutionCacheLimitMegabytesBinding: Binding<Double> {
-        Binding(
-            get: {
-                Double(PhotoAssetCacheSettings.megabytes(forBytes: fullResolutionCacheLimitBytes))
-            },
-            set: { newValue in
-                let megabytes = Int(newValue.rounded())
-                fullResolutionCacheLimitBytes = PhotoAssetCacheSettings.bytes(forMegabytes: megabytes)
-            }
-        )
-    }
-
     private var storageUsageDescription: String {
-        "\(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes)) of \(PhotoAssetCacheSettings.formattedByteCount(fullResolutionCacheLimitBytes))"
-    }
-
-    private func applyFullResolutionCacheLimit(_ bytes: Int) {
-        let normalizedBytes = PhotoAssetCacheSettings.normalizedLimitBytes(bytes)
-        if normalizedBytes != bytes {
-            fullResolutionCacheLimitBytes = normalizedBytes
-            return
-        }
-
-        CloudKitService.shared.updateAssetCacheLimit(bytes: normalizedBytes)
-        refreshLocalAssetStorageUsage()
+        PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes)
     }
 
     private func refreshLocalAssetStorageUsage() {
@@ -696,6 +658,7 @@ struct NotificationSettingsView: View {
             do {
                 let result = try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
                 await PhotoStorageService.shared.purgeOrphanedAssets(context: viewContext)
+                try await PersistenceController.shared.rebuildPersistentStore()
                 deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()

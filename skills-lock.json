@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "instruments-profiling": {
+      "source": "smithery.ai",
+      "sourceType": "well-known",
+      "computedHash": "4dfb0f35524062d32d9ccc452c0547f3db2475832100e002c5551ab41b84d754"
+    },
+    "uikit-max": {
+      "source": "tornikegomareli/UIKit-Agent-Skill",
+      "sourceType": "github",
+      "computedHash": "38996231257975ed76eb9ce4ee410c4905332a203f42176d3dd032cccfa46879"
+    }
+  }
+}

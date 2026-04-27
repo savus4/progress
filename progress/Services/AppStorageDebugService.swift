@@ -11,9 +11,10 @@ nonisolated struct AppStorageDebugSnapshot: Sendable {
     let knownItems: [AppStorageDebugItem]
     let topLevelItems: [AppStorageDebugItem]
     let largestOtherCacheItems: [AppStorageDebugItem]
+    let largestOtherCacheFiles: [AppStorageDebugItem]
+    let largestSystemCloudKitCacheItems: [AppStorageDebugItem]
     let coreDataItems: [AppStorageDebugItem]
     let coreDataSQLiteStats: CoreDataSQLiteStats?
-    let legacyBlobPhotoCount: Int?
 }
 
 nonisolated struct AppStorageDebugItem: Identifiable, Sendable {
@@ -73,7 +74,6 @@ final class AppStorageDebugService {
         let assetDirectories = CloudKitService.shared.localAssetDirectoryURLs()
         let storeURL = PersistenceController.shared.container.persistentStoreCoordinator.persistentStores.first?.url
         let photoCount = countPhotos()
-        let legacyBlobPhotoCount = countLegacyBlobPhotos()
 
         let snapshotData = await Task.detached(priority: .utility) {
             Self.makeSnapshotData(
@@ -98,9 +98,10 @@ final class AppStorageDebugService {
             knownItems: snapshotData.knownItems,
             topLevelItems: snapshotData.topLevelItems,
             largestOtherCacheItems: snapshotData.largestOtherCacheItems,
+            largestOtherCacheFiles: snapshotData.largestOtherCacheFiles,
+            largestSystemCloudKitCacheItems: snapshotData.largestSystemCloudKitCacheItems,
             coreDataItems: snapshotData.coreDataItems,
-            coreDataSQLiteStats: snapshotData.coreDataSQLiteStats,
-            legacyBlobPhotoCount: legacyBlobPhotoCount
+            coreDataSQLiteStats: snapshotData.coreDataSQLiteStats
         )
     }
 
@@ -109,49 +110,13 @@ final class AppStorageDebugService {
         return try? PersistenceController.shared.container.viewContext.count(for: request)
     }
 
-    private func countLegacyBlobPhotos() -> Int? {
-        let request = DailyPhoto.fetchRequest()
-        request.predicate = NSPredicate(
-            format: "fullImageData != nil OR livePhotoImageData != nil OR livePhotoVideoData != nil"
-        )
-        return try? PersistenceController.shared.container.viewContext.count(for: request)
-    }
-
     func purgeOtherCaches() async throws {
-        let assetCacheDirectory = CloudKitService.shared.localAssetDirectoryURLs().cache
         let cachesDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
 
         try await Task.detached(priority: .utility) {
             guard let cachesDirectory else { return }
-            try Self.deleteContents(of: cachesDirectory, preserving: [assetCacheDirectory])
+            try Self.deleteContents(of: cachesDirectory, preserving: [])
         }.value
-    }
-
-    func clearLegacyFullResolutionBlobs() async throws -> Int {
-        let context = PersistenceController.shared.makeBackgroundContext()
-        return try await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            request.fetchBatchSize = 100
-            request.predicate = NSPredicate(
-                format: """
-                (fullImageData != nil OR livePhotoImageData != nil OR livePhotoVideoData != nil)
-                AND (fullImageAssetName != nil OR livePhotoImageAssetName != nil OR livePhotoVideoAssetName != nil)
-                """
-            )
-
-            let photos = try context.fetch(request)
-            guard !photos.isEmpty else { return 0 }
-
-            for photo in photos {
-                photo.setValue(nil, forKey: "fullImageData")
-                photo.setValue(nil, forKey: "livePhotoImageData")
-                photo.setValue(nil, forKey: "livePhotoVideoData")
-            }
-
-            try context.save()
-            context.reset()
-            return photos.count
-        }
     }
 
     nonisolated private static func makeSnapshotData(
@@ -169,6 +134,8 @@ final class AppStorageDebugService {
         knownItems: [AppStorageDebugItem],
         topLevelItems: [AppStorageDebugItem],
         largestOtherCacheItems: [AppStorageDebugItem],
+        largestOtherCacheFiles: [AppStorageDebugItem],
+        largestSystemCloudKitCacheItems: [AppStorageDebugItem],
         coreDataItems: [AppStorageDebugItem],
         coreDataSQLiteStats: CoreDataSQLiteStats?
     ) {
@@ -180,6 +147,7 @@ final class AppStorageDebugService {
         let cachesMeasurement = cachesDirectory.map(measure)
         let assetCacheMeasurement = measure(assetCacheDirectory)
         let pendingUploadMeasurement = measure(pendingUploadDirectory)
+        let systemCloudKitCacheDirectory = cachesDirectory?.appendingPathComponent("CloudKit", isDirectory: true)
         let coreDataMeasurement = storeURL.map(coreDataMeasurement)
         let coreDataItems = storeURL.map(coreDataItems) ?? []
         let coreDataSQLiteStats = storeURL.flatMap(sqliteStats)
@@ -189,6 +157,22 @@ final class AppStorageDebugService {
                 idPrefix: "other-cache",
                 excluding: [assetCacheDirectory],
                 limit: 15
+            )
+        } ?? []
+        let largestOtherCacheFiles = cachesDirectory.map {
+            largestFiles(
+                inside: $0,
+                idPrefix: "other-cache-file",
+                excluding: [assetCacheDirectory],
+                limit: 25
+            )
+        } ?? []
+        let largestSystemCloudKitCacheItems = systemCloudKitCacheDirectory.map {
+            childItems(
+                inside: $0,
+                idPrefix: "system-cloudkit-cache",
+                excluding: [],
+                limit: 20
             )
         } ?? []
 
@@ -207,9 +191,9 @@ final class AppStorageDebugService {
 
         knownItems.append(
             item(
-                id: "full-resolution-cache",
-                title: "Full-Resolution Cache",
-                detail: "Local full-resolution photo copies controlled by the cache limit.",
+                id: "system-cloudkit-cache",
+                title: "System CloudKit Cache",
+                detail: "CloudKit-managed cache in Library/Caches/CloudKit used for fetched CKAsset files.",
                 url: assetCacheDirectory,
                 measurement: assetCacheMeasurement
             )
@@ -218,7 +202,7 @@ final class AppStorageDebugService {
             item(
                 id: "pending-uploads",
                 title: "Pending Uploads",
-                detail: "Original assets waiting for CloudKit upload; these are not part of the cache limit.",
+                    detail: "Original assets waiting for CloudKit upload.",
                 url: pendingUploadDirectory,
                 measurement: pendingUploadMeasurement
             )
@@ -250,8 +234,8 @@ final class AppStorageDebugService {
             knownItems.append(
                 item(
                     id: "caches-other",
-                    title: "Other Caches",
-                    detail: "Library/Caches minus the full-resolution photo cache.",
+                    title: "Non-CloudKit Caches",
+                    detail: "Library/Caches minus the system CloudKit cache. This can still include framework and image-loading caches.",
                     url: cachesDirectory,
                     allocatedBytes: max(cachesMeasurement.allocatedBytes - assetCacheMeasurement.allocatedBytes, 0),
                     logicalBytes: max(cachesMeasurement.logicalBytes - assetCacheMeasurement.logicalBytes, 0),
@@ -289,6 +273,8 @@ final class AppStorageDebugService {
             knownItems: knownItems.sorted { $0.allocatedBytes > $1.allocatedBytes },
             topLevelItems: topLevelItems.sorted { $0.allocatedBytes > $1.allocatedBytes },
             largestOtherCacheItems: largestOtherCacheItems,
+            largestOtherCacheFiles: largestOtherCacheFiles,
+            largestSystemCloudKitCacheItems: largestSystemCloudKitCacheItems,
             coreDataItems: coreDataItems,
             coreDataSQLiteStats: coreDataSQLiteStats
         )
@@ -442,6 +428,62 @@ final class AppStorageDebugService {
                     measurement: measure(url)
                 )
             }
+            .sorted { $0.allocatedBytes > $1.allocatedBytes }
+            .prefix(limit)
+            .map(\.self)
+    }
+
+    nonisolated private static func largestFiles(
+        inside directoryURL: URL,
+        idPrefix: String,
+        excluding excludedURLs: [URL],
+        limit: Int
+    ) -> [AppStorageDebugItem] {
+        let excludedPaths = excludedURLs.map { $0.standardizedFileURL.path }
+        guard let enumerator = FileManager.default.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [
+                .isRegularFileKey,
+                .isDirectoryKey,
+                .totalFileAllocatedSizeKey,
+                .fileAllocatedSizeKey,
+                .fileSizeKey
+            ],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var files: [AppStorageDebugItem] = []
+        files.reserveCapacity(limit * 4)
+
+        for case let url as URL in enumerator {
+            let standardizedPath = url.standardizedFileURL.path
+
+            if excludedPaths.contains(where: { standardizedPath.hasPrefix($0) }) {
+                continue
+            }
+
+            guard
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+                values.isRegularFile == true
+            else {
+                continue
+            }
+
+            let safeIDPath = standardizedPath.replacingOccurrences(of: "/", with: "-")
+            files.append(
+                item(
+                    id: "\(idPrefix)-\(safeIDPath)",
+                    title: url.lastPathComponent,
+                    detail: "File inside \(directoryURL.lastPathComponent).",
+                    url: url,
+                    measurement: measure(url)
+                )
+            )
+        }
+
+        return files
             .sorted { $0.allocatedBytes > $1.allocatedBytes }
             .prefix(limit)
             .map(\.self)

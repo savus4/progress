@@ -4,7 +4,6 @@ struct StorageDebugView: View {
     @State private var snapshot: AppStorageDebugSnapshot?
     @State private var isLoading = false
     @State private var isPurgingOtherCaches = false
-    @State private var isClearingLegacyBlobs = false
     @State private var actionMessage: String?
 
     var body: some View {
@@ -23,11 +22,6 @@ struct StorageDebugView: View {
                         LabeledContent("Stored Photos", value: "\(photoCount)")
                     }
 
-                    LabeledContent(
-                        "Full-Resolution Limit",
-                        value: PhotoAssetCacheSettings.formattedByteCount(PhotoAssetCacheSettings.currentLimitBytes)
-                    )
-
                     LabeledContent("Updated", value: snapshot.generatedAt.formatted(date: .omitted, time: .standard))
                 }
 
@@ -44,34 +38,16 @@ struct StorageDebugView: View {
                         purgeOtherCaches()
                     } label: {
                         if isPurgingOtherCaches {
-                            Label("Purging Other Caches…", systemImage: "trash")
+                            Label("Purging Caches…", systemImage: "trash")
                         } else {
-                            Label("Purge Other Caches", systemImage: "trash")
+                            Label("Purge Caches", systemImage: "trash")
                         }
                     }
-                    .disabled(isLoading || isPurgingOtherCaches || isClearingLegacyBlobs)
+                    .disabled(isLoading || isPurgingOtherCaches)
 
-                    Button {
-                        clearLegacyBlobs()
-                    } label: {
-                        if isClearingLegacyBlobs {
-                            Label("Clearing Old Photo Blobs…", systemImage: "externaldrive.badge.xmark")
-                        } else {
-                            Label("Clear Old Full-Resolution Blobs", systemImage: "externaldrive.badge.xmark")
-                        }
-                    }
-                    .disabled(
-                        isLoading ||
-                        isPurgingOtherCaches ||
-                        isClearingLegacyBlobs ||
-                        (snapshot.legacyBlobPhotoCount ?? 0) == 0
-                    )
-
-                    if let legacyBlobPhotoCount = snapshot.legacyBlobPhotoCount {
-                        Text("\(legacyBlobPhotoCount) photo\(legacyBlobPhotoCount == 1 ? "" : "s") still have old binary image data in Core Data.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("Clears Library/Caches, including the system CloudKit cache. Pending uploads are preserved.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Known Storage") {
@@ -124,6 +100,22 @@ struct StorageDebugView: View {
                 if !snapshot.largestOtherCacheItems.isEmpty {
                     Section("Biggest Other Caches") {
                         ForEach(snapshot.largestOtherCacheItems) { item in
+                            StorageDebugItemRow(item: item)
+                        }
+                    }
+                }
+
+                if !snapshot.largestOtherCacheFiles.isEmpty {
+                    Section("Largest Files In Other Caches") {
+                        ForEach(snapshot.largestOtherCacheFiles) { item in
+                            StorageDebugItemRow(item: item)
+                        }
+                    }
+                }
+
+                if !snapshot.largestSystemCloudKitCacheItems.isEmpty {
+                    Section("System CloudKit Cache") {
+                        ForEach(snapshot.largestSystemCloudKitCacheItems) { item in
                             StorageDebugItemRow(item: item)
                         }
                     }
@@ -202,23 +194,6 @@ struct StorageDebugView: View {
             }
 
             isPurgingOtherCaches = false
-        }
-    }
-
-    private func clearLegacyBlobs() {
-        Task { @MainActor in
-            isClearingLegacyBlobs = true
-            actionMessage = nil
-
-            do {
-                let clearedCount = try await AppStorageDebugService.shared.clearLegacyFullResolutionBlobs()
-                actionMessage = "Cleared old full-resolution blobs from \(clearedCount) photo\(clearedCount == 1 ? "" : "s")."
-                await refreshSnapshot()
-            } catch {
-                actionMessage = "Could not clear old full-resolution blobs."
-            }
-
-            isClearingLegacyBlobs = false
         }
     }
 

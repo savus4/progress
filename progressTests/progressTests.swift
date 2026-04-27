@@ -318,6 +318,44 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
+    @Test("CloudKitService returns a stable readable URL for staged assets")
+    func cloudKitServiceReturnsStableReadableURLForStagedAsset() async throws {
+        let assetName = "\(UUID().uuidString).jpg"
+        let imageData = Data([0x10, 0x20, 0x30, 0x40])
+        let stagedURL = try CloudKitService.shared.stageAssetData(imageData, named: assetName)
+        let readableURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
+        defer {
+            CloudKitService.shared.deleteAsset(named: assetName)
+            try? FileManager.default.removeItem(at: readableURL)
+            try? FileManager.default.removeItem(at: readableURL.deletingLastPathComponent())
+        }
+
+        #expect(readableURL != stagedURL)
+        #expect(readableURL.lastPathComponent == assetName)
+        #expect(FileManager.default.fileExists(atPath: readableURL.path))
+
+        let restoredData = try Data(contentsOf: readableURL)
+        #expect(restoredData == imageData)
+    }
+
+    @MainActor
+    @Test("CloudKitService reuses materialized readable URL for fetched assets")
+    func cloudKitServiceReusesReadableURLForFetchedAsset() async throws {
+        let imageData = Data([0x55, 0x66, 0x77, 0x88])
+        let assetName = try await CloudKitService.shared.saveImageDataAsset(imageData, fileExtension: "jpg")
+        defer { CloudKitService.shared.deleteAsset(named: assetName) }
+
+        let firstURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
+        let secondURL = try await CloudKitService.shared.loadAssetURL(named: assetName)
+        defer { try? FileManager.default.removeItem(at: firstURL) }
+
+        #expect(firstURL == secondURL)
+        #expect(firstURL.lastPathComponent == assetName)
+        let restoredData = try Data(contentsOf: secondURL)
+        #expect(restoredData == imageData)
+    }
+
+    @MainActor
     @Test("PhotoStorageService restores missing still asset from CloudKit")
     func photoStorageRestoresMissingStillAssetFromCloudKit() async throws {
         let context = PersistenceController(inMemory: true).container.viewContext

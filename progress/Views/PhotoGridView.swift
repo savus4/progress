@@ -39,7 +39,6 @@ struct PhotoGridView: View {
     @State private var isDeletingSelection = false
     @State private var didSyncExifMetadata = false
     @State private var metadataSyncTask: Task<Void, Never>?
-    @State private var activeDownloadAssetNames: Set<String> = []
     private let enableScrollDateDebugLogs = false
 
     var body: some View {
@@ -74,7 +73,6 @@ struct PhotoGridView: View {
                         UIKitPhotoGridView(
                             dataController: dataController,
                             changeToken: dataController.changeToken,
-                            activeDownloadAssetNames: activeDownloadAssetNames,
                             centeringRequest: gridCenteringRequest,
                             isSelectionMode: $isSelectionMode,
                             selectedPhotoIDs: $selectedPhotoIDs,
@@ -187,14 +185,7 @@ struct PhotoGridView: View {
                 NotificationSettingsView()
             }
             .fullScreenCover(item: $photoDetailPresentation) { presentation in
-                PhotoDetailView(
-                    items: presentation.items,
-                    initialIndex: presentation.initialIndex,
-                    onClose: closePhotoDetail,
-                    onCurrentItemChanged: { objectID in
-                        activePhotoDetailObjectID = objectID
-                    }
-                )
+                photoDetailView(for: presentation)
             }
             .sheet(isPresented: $showingExportPicker, onDismiss: {
                 exportedFileURLs = []
@@ -226,7 +217,6 @@ struct PhotoGridView: View {
         }
         .onAppear {
             dataController.configureIfNeeded(context: viewContext)
-            syncActiveDownloadSnapshot()
             openCameraIfNeededFromNotification()
             scheduleMetadataSyncIfNeeded()
         }
@@ -245,18 +235,10 @@ struct PhotoGridView: View {
             guard token != nil else { return }
             openCameraIfNeededFromNotification()
         }
-        .onReceive(NotificationCenter.default.publisher(for: CloudKitService.assetTransferDidChangeNotification)) { notification in
-            handleAssetTransferNotification(notification)
-        }
         .onDisappear {
             metadataSyncTask?.cancel()
             metadataSyncTask = nil
         }
-    }
-
-    @MainActor
-    private func syncActiveDownloadSnapshot() {
-        activeDownloadAssetNames = CloudSyncMonitor.shared.activeDownloadAssetNamesSnapshot
     }
 
     private func openCameraIfNeededFromNotification() {
@@ -279,6 +261,18 @@ struct PhotoGridView: View {
                 initialIndex: index
             )
         }
+    }
+
+    @ViewBuilder
+    private func photoDetailView(for presentation: PhotoDetailPresentation) -> some View {
+        PhotoDetailView(
+            items: presentation.items,
+            initialIndex: presentation.initialIndex,
+            onClose: closePhotoDetail,
+            onCurrentItemChanged: { objectID in
+                activePhotoDetailObjectID = objectID
+            }
+        )
     }
 
     private func closePhotoDetail(_ objectID: NSManagedObjectID?) {
@@ -304,26 +298,6 @@ struct PhotoGridView: View {
         activePhotoDetailObjectID = nil
         photoDetailPresentation = nil
     }
-
-    @MainActor
-    private func handleAssetTransferNotification(_ notification: Notification) {
-        guard let kindRawValue = notification.userInfo?["kind"] as? String,
-              let phaseRawValue = notification.userInfo?["phase"] as? String,
-              let assetName = notification.userInfo?["assetName"] as? String,
-              let kind = CloudKitService.AssetTransferKind(rawValue: kindRawValue),
-              let phase = CloudKitService.AssetTransferPhase(rawValue: phaseRawValue),
-              kind == .download else {
-            return
-        }
-
-        switch phase {
-        case .started:
-            activeDownloadAssetNames.insert(assetName)
-        case .finished, .failed:
-            activeDownloadAssetNames.remove(assetName)
-        }
-    }
-
 
     private var floatingCaptureButton: some View {
         Button(action: { showingCamera = true }) {

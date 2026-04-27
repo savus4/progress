@@ -41,17 +41,18 @@ final class CloudKitService {
 
     private let container: CKContainer
     private let privateDatabase: CKDatabase
-    private let cacheDirectoryURL: URL
+    private let systemCloudKitCacheDirectoryURL: URL
     private let stagingDirectoryURL: URL
+    private let temporaryReadableAssetsDirectoryURL: URL
     private let fileManager = FileManager.default
-    private let cacheIndexKey = "cachedAssetAccessDates"
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudKitAsset")
 
     private init() {
         container = CKContainer.default()
         privateDatabase = container.privateCloudDatabase
-        cacheDirectoryURL = Self.makeCacheDirectoryURL()
+        systemCloudKitCacheDirectoryURL = Self.makeSystemCloudKitCacheDirectoryURL()
         stagingDirectoryURL = Self.makeStagingDirectoryURL()
+        temporaryReadableAssetsDirectoryURL = Self.makeTemporaryReadableAssetsDirectoryURL()
     }
 
     func saveImageAsset(_ image: UIImage) async throws -> String {
@@ -133,18 +134,14 @@ final class CloudKitService {
     func loadAssetURL(
         named assetName: String,
         reportsTransferEvents: Bool = true,
-        updatesAccessLog: Bool = true,
-        prunesCache: Bool = true
+        forceRefetch: Bool = false
     ) async throws -> URL {
-        if let cachedURL = cachedAssetURL(named: assetName) {
-            if updatesAccessLog {
-                markAssetAccessed(named: assetName)
-            }
-            return cachedURL
+        if let stagedURL = stagedAssetURL(named: assetName) {
+            return stableReadableURL(for: stagedURL, assetName: assetName)
         }
 
-        if let stagedURL = stagedAssetURL(named: assetName) {
-            return stagedURL
+        if !forceRefetch, let readableURL = readableAssetURL(named: assetName) {
+            return readableURL
         }
 
         if reportsTransferEvents {
@@ -182,19 +179,7 @@ final class CloudKitService {
             throw CloudKitError.assetNotFound
         }
 
-        let destinationURL = cacheFileURL(for: assetName)
-        try ensureDirectoryExists(at: cacheDirectoryURL)
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try? fileManager.removeItem(at: destinationURL)
-        }
-        try fileManager.copyItem(at: stagedURL, to: destinationURL)
-        if updatesAccessLog {
-            markAssetAccessed(named: assetName)
-        }
-        if prunesCache {
-            pruneCacheIfNeeded(excluding: [assetName])
-        }
-        return destinationURL
+        return stableReadableURL(for: stagedURL, assetName: assetName)
     }
 
     private func postAssetTransferChange(kind: AssetTransferKind, phase: AssetTransferPhase, assetName: String) {
@@ -207,17 +192,6 @@ final class CloudKitService {
                 "assetName": assetName
             ]
         )
-    }
-
-    func cacheAssetData(_ data: Data, named assetName: String) throws -> URL {
-        let fileURL = cacheFileURL(for: assetName)
-        try ensureDirectoryExists(at: cacheDirectoryURL)
-        if !fileManager.fileExists(atPath: fileURL.path) {
-            try data.write(to: fileURL, options: .atomic)
-        }
-        markAssetAccessed(named: assetName)
-        pruneCacheIfNeeded(excluding: [assetName])
-        return fileURL
     }
 
     func stageAssetData(_ data: Data, named assetName: String) throws -> URL {
@@ -269,15 +243,10 @@ final class CloudKitService {
     }
 
     func deleteAsset(named assetName: String) {
-        let cachedURL = cacheFileURL(for: assetName)
-        if fileManager.fileExists(atPath: cachedURL.path) {
-            try? fileManager.removeItem(at: cachedURL)
-        }
         let stagedURL = stagingFileURL(for: assetName)
         if fileManager.fileExists(atPath: stagedURL.path) {
             try? fileManager.removeItem(at: stagedURL)
         }
-        removeCachedAccessDate(for: assetName)
     }
 
     func deleteRemoteAsset(named assetName: String) async {
@@ -403,24 +372,18 @@ final class CloudKitService {
     }
 
     func storedPersistentAssetNames() -> Set<String> {
-        let cachedNames = (try? fileManager.contentsOfDirectory(atPath: cacheDirectoryURL.path)) ?? []
         let stagedNames = (try? fileManager.contentsOfDirectory(atPath: stagingDirectoryURL.path)) ?? []
-        return Set(cachedNames).union(stagedNames)
+        return Set(stagedNames)
     }
 
     func deleteAllLocalAssets() {
-        deleteContents(of: cacheDirectoryURL)
+        deleteContents(of: systemCloudKitCacheDirectoryURL)
         deleteContents(of: stagingDirectoryURL)
-        UserDefaults.standard.removeObject(forKey: cacheIndexKey)
-    }
-
-    func updateAssetCacheLimit(bytes: Int) {
-        PhotoAssetCacheSettings.currentLimitBytes = bytes
-        pruneCacheIfNeeded()
+        deleteContents(of: temporaryReadableAssetsDirectoryURL)
     }
 
     func localAssetStorageUsage() async -> LocalPhotoAssetStorageUsage {
-        let cacheDirectoryURL = cacheDirectoryURL
+        let cacheDirectoryURL = systemCloudKitCacheDirectoryURL
         let stagingDirectoryURL = stagingDirectoryURL
 
         let usage = await Task.detached(priority: .utility) {
@@ -437,7 +400,7 @@ final class CloudKitService {
     }
 
     func localAssetDirectoryURLs() -> (cache: URL, staging: URL) {
-        (cacheDirectoryURL, stagingDirectoryURL)
+        (systemCloudKitCacheDirectoryURL, stagingDirectoryURL)
     }
 
     private func saveAssetData(
@@ -493,27 +456,31 @@ final class CloudKitService {
             logger.error("save-asset-file-threw name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) error=\(Self.describe(error), privacy: .public)")
             throw cloudKitError(for: error)
         }
-
-        _ = try cacheAssetData(data, named: assetName)
-    }
-
-    private func cachedAssetURL(named assetName: String) -> URL? {
-        let cachedURL = cacheFileURL(for: assetName)
-        guard fileManager.fileExists(atPath: cachedURL.path) else {
-            return nil
-        }
-        return cachedURL
     }
 
     private func localAssetURLForUpload(named assetName: String) -> URL? {
-        if let stagedURL = stagedAssetURL(named: assetName) {
-            return stagedURL
-        }
-        return cachedAssetURL(named: assetName)
+        stagedAssetURL(named: assetName)
     }
 
-    private func cacheFileURL(for assetName: String) -> URL {
-        cacheDirectoryURL.appendingPathComponent(assetName)
+    private func stableReadableURL(for sourceURL: URL, assetName: String) -> URL {
+        let temporaryURL = temporaryReadableURL(for: assetName)
+        do {
+            try ensureDirectoryExists(at: temporaryURL.deletingLastPathComponent())
+            if fileManager.fileExists(atPath: temporaryURL.path) {
+                try? fileManager.removeItem(at: temporaryURL)
+            }
+
+            do {
+                try fileManager.linkItem(at: sourceURL, to: temporaryURL)
+            } catch {
+                try fileManager.copyItem(at: sourceURL, to: temporaryURL)
+            }
+
+            return temporaryURL
+        } catch {
+            logger.error("stable-staged-asset-copy-failed name=\(assetName, privacy: .public) source=\(sourceURL.path(percentEncoded: false), privacy: .public) error=\(Self.describe(error), privacy: .public)")
+            return sourceURL
+        }
     }
 
     private func stagingFileURL(for assetName: String) -> URL {
@@ -526,72 +493,21 @@ final class CloudKitService {
             .appendingPathExtension((assetName as NSString).pathExtension)
     }
 
+    private func temporaryReadableURL(for assetName: String) -> URL {
+        temporaryReadableAssetsDirectoryURL
+            .appendingPathComponent(assetName)
+    }
+
+    private func readableAssetURL(named assetName: String) -> URL? {
+        let readableURL = temporaryReadableURL(for: assetName)
+        guard fileManager.fileExists(atPath: readableURL.path) else {
+            return nil
+        }
+        return readableURL
+    }
+
     private func assetRecordName(photoID: UUID, role: PhotoAssetRole, fileExtension: String) -> String {
         "\(photoID.uuidString)_\(role.rawValue).\(fileExtension)"
-    }
-
-    private func markAssetAccessed(named assetName: String) {
-        var accessDates = cachedAccessDates()
-        accessDates[assetName] = Date().timeIntervalSinceReferenceDate
-        UserDefaults.standard.set(accessDates, forKey: cacheIndexKey)
-    }
-
-    private func removeCachedAccessDate(for assetName: String) {
-        var accessDates = cachedAccessDates()
-        accessDates.removeValue(forKey: assetName)
-        UserDefaults.standard.set(accessDates, forKey: cacheIndexKey)
-    }
-
-    private func cachedAccessDates() -> [String: TimeInterval] {
-        let rawValues = UserDefaults.standard.dictionary(forKey: cacheIndexKey) ?? [:]
-        var accessDates: [String: TimeInterval] = [:]
-        for (key, value) in rawValues {
-            if let number = value as? NSNumber {
-                accessDates[key] = number.doubleValue
-            }
-        }
-        return accessDates
-    }
-
-    private func pruneCacheIfNeeded(excluding protectedAssetNames: Set<String> = []) {
-        guard var cachedAssetNames = try? fileManager.contentsOfDirectory(atPath: cacheDirectoryURL.path) else {
-            return
-        }
-
-        let maxCacheSizeBytes = PhotoAssetCacheSettings.currentLimitBytes
-        var totalSize = 0
-        var fileSizes: [String: Int] = [:]
-        for assetName in cachedAssetNames {
-            let assetURL = cacheFileURL(for: assetName)
-            let bytes = Self.allocatedSize(of: assetURL)
-            guard bytes > 0 else { continue }
-            totalSize += bytes
-            fileSizes[assetName] = bytes
-        }
-
-        guard totalSize > maxCacheSizeBytes else { return }
-
-        let accessDates = cachedAccessDates()
-        cachedAssetNames.sort {
-            let lhsDate = accessDates[$0] ?? 0
-            let rhsDate = accessDates[$1] ?? 0
-            if lhsDate == rhsDate {
-                return $0 < $1
-            }
-            return lhsDate < rhsDate
-        }
-
-        for assetName in cachedAssetNames where totalSize > maxCacheSizeBytes {
-            guard !protectedAssetNames.contains(assetName) else { continue }
-            let assetURL = cacheFileURL(for: assetName)
-            guard fileManager.fileExists(atPath: assetURL.path) else {
-                removeCachedAccessDate(for: assetName)
-                continue
-            }
-            try? fileManager.removeItem(at: assetURL)
-            totalSize -= fileSizes[assetName] ?? 0
-            removeCachedAccessDate(for: assetName)
-        }
     }
 
     private func deleteContents(of directoryURL: URL) {
@@ -656,19 +572,16 @@ final class CloudKitService {
         }
     }
 
-    private static func makeCacheDirectoryURL() -> URL {
+    private static func makeSystemCloudKitCacheDirectoryURL() -> URL {
         let baseURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "progress"
-        let directoryURL = baseURL
-            .appendingPathComponent(bundleIdentifier, isDirectory: true)
-            .appendingPathComponent("AssetCache", isDirectory: true)
+        return baseURL
+            .appendingPathComponent("CloudKit", isDirectory: true)
+    }
 
-        if !FileManager.default.fileExists(atPath: directoryURL.path) {
-            try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-        }
-
-        return directoryURL
+    private static func makeTemporaryReadableAssetsDirectoryURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("CloudKitReadableAssets", isDirectory: true)
     }
 
     nonisolated private static func allocatedSizeOfContents(at directoryURL: URL) -> Int {

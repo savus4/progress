@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             let context = await MainActor.run {
                 PersistenceController.shared.makeBackgroundContext()
             }
+            await PhotoStorageService.shared.optimizeStoredThumbnailsIfNeeded(context: context)
             await PhotoStorageService.shared.purgeOrphanedAssets(context: context)
         }
         return true

@@ -76,6 +76,10 @@ extension DailyPhoto {
 final class PhotoStorageService {
     static let shared = PhotoStorageService()
 
+    private enum StorageOptimizationKeys {
+        static let thumbnailRecompressionV1Completed = "thumbnail-recompression-v1-completed"
+    }
+
     private let cloudKitService = CloudKitService.shared
     private let thumbnailService = ThumbnailService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoStorage")
@@ -400,9 +404,7 @@ final class PhotoStorageService {
             guard let assetName = candidate.fullImageAssetName else { continue }
             guard let assetURL = try? await cloudKitService.loadAssetURL(
                 named: assetName,
-                reportsTransferEvents: false,
-                updatesAccessLog: false,
-                prunesCache: false
+                reportsTransferEvents: false
             ) else { continue }
             guard let metadata = exifMetadata(from: assetURL) else { continue }
 
@@ -635,6 +637,86 @@ final class PhotoStorageService {
         }
     }
 
+    func optimizeStoredThumbnailsIfNeeded(
+        context: NSManagedObjectContext,
+        batchSize: Int = 150
+    ) async {
+        if UserDefaults.standard.bool(forKey: StorageOptimizationKeys.thumbnailRecompressionV1Completed) {
+            return
+        }
+
+        let objectIDs: [NSManagedObjectID]
+        do {
+            objectIDs = try await context.perform {
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
+                request.resultType = .managedObjectIDResultType
+                request.predicate = NSPredicate(format: "thumbnailData != nil")
+                request.fetchBatchSize = batchSize
+                return try context.fetch(request)
+            }
+        } catch {
+            logger.error("thumbnail-recompression-fetch-failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        guard !objectIDs.isEmpty else {
+            UserDefaults.standard.set(true, forKey: StorageOptimizationKeys.thumbnailRecompressionV1Completed)
+            return
+        }
+
+        var totalScanned = 0
+        var totalUpdated = 0
+        var totalBytesSaved = 0
+
+        for startIndex in stride(from: 0, to: objectIDs.count, by: batchSize) {
+            let endIndex = min(startIndex + batchSize, objectIDs.count)
+            let batch = Array(objectIDs[startIndex..<endIndex])
+
+            do {
+                let (scanned, updated, bytesSaved) = try await context.perform {
+                    var scanned = 0
+                    var updated = 0
+                    var bytesSaved = 0
+
+                    for objectID in batch {
+                        guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto,
+                              let currentData = photo.thumbnailData else {
+                            continue
+                        }
+
+                        scanned += 1
+                        guard let optimizedData = self.thumbnailService.optimizedThumbnailDataIfSmaller(currentData) else {
+                            continue
+                        }
+
+                        bytesSaved += max(currentData.count - optimizedData.count, 0)
+                        photo.thumbnailData = optimizedData
+                        photo.modifiedAt = Date()
+                        updated += 1
+                    }
+
+                    if context.hasChanges {
+                        try context.save()
+                    }
+                    context.reset()
+
+                    return (scanned, updated, bytesSaved)
+                }
+
+                totalScanned += scanned
+                totalUpdated += updated
+                totalBytesSaved += bytesSaved
+            } catch {
+                logger.error("thumbnail-recompression-batch-failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        logger.log(
+            "thumbnail-recompression-finished scanned=\(totalScanned, privacy: .public) updated=\(totalUpdated, privacy: .public) bytesSaved=\(totalBytesSaved, privacy: .public)"
+        )
+        UserDefaults.standard.set(true, forKey: StorageOptimizationKeys.thumbnailRecompressionV1Completed)
+    }
+
     func countPhotosMissingSyncedPayloads(context: NSManagedObjectContext) async -> Int {
         _ = context
         return 0
@@ -712,8 +794,17 @@ final class PhotoStorageService {
             return cachedImage
         }
 
-        let fileURL = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
-        return try await decodeAndCacheFullImage(from: fileURL, cacheKey: cacheKey)
+        let firstURL = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
+
+        do {
+            return try await decodeAndCacheFullImage(from: firstURL, cacheKey: cacheKey)
+        } catch {
+            let refreshedURL = try await cloudKitService.loadAssetURL(
+                named: fullImageAssetName,
+                forceRefetch: true
+            )
+            return try await decodeAndCacheFullImage(from: refreshedURL, cacheKey: cacheKey)
+        }
     }
 
     func loadLivePhotoVideo(named livePhotoVideoAssetName: String?) async throws -> URL {
@@ -732,9 +823,18 @@ final class PhotoStorageService {
             throw PhotoStorageError.noLivePhotoAssets
         }
 
-        async let imageURL = cloudKitService.loadAssetURL(named: imageAssetName)
-        async let videoURL = cloudKitService.loadAssetURL(named: videoAssetName)
-        return try await (imageURL, videoURL)
+        var imageURL = try await cloudKitService.loadAssetURL(named: imageAssetName)
+        var videoURL = try await cloudKitService.loadAssetURL(named: videoAssetName)
+
+        if !isReadableAssetURL(imageURL) {
+            imageURL = try await cloudKitService.loadAssetURL(named: imageAssetName, forceRefetch: true)
+        }
+
+        if !isReadableAssetURL(videoURL) {
+            videoURL = try await cloudKitService.loadAssetURL(named: videoAssetName, forceRefetch: true)
+        }
+
+        return (imageURL, videoURL)
     }
 
     func prefetchPagerAssets(
@@ -802,6 +902,25 @@ final class PhotoStorageService {
         let pixelWidth = Int(image.size.width * image.scale)
         let pixelHeight = Int(image.size.height * image.scale)
         return max(pixelWidth * pixelHeight * 4, 1)
+    }
+
+    private func isReadableAssetURL(_ url: URL) -> Bool {
+        guard (try? url.checkResourceIsReachable()) == true else {
+            return false
+        }
+
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return false
+        }
+
+        do {
+            _ = try handle.read(upToCount: 1)
+            try handle.close()
+            return true
+        } catch {
+            try? handle.close()
+            return false
+        }
     }
 
     private func makeExportRootDirectory() throws -> URL {
@@ -1242,7 +1361,7 @@ actor RemoteAssetDeletionService {
                     continue
                 }
 
-                let outcome = results[assetName] ?? .failure(
+                let outcome = results[assetName] ?? RemoteAssetDeletionOutcome.failure(
                     RemoteAssetDeletionFailure(
                         ckErrorCodeRawValue: nil,
                         retryAfterSeconds: nil,

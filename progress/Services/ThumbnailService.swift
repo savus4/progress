@@ -1,6 +1,7 @@
 import UIKit
 import CoreData
 import ImageIO
+import UniformTypeIdentifiers
 
 class ThumbnailService {
     static let shared = ThumbnailService()
@@ -12,11 +13,16 @@ class ThumbnailService {
         qos: .userInitiated
     )
 
+    private let heicCompressionQuality: CGFloat = 0.58
+    private let jpegCompressionQuality: CGFloat = 0.62
+    private let minimumSavingsRatioForRewrite: Double = 0.93
+    private let minimumSavingsBytesForRewrite = 1024
+
     /// Generate a thumbnail from an image
     /// - Parameters:
     ///   - image: Source image
     ///   - targetSize: Target size for thumbnail (default 300x300)
-    /// - Returns: JPEG data of the thumbnail
+    /// - Returns: Encoded thumbnail data (HEIC when supported, JPEG fallback)
     func generateThumbnail(from image: UIImage, targetSize: CGSize = CGSize(width: 300, height: 300)) -> Data? {
         let size = image.size
         let widthRatio  = targetSize.width  / size.width
@@ -34,7 +40,10 @@ class ThumbnailService {
             image.draw(in: CGRect(origin: .zero, size: newSize))
         }
 
-        return thumbnail.jpegData(compressionQuality: 0.7)
+        guard let cgImage = thumbnail.cgImage else {
+            return thumbnail.jpegData(compressionQuality: jpegCompressionQuality)
+        }
+        return encodeThumbnail(cgImage: cgImage)
     }
 
     /// Generate a thumbnail directly from encoded image bytes without decoding full resolution into UIKit first.
@@ -59,17 +68,27 @@ class ThumbnailService {
             return nil
         }
 
-        let image = UIImage(cgImage: cgThumbnail)
-        let renderSize = CGSize(width: cgThumbnail.width, height: cgThumbnail.height)
-        let format = UIGraphicsImageRendererFormat.default()
-        format.opaque = true
-        let renderer = UIGraphicsImageRenderer(size: renderSize, format: format)
-        let flattenedImage = renderer.image { _ in
-            UIColor.black.setFill()
-            UIRectFill(CGRect(origin: .zero, size: renderSize))
-            image.draw(in: CGRect(origin: .zero, size: renderSize))
+        return encodeThumbnail(cgImage: cgThumbnail)
+    }
+
+    func optimizedThumbnailDataIfSmaller(_ data: Data) -> Data? {
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, sourceOptions as CFDictionary),
+              let optimized = encodeThumbnail(cgImage: cgImage) else {
+            return nil
         }
-        return flattenedImage.jpegData(compressionQuality: 0.7)
+
+        let compressedRatio = Double(optimized.count) / Double(data.count)
+        let byteSavings = data.count - optimized.count
+        guard byteSavings >= minimumSavingsBytesForRewrite,
+              compressedRatio <= minimumSavingsRatioForRewrite else {
+            return nil
+        }
+
+        return optimized
     }
 
     func generateThumbnailAsync(
@@ -82,6 +101,34 @@ class ThumbnailService {
                 continuation.resume(returning: thumbnail)
             }
         }
+    }
+
+    private func encodeThumbnail(cgImage: CGImage) -> Data? {
+        if let heicData = encode(cgImage: cgImage, as: UTType.heic.identifier as CFString, quality: heicCompressionQuality) {
+            return heicData
+        }
+        return encode(cgImage: cgImage, as: UTType.jpeg.identifier as CFString, quality: jpegCompressionQuality)
+    }
+
+    private func encode(cgImage: CGImage, as uti: CFString, quality: CGFloat) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, uti, 1, nil) else {
+            return nil
+        }
+
+        let properties: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: quality,
+            kCGImageDestinationEmbedThumbnail: false,
+            kCGImageMetadataShouldExcludeGPS: true,
+            kCGImageMetadataShouldExcludeXMP: true
+        ]
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+
+        guard CGImageDestinationFinalize(destination) else {
+            return nil
+        }
+
+        return data as Data
     }
 }
 

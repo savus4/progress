@@ -550,43 +550,58 @@ private struct PhotoDetailPageView: View {
 
     @State private var displayedImage: UIImage?
     @State private var isLoadingFullImage = false
+    @State private var isLoadingLivePhotoResources = false
+    @State private var isDownloadingLivePhotoAsset = false
     @State private var livePhotoResources: LivePhotoResources?
 
     var body: some View {
-        Group {
-            if isCurrentPage, let livePhotoResources, let displayedImage {
-                SnapBackZoomContainer {
-                    LivePhotoContainerView(
-                        imageURL: livePhotoResources.imageURL,
-                        videoURL: livePhotoResources.videoURL,
-                        fallbackImage: displayedImage,
-                        playsHintOnLoad: false
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black)
-                }
-            } else if let displayedImage {
-                SnapBackZoomContainer {
-                    Image(uiImage: displayedImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if isCurrentPage, let livePhotoResources, let displayedImage {
+                    SnapBackZoomContainer {
+                        LivePhotoContainerView(
+                            imageURL: livePhotoResources.imageURL,
+                            videoURL: livePhotoResources.videoURL,
+                            fallbackImage: displayedImage,
+                            playsHintOnLoad: false
+                        )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.black)
+                    }
+                } else if let displayedImage {
+                    SnapBackZoomContainer {
+                        Image(uiImage: displayedImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color.black)
+                    }
+                } else {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            } else {
-                ProgressView()
-                    .tint(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if shouldShowLivePhotoLoadingIndicator {
+                LivePhotoLoadingIndicator(isDownloading: isDownloadingLivePhotoAsset)
+                    .padding(.top, 20)
+                    .padding(.trailing, 16)
             }
         }
         .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
             await loadImage()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CloudKitService.assetTransferDidChangeNotification)) { notification in
+            handleAssetTransferNotification(notification)
         }
     }
 
     @MainActor
     private func loadImage() async {
         livePhotoResources = nil
+        isLoadingLivePhotoResources = false
+        syncLivePhotoDownloadState()
 
         if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: item.objectID) {
             displayedImage = cachedThumbnail
@@ -617,17 +632,58 @@ private struct PhotoDetailPageView: View {
             return
         }
 
+        guard hasLivePhoto else {
+            return
+        }
+
+        isLoadingLivePhotoResources = true
+        defer { isLoadingLivePhotoResources = false }
+
         guard let resources = try? await PhotoStorageService.shared.loadLivePhotoResources(
             imageAssetName: item.livePhotoImageAssetName,
             videoAssetName: item.livePhotoVideoAssetName
         ) else {
             return
         }
+        guard !Task.isCancelled else { return }
 
         livePhotoResources = LivePhotoResources(
             imageURL: resources.imageURL,
             videoURL: resources.videoURL
         )
+        syncLivePhotoDownloadState()
+    }
+
+    private var hasLivePhoto: Bool {
+        item.livePhotoImageAssetName != nil && item.livePhotoVideoAssetName != nil
+    }
+
+    private var shouldShowLivePhotoLoadingIndicator: Bool {
+        isCurrentPage &&
+        hasLivePhoto &&
+        displayedImage != nil &&
+        livePhotoResources == nil &&
+        (isLoadingLivePhotoResources || isDownloadingLivePhotoAsset)
+    }
+
+    @MainActor
+    private func syncLivePhotoDownloadState() {
+        let assetNames = [item.livePhotoImageAssetName, item.livePhotoVideoAssetName].compactMap(\.self)
+        isDownloadingLivePhotoAsset = CloudSyncMonitor.shared.isDownloading(assetNames: assetNames)
+    }
+
+    @MainActor
+    private func handleAssetTransferNotification(_ notification: Notification) {
+        guard let assetName = notification.userInfo?["assetName"] as? String else {
+            return
+        }
+
+        let trackedAssetNames = [item.livePhotoImageAssetName, item.livePhotoVideoAssetName].compactMap(\.self)
+        guard trackedAssetNames.contains(assetName) else {
+            return
+        }
+
+        syncLivePhotoDownloadState()
     }
 }
 
@@ -639,6 +695,32 @@ private struct PhotoDetailPageTaskKey: Hashable {
 private struct LivePhotoResources {
     let imageURL: URL
     let videoURL: URL
+}
+
+private struct LivePhotoLoadingIndicator: View {
+    let isDownloading: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "livephoto")
+                .imageScale(.medium)
+
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white)
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.black.opacity(0.55), in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(.white.opacity(0.14), lineWidth: 1)
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isDownloading ? "Live Photo downloading" : "Preparing Live Photo")
+    }
 }
 
 private struct PhotoDetailPagingView: UIViewControllerRepresentable {

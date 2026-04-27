@@ -108,7 +108,6 @@ struct PhotoGridCenteringRequest: Equatable {
 struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let dataController: PhotoGridDataController
     let changeToken: Int
-    let activeDownloadAssetNames: Set<String>
     let centeringRequest: PhotoGridCenteringRequest?
     @Binding var isSelectionMode: Bool
     @Binding var selectedPhotoIDs: Set<NSManagedObjectID>
@@ -134,7 +133,6 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
         uiViewController.update(
             items: dataController.itemsSnapshot,
             changeToken: changeToken,
-            activeDownloadAssetNames: activeDownloadAssetNames,
             centeringRequest: centeringRequest,
             isSelectionMode: isSelectionMode,
             selectedPhotoIDs: selectedPhotoIDs
@@ -244,7 +242,6 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var dataSource: UICollectionViewDiffableDataSource<UIKitPhotoGridSection, NSManagedObjectID>!
     private var items: [UIKitPhotoGridItem] = []
     private var itemsByID: [NSManagedObjectID: UIKitPhotoGridItem] = [:]
-    private var activeDownloadAssetNames: Set<String> = []
     private var isSelectionMode = false
     private var selectedPhotoIDs: Set<NSManagedObjectID> = []
     private var lastAppliedSelectedPhotoIDs: Set<NSManagedObjectID> = []
@@ -361,16 +358,13 @@ final class PhotoGridCollectionViewController: UIViewController {
     func update(
         items: [UIKitPhotoGridItem],
         changeToken: Int,
-        activeDownloadAssetNames: Set<String>,
         centeringRequest: PhotoGridCenteringRequest?,
         isSelectionMode: Bool,
         selectedPhotoIDs: Set<NSManagedObjectID>
     ) {
         let didChangeItems = currentChangeToken != changeToken
-        let didChangeActiveDownloads = self.activeDownloadAssetNames != activeDownloadAssetNames
         let didChangeSelectionMode = self.isSelectionMode != isSelectionMode
 
-        self.activeDownloadAssetNames = activeDownloadAssetNames
         self.isSelectionMode = isSelectionMode
         self.selectedPhotoIDs = selectedPhotoIDs
 
@@ -389,7 +383,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
 
         synchronizeSelection(animated: false)
-        if didChangeItems || didChangeActiveDownloads || didChangeSelectionMode {
+        if didChangeItems || didChangeSelectionMode {
             refreshVisibleCells()
         }
         handleCenteringRequestIfNeeded(centeringRequest)
@@ -400,12 +394,10 @@ final class PhotoGridCollectionViewController: UIViewController {
     private func configureDataSource() {
         let registration = UICollectionView.CellRegistration<PhotoGridCollectionViewCell, NSManagedObjectID> { [weak self] cell, indexPath, objectID in
             guard let self, indexPath.item < self.items.count, let item = self.itemsByID[objectID] else { return }
-            let isDownloading = item.assetNames.contains { self.activeDownloadAssetNames.contains($0) }
             cell.configure(
                 with: item,
                 isSelectionMode: self.isSelectionMode,
-                isSelected: self.selectedPhotoIDs.contains(objectID),
-                isDownloading: isDownloading
+                isSelected: self.selectedPhotoIDs.contains(objectID)
             )
             self.loadThumbnail(for: item, into: cell)
         }
@@ -455,8 +447,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         cell.configure(
             with: item,
             isSelectionMode: isSelectionMode,
-            isSelected: selectedPhotoIDs.contains(item.objectID),
-            isDownloading: item.assetNames.contains { activeDownloadAssetNames.contains($0) }
+            isSelected: selectedPhotoIDs.contains(item.objectID)
         )
     }
 
@@ -817,8 +808,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                 cell.configure(
                     with: items[indexPath.item],
                     isSelectionMode: true,
-                    isSelected: true,
-                    isDownloading: items[indexPath.item].assetNames.contains { activeDownloadAssetNames.contains($0) }
+                    isSelected: true
                 )
             }
         } else {
@@ -838,8 +828,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             cell.configure(
                 with: items[indexPath.item],
                 isSelectionMode: true,
-                isSelected: false,
-                isDownloading: items[indexPath.item].assetNames.contains { activeDownloadAssetNames.contains($0) }
+                isSelected: false
             )
         }
     }
@@ -963,8 +952,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     func configure(
         with item: UIKitPhotoGridItem,
         isSelectionMode: Bool,
-        isSelected: Bool,
-        isDownloading: Bool
+        isSelected: Bool
     ) {
         selectionBadgeImageView.isHidden = !isSelectionMode
         if isSelectionMode {
@@ -973,19 +961,15 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         }
 
         let badge: (text: String, systemName: String, backgroundColor: UIColor, foregroundColor: UIColor)?
-        if isDownloading {
-            badge = ("Downloading", "arrow.down.circle", UIColor.systemBlue.withAlphaComponent(0.86), .white)
-        } else {
-            switch item.uploadState {
-            case .pending, .uploading:
-                badge = ("Uploading", "icloud.and.arrow.up", UIColor.black.withAlphaComponent(0.62), .white)
-            case .failed:
-                badge = ("Retrying later", "exclamationmark.icloud", UIColor.systemOrange.withAlphaComponent(0.9), .black)
-            case .paused:
-                badge = ("Upload paused", "pause.circle", UIColor.systemRed.withAlphaComponent(0.9), .white)
-            case .uploaded:
-                badge = nil
-            }
+        switch item.uploadState {
+        case .pending, .uploading:
+            badge = ("Uploading", "icloud.and.arrow.up", UIColor.black.withAlphaComponent(0.62), .white)
+        case .failed:
+            badge = ("Retrying later", "exclamationmark.icloud", UIColor.systemOrange.withAlphaComponent(0.9), .black)
+        case .paused:
+            badge = ("Upload paused", "pause.circle", UIColor.systemRed.withAlphaComponent(0.9), .white)
+        case .uploaded:
+            badge = nil
         }
 
         if let badge {
