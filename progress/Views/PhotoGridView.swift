@@ -265,14 +265,16 @@ struct PhotoGridView: View {
 
     @ViewBuilder
     private func photoDetailView(for presentation: PhotoDetailPresentation) -> some View {
-        PhotoDetailView(
-            items: presentation.items,
-            initialIndex: presentation.initialIndex,
-            onClose: closePhotoDetail,
-            onCurrentItemChanged: { objectID in
-                activePhotoDetailObjectID = objectID
-            }
-        )
+        NavigationStack {
+            PhotoDetailView(
+                items: presentation.items,
+                initialIndex: presentation.initialIndex,
+                onClose: closePhotoDetail,
+                onCurrentItemChanged: { objectID in
+                    activePhotoDetailObjectID = objectID
+                }
+            )
+        }
     }
 
     private func closePhotoDetail(_ objectID: NSManagedObjectID?) {

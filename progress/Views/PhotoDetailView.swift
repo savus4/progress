@@ -252,9 +252,18 @@ struct PhotoDetailView: View {
     let onClose: (NSManagedObjectID?) -> Void
     let onCurrentItemChanged: (NSManagedObjectID?) -> Void
 
+    @Environment(\.managedObjectContext) private var viewContext
+
     @State private var selectedIndex: Int
     @State private var resolvedLocationName = "Unknown location"
     @State private var verticalDismissOffset: CGFloat = 0
+    @State private var areControlsVisible = true
+    @State private var isShowingShareSheet = false
+    @State private var shareSheetURLs: [URL] = []
+    @State private var isShowingDeleteConfirmation = false
+    @State private var actionError: PhotoDetailActionError?
+    @State private var isPerformingAction = false
+    @State private var hasSavedCurrentItemToLibrary = false
 
     init(
         items: [PhotoDetailItem],
@@ -279,22 +288,94 @@ struct PhotoDetailView: View {
                 items: items,
                 currentIndex: $selectedIndex
             )
+            .ignoresSafeArea(.container, edges: [.top, .bottom])
         }
         .statusBarHidden()
-        .safeAreaInset(edge: .top) {
-            detailTopBar
+        .navigationBarBackButtonHidden()
+        .toolbarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
+        .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
+        .toolbar(areControlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Back", systemImage: "chevron.left", action: closeCurrentPhoto)
+            }
+
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text(resolvedLocationName)
+                        .font(.subheadline)
+                        .bold()
+                        .lineLimit(1)
+
+                    Text(currentDateText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .multilineTextAlignment(.center)
+                .accessibilityElement(children: .combine)
+            }
+
+            ToolbarItem(placement: .bottomBar) {
+                Button("Share", systemImage: "square.and.arrow.up") {
+                    shareStillPhoto()
+                }
+                .disabled(isPerformingAction || currentItem == nil)
+            }
+
+            ToolbarItem(placement: .bottomBar) {
+                Button(saveToLibraryButtonTitle, systemImage: saveToLibraryButtonSystemImage) {
+                    saveCurrentAssetToPhotoLibrary()
+                }
+                .disabled(isPerformingAction || currentItem == nil || hasSavedCurrentItemToLibrary)
+            }
+
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+
+            ToolbarItem(placement: .bottomBar) {
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                }
+                .disabled(isPerformingAction || currentItem == nil)
+            }
         }
         .offset(y: verticalDismissOffset)
         .simultaneousGesture(verticalDismissGesture)
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                toggleControlsVisibility()
+            }
+        )
+        .animation(.easeInOut(duration: 0.18), value: areControlsVisible)
         .onAppear(perform: clampSelectedIndex)
         .onAppear {
             onCurrentItemChanged(currentItem?.objectID)
         }
         .onChange(of: selectedIndex) { _, _ in
+            hasSavedCurrentItemToLibrary = false
             onCurrentItemChanged(currentItem?.objectID)
         }
         .task(id: currentItem?.objectID) {
             await updateLocationName()
+        }
+        .sheet(isPresented: $isShowingShareSheet) {
+            ActivityView(activityItems: shareSheetURLs.map { $0 as Any })
+        }
+        .alert("Delete Photo?", isPresented: $isShowingDeleteConfirmation, presenting: currentItem) { _ in
+            Button("Delete", role: .destructive) {
+                deleteCurrentPhoto()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This removes the photo from your timeline.")
+        }
+        .alert("Action Failed", isPresented: actionErrorBinding) {
+            Button("OK", role: .cancel) {
+                actionError = nil
+            }
+        } message: {
+            Text(actionError?.message ?? "Something went wrong.")
         }
     }
 
@@ -311,56 +392,6 @@ struct PhotoDetailView: View {
     private var backgroundOpacity: Double {
         let progress = min(max(verticalDismissOffset / 240, 0), 1)
         return 1 - (Double(progress) * 0.22)
-    }
-
-    @ViewBuilder
-    private var detailTopBar: some View {
-        ZStack {
-            HStack {
-                Button(action: { onClose(currentItem?.objectID) }) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 36, height: 36)
-                }
-                .modifier(DetailTopBarButtonModifier())
-                .foregroundStyle(.primary)
-                .accessibilityLabel("Back")
-
-                Spacer()
-
-                Button(action: {}) {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 36, height: 36)
-                }
-                .modifier(DetailTopBarButtonModifier())
-                .foregroundStyle(.primary)
-                .accessibilityLabel("More")
-            }
-
-            VStack(spacing: 1) {
-                Text(resolvedLocationName)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .lineLimit(1)
-
-                Text(currentDateText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .frame(height: Self.topBarBubbleHeight)
-            .modifier(DetailTopBarGlassModifier())
-            .foregroundStyle(.primary)
-            .allowsHitTesting(false)
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
-        .background(.clear)
     }
 
     private var verticalDismissGesture: some Gesture {
@@ -406,9 +437,155 @@ struct PhotoDetailView: View {
         }
     }
 
+    private func toggleControlsVisibility() {
+        guard !isShowingShareSheet else { return }
+        areControlsVisible.toggle()
+    }
+
+    private func closeCurrentPhoto() {
+        onClose(currentItem?.objectID)
+    }
+
     private var currentDateText: String {
         guard let captureDate = currentItem?.captureDate else { return "Unknown date" }
         return Self.dateTimeFormatter.string(from: captureDate)
+    }
+
+    private var saveToLibraryButtonTitle: String {
+        if hasSavedCurrentItemToLibrary {
+            return "Saved to Library"
+        }
+
+        return supportsLivePhoto
+            ? "Save Full Live Photo to Library"
+            : "Save Photo to Library"
+    }
+
+    private var saveToLibraryButtonSystemImage: String {
+        hasSavedCurrentItemToLibrary ? "checkmark" : "arrow.down.to.line"
+    }
+
+    private var supportsLivePhoto: Bool {
+        guard let currentItem else { return false }
+        return currentItem.livePhotoImageAssetName != nil && currentItem.livePhotoVideoAssetName != nil
+    }
+
+    private var actionErrorBinding: Binding<Bool> {
+        Binding(
+            get: { actionError != nil },
+            set: { newValue in
+                if !newValue {
+                    actionError = nil
+                }
+            }
+        )
+    }
+
+    private func shareStillPhoto() {
+        guard !isPerformingAction, let currentItem else { return }
+
+        isPerformingAction = true
+        Task { @MainActor in
+            defer { isPerformingAction = false }
+
+            do {
+                let shareURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
+                    fullImageAssetName: currentItem.fullImageAssetName ?? currentItem.livePhotoImageAssetName
+                )
+                shareSheetURLs = [shareURL]
+                isShowingShareSheet = true
+            } catch {
+                actionError = PhotoDetailActionError(message: "Unable to prepare the still photo for sharing.")
+            }
+        }
+    }
+
+    private func saveCurrentAssetToPhotoLibrary() {
+        guard !isPerformingAction, let currentItem else { return }
+
+        isPerformingAction = true
+        Task { @MainActor in
+            defer { isPerformingAction = false }
+
+            do {
+                let authorizationStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+                    throw PhotoDetailSaveError.photoLibraryAccessDenied
+                }
+
+                if let livePhotoImageAssetName = currentItem.livePhotoImageAssetName,
+                   let livePhotoVideoAssetName = currentItem.livePhotoVideoAssetName {
+                    let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
+                        imageAssetName: livePhotoImageAssetName,
+                        videoAssetName: livePhotoVideoAssetName
+                    )
+                    try await saveToPhotoLibrary(
+                        imageURL: resources.imageURL,
+                        videoURL: resources.videoURL,
+                        metadata: currentItem
+                    )
+                } else {
+                    let imageURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
+                        fullImageAssetName: currentItem.fullImageAssetName ?? currentItem.livePhotoImageAssetName
+                    )
+                    try await saveToPhotoLibrary(imageURL: imageURL, metadata: currentItem)
+                }
+
+                hasSavedCurrentItemToLibrary = true
+            } catch let error as PhotoDetailSaveError {
+                actionError = PhotoDetailActionError(message: error.localizedDescription)
+            } catch {
+                actionError = PhotoDetailActionError(message: "Unable to save this photo to the Photos library.")
+            }
+        }
+    }
+
+    private func deleteCurrentPhoto() {
+        guard !isPerformingAction, let objectID = currentItem?.objectID else { return }
+
+        isPerformingAction = true
+        Task { @MainActor in
+            defer { isPerformingAction = false }
+
+            do {
+                try await PhotoStorageService.shared.deletePhoto(objectID, context: viewContext)
+                onClose(nil)
+            } catch {
+                actionError = PhotoDetailActionError(message: "Unable to delete this photo.")
+            }
+        }
+    }
+
+    private func saveToPhotoLibrary(
+        imageURL: URL,
+        videoURL: URL? = nil,
+        metadata: PhotoDetailItem
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges {
+                let creationRequest = PHAssetCreationRequest.forAsset()
+                creationRequest.creationDate = metadata.captureDate
+                creationRequest.location = photoLocation(for: metadata)
+                creationRequest.addResource(with: .photo, fileURL: imageURL, options: nil)
+
+                if let videoURL {
+                    creationRequest.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
+                }
+            } completionHandler: { success, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if success {
+                    continuation.resume(returning: ())
+                } else {
+                    continuation.resume(throwing: PhotoDetailSaveError.saveFailed)
+                }
+            }
+        }
+    }
+
+    private func photoLocation(for item: PhotoDetailItem) -> CLLocation? {
+        guard item.latitude != 0 || item.longitude != 0 else { return nil }
+        return CLLocation(latitude: item.latitude, longitude: item.longitude)
     }
 
     @MainActor
@@ -504,40 +681,23 @@ struct PhotoDetailView: View {
         formatter.timeStyle = .short
         return formatter
     }()
-
-    static let topBarBubbleHeight: CGFloat = 44
 }
 
-private struct DetailTopBarGlassModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        } else {
-            content
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(.white.opacity(0.16), lineWidth: 1)
-                )
-        }
-    }
+private struct PhotoDetailActionError: Identifiable {
+    let id = UUID()
+    let message: String
 }
 
-private struct DetailTopBarButtonModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content
-                .buttonStyle(.glass(.regular.interactive()))
-        } else {
-            content
-                .buttonStyle(.plain)
-                .frame(width: PhotoDetailView.topBarBubbleHeight, height: PhotoDetailView.topBarBubbleHeight)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(.white.opacity(0.16), lineWidth: 1)
-                )
+private enum PhotoDetailSaveError: LocalizedError {
+    case photoLibraryAccessDenied
+    case saveFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .photoLibraryAccessDenied:
+            "Allow Photos access to save exports to your library."
+        case .saveFailed:
+            "The photo could not be saved to the Photos library."
         }
     }
 }
