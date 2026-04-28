@@ -51,6 +51,11 @@ struct DeleteAllPhotosResult: Sendable {
     }
 }
 
+private struct StoredPendingPhoto {
+    let objectID: NSManagedObjectID
+    let photoID: UUID
+}
+
 enum PhotoUploadState: String, Sendable {
     case pending
     case uploading
@@ -79,6 +84,8 @@ final class PhotoStorageService {
     private enum StorageOptimizationKeys {
         static let thumbnailRecompressionV1Completed = "thumbnail-recompression-v1-completed"
     }
+
+    private static let orphanedPendingUploadGracePeriod: TimeInterval = 7 * 24 * 60 * 60
 
     private let cloudKitService = CloudKitService.shared
     private let thumbnailService = ThumbnailService.shared
@@ -131,30 +138,48 @@ final class PhotoStorageService {
 
         let importFingerprint = try fingerprint(imageData: sourceImageData, livePhotoVideoURL: livePhotoVideoURL)
         let thumbnailData = await thumbnailService.generateThumbnailAsync(from: sourceImageData)
+        let createdAt = Date()
+        let manifestEntry = PendingUploadManifestEntry(
+            photoID: photoID,
+            captureDate: extractedMetadata?.captureDate ?? createdAt,
+            createdAt: createdAt,
+            latitude: resolvedLocation?.latitude ?? 0,
+            longitude: resolvedLocation?.longitude ?? 0,
+            fullImageAssetName: stillAssetName,
+            livePhotoVideoAssetName: livePhotoVideoAssetName
+        )
+        await PendingUploadManifestService.shared.record(manifestEntry)
 
-        let objectID = try await context.perform {
-            let photo = DailyPhoto(context: context)
-            photo.id = photoID
-            photo.captureDate = extractedMetadata?.captureDate ?? Date()
-            photo.createdAt = Date()
-            photo.modifiedAt = Date()
-            photo.latitude = resolvedLocation?.latitude ?? 0
-            photo.longitude = resolvedLocation?.longitude ?? 0
-            photo.thumbnailData = thumbnailData
-            photo.fullImageAssetName = stillAssetName
-            photo.livePhotoImageAssetName = livePhotoVideoAssetName == nil ? nil : stillAssetName
-            photo.livePhotoVideoAssetName = livePhotoVideoAssetName
-            photo.setValue(nil, forKey: "fullImageData")
-            photo.setValue(nil, forKey: "livePhotoImageData")
-            photo.setValue(nil, forKey: "livePhotoVideoData")
-            photo.setValue(importFingerprint, forKey: "importFingerprint")
-            photo.uploadState = .pending
-            photo.uploadAttemptCount = 0
-            photo.uploadErrorMessage = nil
-            photo.uploadRetryAfter = nil
+        let objectID: NSManagedObjectID
+        do {
+            objectID = try await context.perform {
+                let photo = DailyPhoto(context: context)
+                photo.id = photoID
+                photo.captureDate = manifestEntry.captureDate
+                photo.createdAt = createdAt
+                photo.modifiedAt = createdAt
+                photo.latitude = manifestEntry.latitude
+                photo.longitude = manifestEntry.longitude
+                photo.thumbnailData = thumbnailData
+                photo.fullImageAssetName = stillAssetName
+                photo.livePhotoImageAssetName = livePhotoVideoAssetName == nil ? nil : stillAssetName
+                photo.livePhotoVideoAssetName = livePhotoVideoAssetName
+                photo.setValue(nil, forKey: "fullImageData")
+                photo.setValue(nil, forKey: "livePhotoImageData")
+                photo.setValue(nil, forKey: "livePhotoVideoData")
+                photo.setValue(importFingerprint, forKey: "importFingerprint")
+                photo.uploadState = .pending
+                photo.uploadAttemptCount = 0
+                photo.uploadErrorMessage = nil
+                photo.uploadRetryAfter = nil
 
-            try context.save()
-            return photo.objectID
+                try context.save()
+                return photo.objectID
+            }
+            await PendingUploadManifestService.shared.remove(photoID: photoID)
+        } catch {
+            await PendingUploadManifestService.shared.remove(photoID: photoID)
+            throw error
         }
         Task.detached(priority: .utility) {
             await PhotoUploadService.shared.enqueuePendingUploads()
@@ -166,7 +191,7 @@ final class PhotoStorageService {
         imageData: Data,
         context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
-        let objectID = try await makeImportedPhoto(
+        let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: nil,
             context: context
@@ -174,7 +199,7 @@ final class PhotoStorageService {
         Task.detached(priority: .utility) {
             await PhotoUploadService.shared.enqueuePendingUploads()
         }
-        return objectID
+        return storedPhoto.objectID
     }
 
     func saveImportedLivePhoto(
@@ -182,7 +207,7 @@ final class PhotoStorageService {
         videoURL: URL,
         context: NSManagedObjectContext
     ) async throws -> NSManagedObjectID {
-        let objectID = try await makeImportedPhoto(
+        let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: videoURL,
             context: context
@@ -190,7 +215,7 @@ final class PhotoStorageService {
         Task.detached(priority: .utility) {
             await PhotoUploadService.shared.enqueuePendingUploads()
         }
-        return objectID
+        return storedPhoto.objectID
     }
 
     func saveImportedPhotos(
@@ -214,6 +239,7 @@ final class PhotoStorageService {
         var pendingInsertCount = 0
         var failureMessages: [String] = []
         var payloadFingerprints: [Int: String] = [:]
+        var pendingManifestPhotoIDs: [UUID] = []
 
         func recordFailure(_ message: String) {
             if failureMessages.count < 20 {
@@ -255,7 +281,7 @@ final class PhotoStorageService {
                     continue
                 }
 
-                _ = try await makeImportedPhoto(
+                let storedPhoto = try await makeImportedPhoto(
                     imageData: payload.imageData,
                     livePhotoVideoURL: payload.livePhotoVideoURL,
                     context: importContext,
@@ -263,6 +289,7 @@ final class PhotoStorageService {
                 )
                 importedCount += 1
                 pendingInsertCount += 1
+                pendingManifestPhotoIDs.append(storedPhoto.photoID)
                 knownFingerprints.insert(fingerprint)
 
                 if importContext.hasChanges, pendingInsertCount >= effectiveBatchSize {
@@ -273,7 +300,11 @@ final class PhotoStorageService {
                                 importContext.reset()
                             }
                         }
+                        for photoID in pendingManifestPhotoIDs {
+                            await PendingUploadManifestService.shared.remove(photoID: photoID)
+                        }
                         pendingInsertCount = 0
+                        pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
                     } catch {
                         let message = "batch-save payload=\(index) pending=\(pendingInsertCount): \(error.localizedDescription)"
                         logger.error("\(message, privacy: .public)")
@@ -281,6 +312,10 @@ final class PhotoStorageService {
                         importedCount -= pendingInsertCount
                         failedCount += pendingInsertCount
                         pendingInsertCount = 0
+                        for photoID in pendingManifestPhotoIDs {
+                            await PendingUploadManifestService.shared.remove(photoID: photoID)
+                        }
+                        pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
                         await importContext.perform {
                             importContext.rollback()
                         }
@@ -307,6 +342,10 @@ final class PhotoStorageService {
                         importContext.reset()
                     }
                 }
+                for photoID in pendingManifestPhotoIDs {
+                    await PendingUploadManifestService.shared.remove(photoID: photoID)
+                }
+                pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
             }
         } catch {
             let message = "final-batch-save pending=\(pendingInsertCount): \(error.localizedDescription)"
@@ -314,6 +353,10 @@ final class PhotoStorageService {
             recordFailure(message)
             importedCount -= pendingInsertCount
             failedCount += pendingInsertCount
+            for photoID in pendingManifestPhotoIDs {
+                await PendingUploadManifestService.shared.remove(photoID: photoID)
+            }
+            pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
             await importContext.perform {
                 importContext.rollback()
             }
@@ -594,7 +637,10 @@ final class PhotoStorageService {
         )
     }
 
-    func purgeOrphanedAssets(context: NSManagedObjectContext) async {
+    func purgeOrphanedAssets(
+        context: NSManagedObjectContext,
+        ignoreGracePeriod: Bool = false
+    ) async {
         let referencedAssetNames: Set<String>
 
         do {
@@ -632,9 +678,48 @@ final class PhotoStorageService {
         let orphanedAssetNames = cachedAssetNames.subtracting(referencedAssetNames)
         guard !orphanedAssetNames.isEmpty else { return }
 
+        let assetDirectoryURLs = cloudKitService.localAssetDirectoryURLs()
+        let fileManager = FileManager.default
+        let gracePeriodCutoff = Date().addingTimeInterval(-Self.orphanedPendingUploadGracePeriod)
+
+        var deletedCount = 0
+        var deferredCount = 0
+
         for assetName in orphanedAssetNames {
+            let stagedURL = assetDirectoryURLs.staging.appendingPathComponent(assetName)
+            let shouldKeepRecentOrphan: Bool
+
+            if ignoreGracePeriod {
+                shouldKeepRecentOrphan = false
+            } else if let values = try? stagedURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                      let modificationDate = values.contentModificationDate {
+                shouldKeepRecentOrphan = modificationDate > gracePeriodCutoff
+            } else {
+                shouldKeepRecentOrphan = fileManager.fileExists(atPath: stagedURL.path)
+            }
+
+            if shouldKeepRecentOrphan {
+                deferredCount += 1
+                continue
+            }
+
             cloudKitService.deleteAsset(named: assetName)
+            deletedCount += 1
         }
+
+        if deferredCount > 0 {
+            logger.log(
+                "orphaned-asset-purge-deferred recent=\(deferredCount, privacy: .public) deleted=\(deletedCount, privacy: .public)"
+            )
+        }
+    }
+
+    func recoverPendingUploadsFromManifest(context: NSManagedObjectContext) async -> Int {
+        await PendingUploadManifestService.shared.recoverPendingUploads(
+            context: context,
+            cloudKitService: cloudKitService,
+            thumbnailService: thumbnailService
+        )
     }
 
     func optimizeStoredThumbnailsIfNeeded(
@@ -1139,7 +1224,7 @@ final class PhotoStorageService {
         livePhotoVideoURL: URL?,
         context: NSManagedObjectContext,
         saveChanges: Bool = true
-    ) async throws -> NSManagedObjectID {
+    ) async throws -> StoredPendingPhoto {
         let photoID = UUID()
         let exifMetadata = exifMetadata(from: imageData)
         let thumbnailData = await thumbnailService.generateThumbnailAsync(from: imageData)
@@ -1160,31 +1245,51 @@ final class PhotoStorageService {
         } else {
             videoAssetName = nil
         }
+        let createdAt = Date()
+        let manifestEntry = PendingUploadManifestEntry(
+            photoID: photoID,
+            captureDate: exifMetadata?.captureDate ?? createdAt,
+            createdAt: createdAt,
+            latitude: exifMetadata?.location?.latitude ?? 0,
+            longitude: exifMetadata?.location?.longitude ?? 0,
+            fullImageAssetName: imageAssetName,
+            livePhotoVideoAssetName: videoAssetName
+        )
+        await PendingUploadManifestService.shared.record(manifestEntry)
 
-        return try await context.perform {
-            let photo = DailyPhoto(context: context)
-            photo.id = photoID
-            photo.captureDate = exifMetadata?.captureDate ?? Date()
-            photo.createdAt = Date()
-            photo.modifiedAt = Date()
-            photo.latitude = exifMetadata?.location?.latitude ?? 0
-            photo.longitude = exifMetadata?.location?.longitude ?? 0
-            photo.thumbnailData = thumbnailData
-            photo.fullImageAssetName = imageAssetName
-            photo.livePhotoImageAssetName = videoAssetName == nil ? nil : imageAssetName
-            photo.livePhotoVideoAssetName = videoAssetName
-            photo.setValue(nil, forKey: "fullImageData")
-            photo.setValue(nil, forKey: "livePhotoImageData")
-            photo.setValue(nil, forKey: "livePhotoVideoData")
-            photo.setValue(importFingerprint, forKey: "importFingerprint")
-            photo.uploadState = .pending
-            photo.uploadAttemptCount = 0
-            photo.uploadErrorMessage = nil
-            photo.uploadRetryAfter = nil
-            if saveChanges {
-                try context.save()
+        do {
+            let objectID = try await context.perform {
+                let photo = DailyPhoto(context: context)
+                photo.id = photoID
+                photo.captureDate = manifestEntry.captureDate
+                photo.createdAt = createdAt
+                photo.modifiedAt = createdAt
+                photo.latitude = manifestEntry.latitude
+                photo.longitude = manifestEntry.longitude
+                photo.thumbnailData = thumbnailData
+                photo.fullImageAssetName = imageAssetName
+                photo.livePhotoImageAssetName = videoAssetName == nil ? nil : imageAssetName
+                photo.livePhotoVideoAssetName = videoAssetName
+                photo.setValue(nil, forKey: "fullImageData")
+                photo.setValue(nil, forKey: "livePhotoImageData")
+                photo.setValue(nil, forKey: "livePhotoVideoData")
+                photo.setValue(importFingerprint, forKey: "importFingerprint")
+                photo.uploadState = .pending
+                photo.uploadAttemptCount = 0
+                photo.uploadErrorMessage = nil
+                photo.uploadRetryAfter = nil
+                if saveChanges {
+                    try context.save()
+                }
+                return photo.objectID
             }
-            return photo.objectID
+            if saveChanges {
+                await PendingUploadManifestService.shared.remove(photoID: photoID)
+            }
+            return StoredPendingPhoto(objectID: objectID, photoID: photoID)
+        } catch {
+            await PendingUploadManifestService.shared.remove(photoID: photoID)
+            throw error
         }
     }
 
@@ -1249,6 +1354,206 @@ private struct PendingRemoteAssetDeletion: Codable, Sendable {
     var attemptCount: Int
     var retryAfter: Date?
     var lastErrorDescription: String?
+}
+
+struct PendingUploadManifestEntry: Codable, Sendable {
+    let photoID: UUID
+    let captureDate: Date
+    let createdAt: Date
+    let latitude: Double
+    let longitude: Double
+    let fullImageAssetName: String
+    let livePhotoVideoAssetName: String?
+}
+
+actor PendingUploadManifestService {
+    static let shared = PendingUploadManifestService()
+
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PendingUploadManifest")
+    private let storageURL: URL
+
+    private var didLoadEntries = false
+    private var entriesByPhotoID: [UUID: PendingUploadManifestEntry] = [:]
+
+    init() {
+        storageURL = Self.makeStorageURL()
+    }
+
+    func record(_ entry: PendingUploadManifestEntry) {
+        loadEntriesIfNeeded()
+        entriesByPhotoID[entry.photoID] = entry
+        persistEntries()
+    }
+
+    func remove(photoID: UUID) {
+        loadEntriesIfNeeded()
+        guard entriesByPhotoID.removeValue(forKey: photoID) != nil else { return }
+        persistEntries()
+    }
+
+    func recoverPendingUploads(
+        context: NSManagedObjectContext,
+        cloudKitService: CloudKitService,
+        thumbnailService: ThumbnailService
+    ) async -> Int {
+        loadEntriesIfNeeded()
+        guard !entriesByPhotoID.isEmpty else { return 0 }
+
+        var recoveredCount = 0
+        let entries = entriesByPhotoID.values.sorted { $0.createdAt < $1.createdAt }
+
+        for entry in entries {
+            if await photoAlreadyExists(for: entry, context: context) {
+                entriesByPhotoID.removeValue(forKey: entry.photoID)
+                continue
+            }
+
+            guard let imageURL = await MainActor.run(body: {
+                cloudKitService.stagedAssetURL(named: entry.fullImageAssetName)
+            }),
+                  let imageData = try? Data(contentsOf: imageURL) else {
+                logger.error(
+                    "manifest-recovery-missing-still photo=\(entry.photoID.uuidString, privacy: .public) still=\(entry.fullImageAssetName, privacy: .public)"
+                )
+                entriesByPhotoID.removeValue(forKey: entry.photoID)
+                continue
+            }
+
+            let videoURL: URL? = if let videoAssetName = entry.livePhotoVideoAssetName {
+                await MainActor.run(body: {
+                    cloudKitService.stagedAssetURL(named: videoAssetName)
+                })
+            } else {
+                nil
+            }
+
+            if entry.livePhotoVideoAssetName != nil, videoURL == nil {
+                logger.error(
+                    "manifest-recovery-missing-video photo=\(entry.photoID.uuidString, privacy: .public) video=\(entry.livePhotoVideoAssetName ?? "nil", privacy: .public)"
+                )
+                entriesByPhotoID.removeValue(forKey: entry.photoID)
+                continue
+            }
+
+            let thumbnailData = await thumbnailService.generateThumbnailAsync(from: imageData)
+            let importFingerprint: String
+            do {
+                importFingerprint = try Self.makeFingerprint(
+                    imageData: imageData,
+                    videoURL: videoURL
+                )
+            } catch {
+                logger.error(
+                    "manifest-recovery-fingerprint photo=\(entry.photoID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+                continue
+            }
+
+            do {
+                try await context.perform {
+                    let photo = DailyPhoto(context: context)
+                    photo.id = entry.photoID
+                    photo.captureDate = entry.captureDate
+                    photo.createdAt = entry.createdAt
+                    photo.modifiedAt = entry.createdAt
+                    photo.latitude = entry.latitude
+                    photo.longitude = entry.longitude
+                    photo.thumbnailData = thumbnailData
+                    photo.fullImageAssetName = entry.fullImageAssetName
+                    photo.livePhotoImageAssetName = entry.livePhotoVideoAssetName == nil ? nil : entry.fullImageAssetName
+                    photo.livePhotoVideoAssetName = entry.livePhotoVideoAssetName
+                    photo.setValue(nil, forKey: "fullImageData")
+                    photo.setValue(nil, forKey: "livePhotoImageData")
+                    photo.setValue(nil, forKey: "livePhotoVideoData")
+                    photo.setValue(importFingerprint, forKey: "importFingerprint")
+                    photo.uploadState = .pending
+                    photo.uploadAttemptCount = 0
+                    photo.uploadErrorMessage = nil
+                    photo.uploadRetryAfter = nil
+                    try context.save()
+                }
+                entriesByPhotoID.removeValue(forKey: entry.photoID)
+                recoveredCount += 1
+                logger.log("manifest-recovery-succeeded photo=\(entry.photoID.uuidString, privacy: .public)")
+            } catch {
+                logger.error(
+                    "manifest-recovery-save photo=\(entry.photoID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        persistEntries()
+        return recoveredCount
+    }
+
+    private func photoAlreadyExists(for entry: PendingUploadManifestEntry, context: NSManagedObjectContext) async -> Bool {
+        (try? await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            request.fetchLimit = 1
+            request.predicate = NSPredicate(
+                format: "id == %@ OR fullImageAssetName == %@ OR livePhotoVideoAssetName == %@",
+                entry.photoID as CVarArg,
+                entry.fullImageAssetName,
+                entry.livePhotoVideoAssetName ?? ""
+            )
+            return try context.count(for: request) > 0
+        }) ?? false
+    }
+
+    private func loadEntriesIfNeeded() {
+        guard !didLoadEntries else { return }
+        defer { didLoadEntries = true }
+
+        guard let data = try? Data(contentsOf: storageURL),
+              let entries = try? JSONDecoder().decode([PendingUploadManifestEntry].self, from: data) else {
+            return
+        }
+
+        entriesByPhotoID = Dictionary(uniqueKeysWithValues: entries.map { ($0.photoID, $0) })
+    }
+
+    private func persistEntries() {
+        let entries = entriesByPhotoID.values.sorted { $0.createdAt < $1.createdAt }
+
+        if entries.isEmpty {
+            try? FileManager.default.removeItem(at: storageURL)
+            return
+        }
+
+        do {
+            let data = try JSONEncoder().encode(entries)
+            try data.write(to: storageURL, options: .atomic)
+        } catch {
+            logger.error("manifest-persist: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func makeFingerprint(imageData: Data, videoURL: URL?) throws -> String {
+        let imageDigest = SHA256.hash(data: imageData).map { String(format: "%02x", $0) }.joined()
+
+        if let videoURL {
+            let videoData = try Data(contentsOf: videoURL)
+            let videoDigest = SHA256.hash(data: videoData).map { String(format: "%02x", $0) }.joined()
+            return "\(imageDigest):\(videoDigest)"
+        }
+
+        return imageDigest
+    }
+
+    private static func makeStorageURL() -> URL {
+        let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "progress"
+        let directoryURL = baseURL
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("PendingUploadManifest", isDirectory: true)
+
+        if !FileManager.default.fileExists(atPath: directoryURL.path) {
+            try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        }
+
+        return directoryURL.appendingPathComponent("pending-uploads.json", isDirectory: false)
+    }
 }
 
 actor RemoteAssetDeletionService {
@@ -1765,14 +2070,16 @@ actor PhotoUploadService {
             "upload-candidate-start photo=\(candidate.photoID.uuidString, privacy: .public) still=\(candidate.stillAssetName, privacy: .public) video=\(candidate.videoAssetName ?? "nil", privacy: .public) attempt=\(candidate.attemptCount, privacy: .public)"
         )
 
-        try await cloudKitService.uploadStagedAsset(
+        try await uploadOrReconcileRemoteAsset(
+            cloudKitService: cloudKitService,
             named: candidate.stillAssetName,
             photoID: candidate.photoID,
             role: .still
         )
 
         if let videoAssetName = candidate.videoAssetName {
-            try await cloudKitService.uploadStagedAsset(
+            try await uploadOrReconcileRemoteAsset(
+                cloudKitService: cloudKitService,
                 named: videoAssetName,
                 photoID: candidate.photoID,
                 role: .livePhotoVideo
@@ -1780,6 +2087,29 @@ actor PhotoUploadService {
         }
 
         logger.log("upload-candidate-finished photo=\(candidate.photoID.uuidString, privacy: .public)")
+    }
+
+    private func uploadOrReconcileRemoteAsset(
+        cloudKitService: CloudKitService,
+        named assetName: String,
+        photoID: UUID,
+        role: PhotoAssetRole
+    ) async throws {
+        do {
+            try await cloudKitService.uploadStagedAsset(
+                named: assetName,
+                photoID: photoID,
+                role: role
+            )
+        } catch let error as CloudKitError where error == .assetNotFound {
+            if try await cloudKitService.remoteAssetExists(named: assetName) {
+                logger.log(
+                    "upload-reconciled-remote-asset photo=\(photoID.uuidString, privacy: .public) name=\(assetName, privacy: .public) role=\(role.rawValue, privacy: .public)"
+                )
+                return
+            }
+            throw error
+        }
     }
 
     private func claimNextPendingUpload() async -> PendingPhotoUpload? {

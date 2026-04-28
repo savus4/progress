@@ -8,6 +8,7 @@
 import SwiftUI
 import CoreData
 import UserNotifications
+import OSLog
 
 @main
 struct progressApp: App {
@@ -46,6 +47,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         PhotoUploadService.registerBackgroundTask()
 
         Task {
+            let context = await MainActor.run {
+                PersistenceController.shared.makeBackgroundContext()
+            }
+            let recoveredCount = await PhotoStorageService.shared.recoverPendingUploadsFromManifest(context: context)
+            if recoveredCount > 0 {
+                let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "AppLifecycle")
+                logger.log("pending-upload-manifest-recovered count=\(recoveredCount, privacy: .public)")
+            }
             await PhotoUploadService.shared.start()
             await RemoteAssetDeletionService.shared.start()
         }

@@ -657,7 +657,10 @@ struct NotificationSettingsView: View {
         Task { @MainActor in
             do {
                 let result = try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
-                await PhotoStorageService.shared.purgeOrphanedAssets(context: viewContext)
+                await PhotoStorageService.shared.purgeOrphanedAssets(
+                    context: viewContext,
+                    ignoreGracePeriod: true
+                )
                 try await PersistenceController.shared.rebuildPersistentStore()
                 deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()

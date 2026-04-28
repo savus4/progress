@@ -242,6 +242,34 @@ final class CloudKitService {
         logger.log("upload-staged-asset-finished name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public)")
     }
 
+    func remoteAssetExists(named assetName: String) async throws -> Bool {
+        let recordID = CKRecord.ID(recordName: assetName)
+
+        do {
+            let results = try await privateDatabase.records(for: [recordID], desiredKeys: [RecordKey.photoID])
+            guard let result = results[recordID] else {
+                return false
+            }
+
+            switch result {
+            case .success:
+                return true
+            case .failure(let error):
+                let normalizedError = cloudKitError(for: error)
+                if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
+                    return false
+                }
+                throw normalizedError
+            }
+        } catch {
+            let normalizedError = cloudKitError(for: error)
+            if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
+                return false
+            }
+            throw normalizedError
+        }
+    }
+
     func deleteAsset(named assetName: String) {
         let stagedURL = stagingFileURL(for: assetName)
         if fileManager.fileExists(atPath: stagedURL.path) {
