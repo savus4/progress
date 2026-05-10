@@ -952,10 +952,10 @@ private struct PhotoDetailPageView: View {
     private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
 
     @State private var displayedImage: UIImage?
-    @State private var isLoadingFullImage = false
     @State private var isLoadingLivePhotoResources = false
     @State private var isDownloadingLivePhotoAsset = false
     @State private var livePhotoResources: LivePhotoResources?
+    @State private var representedObjectID: NSManagedObjectID?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1002,32 +1002,35 @@ private struct PhotoDetailPageView: View {
 
     @MainActor
     private func loadImage() async {
+        let objectID = item.objectID
+        if representedObjectID != objectID {
+            representedObjectID = objectID
+            displayedImage = nil
+        }
+
         livePhotoResources = nil
         isLoadingLivePhotoResources = false
         syncLivePhotoDownloadState()
 
-        if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: item.objectID) {
+        if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: objectID) {
             displayedImage = cachedThumbnail
         } else if displayedImage == nil {
-            let thumbnailData = await Self.thumbnailDataProvider.thumbnailData(for: item.objectID)
-            guard !Task.isCancelled else { return }
+            let thumbnailData = await Self.thumbnailDataProvider.thumbnailData(for: objectID)
+            guard !Task.isCancelled, representedObjectID == objectID else { return }
 
             if let decodedThumbnail = await DecodedThumbnailCache.shared.image(
-                for: item.objectID,
+                for: objectID,
                 data: thumbnailData
             ) {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, representedObjectID == objectID else { return }
                 displayedImage = decodedThumbnail
             }
         }
 
-        guard !isLoadingFullImage else { return }
-        isLoadingFullImage = true
-        defer { isLoadingFullImage = false }
-
         guard let fullImage = try? await PhotoStorageService.shared.loadFullImage(named: item.fullImageAssetName) else {
             return
         }
+        guard !Task.isCancelled, representedObjectID == objectID else { return }
 
         displayedImage = fullImage
 
@@ -1048,7 +1051,7 @@ private struct PhotoDetailPageView: View {
         ) else {
             return
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, representedObjectID == objectID else { return }
 
         livePhotoResources = LivePhotoResources(
             imageURL: resources.imageURL,
@@ -1429,6 +1432,7 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
                 item: item,
                 isCurrentPage: isCurrentPage
             )
+            .id(item.objectID)
             .background(Color.black)
         )
     }
