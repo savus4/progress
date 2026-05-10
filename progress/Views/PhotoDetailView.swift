@@ -290,63 +290,23 @@ struct PhotoDetailView: View {
             )
             .ignoresSafeArea(.container, edges: [.top, .bottom])
         }
-        .statusBarHidden()
-        .navigationBarBackButtonHidden()
-        .toolbarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar, .bottomBar)
-        .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
-        .toolbar(areControlsVisible ? .visible : .hidden, for: .navigationBar, .bottomBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Back", systemImage: "chevron.left", action: closeCurrentPhoto)
-            }
-
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text(resolvedLocationName)
-                        .font(.subheadline)
-                        .bold()
-                        .lineLimit(1)
-
-                    Text(currentDateText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .multilineTextAlignment(.center)
-                .accessibilityElement(children: .combine)
-            }
-
-            ToolbarItem(placement: .bottomBar) {
-                Button("Share", systemImage: "square.and.arrow.up") {
-                    shareStillPhoto()
-                }
-                .disabled(isPerformingAction || currentItem == nil)
-            }
-
-            ToolbarItem(placement: .bottomBar) {
-                Button(saveToLibraryButtonTitle, systemImage: saveToLibraryButtonSystemImage) {
-                    saveCurrentAssetToPhotoLibrary()
-                }
-                .disabled(isPerformingAction || currentItem == nil || hasSavedCurrentItemToLibrary)
-            }
-
-            ToolbarSpacer(.flexible, placement: .bottomBar)
-
-            ToolbarItem(placement: .bottomBar) {
-                Button("Delete", systemImage: "trash", role: .destructive) {
-                    isShowingDeleteConfirmation = true
-                }
-                .disabled(isPerformingAction || currentItem == nil)
-            }
+        .background {
+            PhotoDetailBottomToolbarConfigurator(
+                isVisible: areControlsVisible,
+                locationTitle: resolvedLocationName,
+                dateTitle: currentDateText,
+                isShareEnabled: !isPerformingAction && currentItem != nil,
+                isSaveEnabled: !isPerformingAction && currentItem != nil && !hasSavedCurrentItemToLibrary,
+                isDeleteEnabled: !isPerformingAction && currentItem != nil,
+                saveImageSystemName: saveToLibraryButtonSystemImage,
+                onClose: closeCurrentPhoto,
+                onShare: shareStillPhoto,
+                onSave: saveCurrentAssetToPhotoLibrary,
+                onDelete: { isShowingDeleteConfirmation = true }
+            )
         }
         .offset(y: verticalDismissOffset)
         .simultaneousGesture(verticalDismissGesture)
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                toggleControlsVisibility()
-            }
-        )
         .animation(.easeInOut(duration: 0.18), value: areControlsVisible)
         .onAppear(perform: clampSelectedIndex)
         .onAppear {
@@ -686,6 +646,289 @@ struct PhotoDetailView: View {
 private struct PhotoDetailActionError: Identifiable {
     let id = UUID()
     let message: String
+}
+
+private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentable {
+    let isVisible: Bool
+    let locationTitle: String
+    let dateTitle: String
+    let isShareEnabled: Bool
+    let isSaveEnabled: Bool
+    let isDeleteEnabled: Bool
+    let saveImageSystemName: String
+    let onClose: () -> Void
+    let onShare: () -> Void
+    let onSave: () -> Void
+    let onDelete: () -> Void
+
+    func makeUIViewController(context: Context) -> ToolbarConfigViewController {
+        ToolbarConfigViewController()
+    }
+
+    func updateUIViewController(_ controller: ToolbarConfigViewController, context: Context) {
+        controller.configuration = .init(
+            isVisible: isVisible,
+            locationTitle: locationTitle,
+            dateTitle: dateTitle,
+            isShareEnabled: isShareEnabled,
+            isSaveEnabled: isSaveEnabled,
+            isDeleteEnabled: isDeleteEnabled,
+            saveImageSystemName: saveImageSystemName,
+            onClose: onClose,
+            onShare: onShare,
+            onSave: onSave,
+            onDelete: onDelete
+        )
+        controller.applyConfigurationIfPossible()
+    }
+
+    static func dismantleUIViewController(_ controller: ToolbarConfigViewController, coordinator: ()) {
+        controller.clearToolbar()
+    }
+}
+
+@MainActor
+private final class ToolbarConfigViewController: UIViewController {
+    struct Configuration: Equatable {
+        let isVisible: Bool
+        let locationTitle: String
+        let dateTitle: String
+        let isShareEnabled: Bool
+        let isSaveEnabled: Bool
+        let isDeleteEnabled: Bool
+        let saveImageSystemName: String
+        var onClose: () -> Void
+        var onShare: () -> Void
+        var onSave: () -> Void
+        var onDelete: () -> Void
+
+        static func == (lhs: Configuration, rhs: Configuration) -> Bool {
+            lhs.isVisible == rhs.isVisible &&
+            lhs.locationTitle == rhs.locationTitle &&
+            lhs.dateTitle == rhs.dateTitle &&
+            lhs.isShareEnabled == rhs.isShareEnabled &&
+            lhs.isSaveEnabled == rhs.isSaveEnabled &&
+            lhs.isDeleteEnabled == rhs.isDeleteEnabled &&
+            lhs.saveImageSystemName == rhs.saveImageSystemName
+        }
+    }
+
+    var configuration: Configuration?
+    private var appliedConfiguration: Configuration?
+    private weak var configuredViewController: UIViewController?
+    private weak var configuredNavigationController: UINavigationController?
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        applyConfigurationIfPossible()
+    }
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        applyConfigurationIfPossible()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        clearToolbar()
+    }
+
+    func applyConfigurationIfPossible() {
+        guard let configuration,
+              let parentViewController = parent,
+              let navigationController = parentViewController.navigationController else { return }
+
+        let chromeViewController = navigationController.topViewController ?? parentViewController
+
+        guard appliedConfiguration != configuration || configuredViewController !== chromeViewController else { return }
+        appliedConfiguration = configuration
+        configuredViewController = chromeViewController
+        configuredNavigationController = navigationController
+
+        chromeViewController.navigationItem.hidesBackButton = true
+        chromeViewController.navigationItem.leftItemsSupplementBackButton = false
+        chromeViewController.navigationItem.leftBarButtonItem = closeItem()
+        chromeViewController.navigationItem.titleView = makeTitleView(configuration: configuration)
+        chromeViewController.navigationItem.rightBarButtonItems = []
+
+        applyNavigationAppearance(to: navigationController)
+
+        let share = Self.compactBarButtonItem(
+            systemName: "square.and.arrow.up",
+            accessibilityLabel: "Share",
+            target: self,
+            action: #selector(shareTapped)
+        )
+        share.isEnabled = configuration.isShareEnabled
+
+        let save = Self.compactBarButtonItem(
+            systemName: configuration.saveImageSystemName,
+            accessibilityLabel: "Save to Library",
+            target: self,
+            action: #selector(saveTapped)
+        )
+        save.isEnabled = configuration.isSaveEnabled
+        if #available(iOS 26.0, *) {
+            share.sharesBackground = true
+            save.sharesBackground = true
+        }
+
+        let delete = Self.compactBarButtonItem(
+            systemName: "trash",
+            accessibilityLabel: "Delete",
+            target: self,
+            action: #selector(deleteTapped)
+        )
+        delete.tintColor = .systemRed
+        delete.isEnabled = configuration.isDeleteEnabled
+
+        let items: [UIBarButtonItem] = [
+            share,
+            save,
+            Self.flexibleSpaceItem(),
+            delete
+        ]
+
+        chromeViewController.setToolbarItems(items, animated: false)
+        navigationController.navigationBar.tintColor = .white
+        navigationController.toolbar.tintColor = .white
+        navigationController.setNavigationBarHidden(false, animated: false)
+        navigationController.setToolbarHidden(false, animated: false)
+        setChromeVisible(configuration.isVisible, in: navigationController)
+    }
+
+    func clearToolbar() {
+        guard let configuredViewController,
+              let configuredNavigationController else { return }
+
+        appliedConfiguration = nil
+        self.configuredViewController = nil
+        self.configuredNavigationController = nil
+        configuredViewController.navigationItem.leftBarButtonItem = nil
+        configuredViewController.navigationItem.titleView = nil
+        configuredViewController.navigationItem.rightBarButtonItems = []
+        configuredViewController.setToolbarItems([], animated: false)
+        configuredNavigationController.navigationBar.alpha = 1
+        configuredNavigationController.toolbar.alpha = 1
+        configuredNavigationController.navigationBar.isUserInteractionEnabled = true
+        configuredNavigationController.toolbar.isUserInteractionEnabled = true
+    }
+
+    private func applyNavigationAppearance(to navigationController: UINavigationController) {
+        let navigationAppearance = UINavigationBarAppearance()
+        navigationAppearance.configureWithDefaultBackground()
+        navigationAppearance.backgroundEffect = UIBlurEffect(style: .systemChromeMaterialDark)
+        navigationAppearance.backgroundColor = .clear
+        navigationAppearance.shadowColor = .clear
+
+        navigationController.navigationBar.standardAppearance = navigationAppearance
+        navigationController.navigationBar.compactAppearance = navigationAppearance
+        navigationController.navigationBar.scrollEdgeAppearance = navigationAppearance
+
+        let toolbarAppearance = UIToolbarAppearance()
+        toolbarAppearance.configureWithDefaultBackground()
+        toolbarAppearance.backgroundEffect = UIBlurEffect(style: .systemChromeMaterialDark)
+        toolbarAppearance.backgroundColor = .clear
+        toolbarAppearance.shadowColor = .clear
+
+        navigationController.toolbar.standardAppearance = toolbarAppearance
+        navigationController.toolbar.compactAppearance = toolbarAppearance
+        navigationController.toolbar.scrollEdgeAppearance = toolbarAppearance
+    }
+
+    private static func flexibleSpaceItem() -> UIBarButtonItem {
+        UIBarButtonItem(systemItem: .flexibleSpace)
+    }
+
+    private func closeItem() -> UIBarButtonItem {
+        let image = UIImage(systemName: "chevron.left")?.applyingSymbolConfiguration(
+            UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        )
+        let item = UIBarButtonItem(
+            image: image,
+            style: .plain,
+            target: self,
+            action: #selector(closeTapped)
+        )
+        item.accessibilityLabel = "Back"
+        return item
+    }
+
+    private static func compactBarButtonItem(
+        systemName: String,
+        accessibilityLabel: String,
+        target: Any?,
+        action: Selector
+    ) -> UIBarButtonItem {
+        let image = UIImage(systemName: systemName)?.applyingSymbolConfiguration(
+            UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        )
+        let item = UIBarButtonItem(
+            image: image,
+            style: .plain,
+            target: target,
+            action: action
+        )
+        item.accessibilityLabel = accessibilityLabel
+        return item
+    }
+
+    @objc private func closeTapped() {
+        configuration?.onClose()
+    }
+
+    @objc private func shareTapped() {
+        configuration?.onShare()
+    }
+
+    @objc private func saveTapped() {
+        configuration?.onSave()
+    }
+
+    @objc private func deleteTapped() {
+        configuration?.onDelete()
+    }
+
+    private func setChromeVisible(_ isVisible: Bool, in navigationController: UINavigationController) {
+        let alpha: CGFloat = isVisible ? 1 : 0
+        navigationController.navigationBar.isUserInteractionEnabled = isVisible
+        navigationController.toolbar.isUserInteractionEnabled = isVisible
+
+        UIViewPropertyAnimator.runningPropertyAnimator(
+            withDuration: 0.18,
+            delay: 0,
+            options: [.beginFromCurrentState, .curveEaseInOut]
+        ) {
+            navigationController.navigationBar.alpha = alpha
+            navigationController.toolbar.alpha = alpha
+        }
+    }
+
+    private func makeTitleView(configuration: Configuration) -> UIView {
+        let titleLabel = UILabel()
+        titleLabel.font = .preferredFont(forTextStyle: .subheadline)
+        titleLabel.adjustsFontForContentSizeCategory = true
+        titleLabel.textColor = .white
+        titleLabel.textAlignment = .center
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.text = configuration.locationTitle
+
+        let subtitleLabel = UILabel()
+        subtitleLabel.font = .preferredFont(forTextStyle: .caption1)
+        subtitleLabel.adjustsFontForContentSizeCategory = true
+        subtitleLabel.textColor = .secondaryLabel
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.text = configuration.dateTitle
+
+        let stackView = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
+        stackView.axis = .vertical
+        stackView.alignment = .center
+        stackView.spacing = 1
+        stackView.isLayoutMarginsRelativeArrangement = true
+        stackView.directionalLayoutMargins = .init(top: 0, leading: 8, bottom: 0, trailing: 8)
+        return stackView
+    }
 }
 
 private enum PhotoDetailSaveError: LocalizedError {
@@ -1057,7 +1300,8 @@ private final class PhotoDetailPagingViewController: UIViewController {
 
             cell.configure(
                 with: items[indexPath.item],
-                isCurrentPage: indexPath.item == currentIndex
+                isCurrentPage: indexPath.item == currentIndex,
+                parentViewController: self
             )
         }
     }
@@ -1081,7 +1325,8 @@ extension PhotoDetailPagingViewController: UICollectionViewDataSource, UICollect
 
         pagingCell.configure(
             with: items[indexPath.item],
-            isCurrentPage: indexPath.item == currentIndex
+            isCurrentPage: indexPath.item == currentIndex,
+            parentViewController: self
         )
         return pagingCell
     }
@@ -1147,6 +1392,8 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
 
     private var representedObjectID: NSManagedObjectID?
     private var isCurrentPage = false
+    private weak var parentViewController: UIViewController?
+    private var hostingController: UIHostingController<AnyView>?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1163,21 +1410,58 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
         super.prepareForReuse()
         representedObjectID = nil
         isCurrentPage = false
-        contentConfiguration = nil
     }
 
-    func configure(with item: PhotoDetailItem, isCurrentPage: Bool) {
+    func configure(
+        with item: PhotoDetailItem,
+        isCurrentPage: Bool,
+        parentViewController: UIViewController
+    ) {
+        attachHostingControllerIfNeeded(to: parentViewController)
+
         guard representedObjectID != item.objectID || self.isCurrentPage != isCurrentPage else { return }
 
         representedObjectID = item.objectID
         self.isCurrentPage = isCurrentPage
-        contentConfiguration = UIHostingConfiguration {
+
+        hostingController?.rootView = AnyView(
             PhotoDetailPageView(
                 item: item,
                 isCurrentPage: isCurrentPage
             )
             .background(Color.black)
+        )
+    }
+
+    private func attachHostingControllerIfNeeded(to parentViewController: UIViewController) {
+        if self.parentViewController !== parentViewController {
+            detachHostingController()
+            self.parentViewController = parentViewController
         }
-        .margins(.all, 0)
+
+        guard hostingController == nil else { return }
+
+        let hostingController = UIHostingController(rootView: AnyView(EmptyView()))
+        hostingController.view.backgroundColor = .clear
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
+
+        parentViewController.addChild(hostingController)
+        contentView.addSubview(hostingController.view)
+        NSLayoutConstraint.activate([
+            hostingController.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            hostingController.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            hostingController.view.topAnchor.constraint(equalTo: contentView.topAnchor),
+            hostingController.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+        ])
+        hostingController.didMove(toParent: parentViewController)
+
+        self.hostingController = hostingController
+    }
+
+    private func detachHostingController() {
+        hostingController?.willMove(toParent: nil)
+        hostingController?.view.removeFromSuperview()
+        hostingController?.removeFromParent()
+        hostingController = nil
     }
 }

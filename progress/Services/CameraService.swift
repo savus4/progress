@@ -27,6 +27,10 @@ class CameraService: NSObject, ObservableObject {
         self.sensorAspectRatio = Self.frontCameraPortraitAspectRatio()
         super.init()
     }
+
+    static func preferredCodec(from availableCodecs: [AVVideoCodecType]) -> AVVideoCodecType? {
+        availableCodecs.contains(.hevc) ? .hevc : nil
+    }
     
     func checkAuthorization() async {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -124,8 +128,8 @@ class CameraService: NSObject, ObservableObject {
         }
 
         let settings: AVCapturePhotoSettings
-        if photoOutput.availablePhotoCodecTypes.contains(.hevc) {
-            settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+        if let preferredPhotoCodec = Self.preferredCodec(from: photoOutput.availablePhotoCodecTypes) {
+            settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: preferredPhotoCodec])
         } else {
             settings = AVCapturePhotoSettings()
         }
@@ -156,6 +160,9 @@ class CameraService: NSObject, ObservableObject {
                 .appendingPathExtension("mov")
 
             settings.livePhotoMovieFileURL = livePhotoMovieFilePath
+            if let preferredLivePhotoCodec = Self.preferredCodec(from: photoOutput.availableLivePhotoVideoCodecTypes) {
+                settings.livePhotoVideoCodecType = preferredLivePhotoCodec
+            }
             livePhotoCompanionMovieURL = livePhotoMovieFilePath
             isCapturingLivePhoto = true
         } else {

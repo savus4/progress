@@ -176,6 +176,7 @@ struct PhotoGridView: View {
                     }
                 }
             }
+            .toolbar(photoDetailPresentation == nil ? .visible : .hidden, for: .navigationBar)
             .fullScreenCover(isPresented: $showingCamera) {
                 ExperimentalCameraView(
                     gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal
@@ -274,6 +275,8 @@ struct PhotoGridView: View {
                     activePhotoDetailObjectID = objectID
                 }
             )
+            .toolbarBackground(.visible, for: .navigationBar, .bottomBar)
+            .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         }
     }
 

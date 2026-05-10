@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreData
 import Foundation
 import Testing
@@ -52,6 +53,16 @@ struct ProgressCoreFunctionalityTests {
         #expect(json["fullImageAssetName"] as? String == "full.heic")
         #expect(json["livePhotoImageAssetName"] as? String == "live.heic")
         #expect(json["livePhotoVideoAssetName"] as? String == "live.mov")
+    }
+
+    @Test("CameraService prefers HEVC when supported")
+    func cameraServicePrefersHEVCWhenSupported() {
+        #expect(CameraService.preferredCodec(from: [.jpeg, .hevc]) == .hevc)
+    }
+
+    @Test("CameraService falls back when HEVC is unavailable")
+    func cameraServiceFallsBackWhenHEVCUnavailable() {
+        #expect(CameraService.preferredCodec(from: [.jpeg]) == nil)
     }
 
     @Test("Reminder times are clamped, sorted, deduplicated, and capped")
