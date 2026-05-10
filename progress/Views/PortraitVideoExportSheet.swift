@@ -7,11 +7,11 @@ struct PortraitVideoExportSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("portraitVideoPicturesPerSecond") private var picturesPerSecond = 6
     @AppStorage("portraitVideoQuality") private var selectedQualityRawValue = PortraitVideoExportQuality.best.rawValue
+    @AppStorage("portraitVideoIncludesDateBanner") private var includesDateBanner = false
+    @AppStorage("portraitVideoIncludesLocationBanner") private var includesLocationBanner = false
     @State private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
-    @State private var includesDateBanner = false
-    @State private var includesLocationBanner = false
     @State private var progress: PortraitVideoExportProgress?
     @State private var exportTask: Task<Void, Never>?
     @State private var exportedVideoURL: URL?

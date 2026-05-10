@@ -940,6 +940,7 @@ private struct PhotoDetailPageView: View {
     private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
 
     @State private var displayedImage: UIImage?
+    @State private var hasLoadedFullResolutionImage = false
     @State private var isLoadingLivePhotoResources = false
     @State private var isDownloadingLivePhotoAsset = false
     @State private var livePhotoResources: LivePhotoResources?
@@ -974,11 +975,17 @@ private struct PhotoDetailPageView: View {
                 }
             }
 
-            if shouldShowLivePhotoLoadingIndicator {
-                LivePhotoLoadingIndicator(isDownloading: isDownloadingLivePhotoAsset)
-                    .padding(.top, 20)
-                    .padding(.trailing, 16)
+            Group {
+                if isCurrentPage, shouldShowLivePhotoStatusIndicator {
+                    if shouldShowLivePhotoLoadingIndicator {
+                        LivePhotoLoadingIndicator(isDownloading: isDownloadingLivePhotoAsset)
+                    } else {
+                        LivePhotoStatusIndicator(isLivePhoto: hasLivePhoto)
+                    }
+                }
             }
+            .padding(.top, 20)
+            .padding(.trailing, 16)
         }
         .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
             await loadImage()
@@ -996,6 +1003,7 @@ private struct PhotoDetailPageView: View {
             displayedImage = nil
         }
 
+        hasLoadedFullResolutionImage = false
         livePhotoResources = nil
         isLoadingLivePhotoResources = false
         syncLivePhotoDownloadState()
@@ -1021,6 +1029,7 @@ private struct PhotoDetailPageView: View {
         guard !Task.isCancelled, representedObjectID == objectID else { return }
 
         displayedImage = fullImage
+        hasLoadedFullResolutionImage = true
 
         guard isCurrentPage else {
             return
@@ -1053,11 +1062,14 @@ private struct PhotoDetailPageView: View {
     }
 
     private var shouldShowLivePhotoLoadingIndicator: Bool {
-        isCurrentPage &&
         hasLivePhoto &&
         displayedImage != nil &&
         livePhotoResources == nil &&
         (isLoadingLivePhotoResources || isDownloadingLivePhotoAsset)
+    }
+
+    private var shouldShowLivePhotoStatusIndicator: Bool {
+        hasLoadedFullResolutionImage
     }
 
     @MainActor
@@ -1114,6 +1126,24 @@ private struct LivePhotoLoadingIndicator: View {
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(isDownloading ? "Live Photo downloading" : "Preparing Live Photo")
+    }
+}
+
+private struct LivePhotoStatusIndicator: View {
+    let isLivePhoto: Bool
+
+    var body: some View {
+        Image(systemName: isLivePhoto ? "livephoto" : "livephoto.slash")
+            .imageScale(.medium)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(9)
+            .background(.black.opacity(0.45), in: Circle())
+            .overlay(
+                Circle()
+                    .stroke(.white.opacity(0.14), lineWidth: 1)
+            )
+            .accessibilityLabel(isLivePhoto ? "Live Photo" : "Still Photo")
     }
 }
 
