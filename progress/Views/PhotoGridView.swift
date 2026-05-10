@@ -14,6 +14,11 @@ private struct PhotoDetailPresentation: Identifiable {
     }
 }
 
+private struct PortraitVideoExportPresentation: Identifiable {
+    let id = UUID()
+    let photos: [PortraitVideoExportItem]
+}
+
 struct PhotoGridView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
@@ -34,6 +39,7 @@ struct PhotoGridView: View {
     @State private var isExporting = false
     @State private var exportedFileURLs: [URL] = []
     @State private var showingExportPicker = false
+    @State private var portraitVideoExportPresentation: PortraitVideoExportPresentation?
     @State private var exportAlertMessage: String?
     @State private var showingDeleteConfirmation = false
     @State private var isDeletingSelection = false
@@ -169,6 +175,12 @@ struct PhotoGridView: View {
                         }
                         .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
                     } else {
+                        Button(action: openPortraitVideoExporter) {
+                            Image(systemName: "film.stack")
+                                .font(.title3)
+                        }
+                        .disabled(dataController.isEmpty)
+
                         Button(action: { showingNotificationSettings = true }) {
                             Image(systemName: "gearshape")
                                 .font(.title3)
@@ -184,6 +196,11 @@ struct PhotoGridView: View {
             }
             .sheet(isPresented: $showingNotificationSettings) {
                 NotificationSettingsView()
+            }
+            .sheet(item: $portraitVideoExportPresentation) { presentation in
+                PortraitVideoExportSheet(
+                    photos: presentation.photos
+                )
             }
             .fullScreenCover(item: $photoDetailPresentation) { presentation in
                 photoDetailView(for: presentation)
@@ -442,6 +459,12 @@ struct PhotoGridView: View {
             return
         }
         startExport(for: selectedPhotos)
+    }
+
+    private func openPortraitVideoExporter() {
+        portraitVideoExportPresentation = PortraitVideoExportPresentation(
+            photos: dataController.allPhotos.map(PortraitVideoExportItem.init(photo:))
+        )
     }
 
     private func exportAllPhotos() {

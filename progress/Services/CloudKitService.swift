@@ -410,6 +410,16 @@ final class CloudKitService {
         deleteContents(of: temporaryReadableAssetsDirectoryURL)
     }
 
+    nonisolated func discardTemporaryReadableAsset(named assetName: String) {
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CloudKitReadableAssets", isDirectory: true)
+            .appendingPathComponent(assetName)
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: temporaryURL.path) {
+            try? fileManager.removeItem(at: temporaryURL)
+        }
+    }
+
     func localAssetStorageUsage() async -> LocalPhotoAssetStorageUsage {
         let cacheDirectoryURL = systemCloudKitCacheDirectoryURL
         let stagingDirectoryURL = stagingDirectoryURL
