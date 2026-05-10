@@ -6,17 +6,22 @@ struct PortraitVideoExportSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @AppStorage("portraitVideoPicturesPerSecond") private var picturesPerSecond = 6
-    @AppStorage("portraitVideoQuality") private var selectedQualityRawValue = PortraitVideoExportQuality.balanced.rawValue
+    @AppStorage("portraitVideoQuality") private var selectedQualityRawValue = PortraitVideoExportQuality.best.rawValue
+    @State private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
     @State private var includesDateBanner = false
+    @State private var includesLocationBanner = false
     @State private var progress: PortraitVideoExportProgress?
     @State private var exportTask: Task<Void, Never>?
     @State private var exportedVideoURL: URL?
+    @State private var failedPhotos: [PortraitVideoExportFailedPhoto] = []
     @State private var isShowingFilesExporter = false
+    @State private var isShowingFailedPhotos = false
     @State private var isSavingToPhotos = false
     @State private var statusMessage: String?
     @State private var isStatusSuccess = false
+    @State private var statusClearTask: Task<Void, Never>?
 
     private let calendar = Calendar.current
     private let availableDateRange: ClosedRange<Date>
@@ -43,19 +48,24 @@ struct PortraitVideoExportSheet: View {
                 videoSection
                 dateRangeSection
             }
+            .contentMargins(.top, 0, for: .scrollContent)
+            .listSectionSpacing(10)
             .scrollContentBackground(.hidden)
             .background(Color(.systemGroupedBackground))
             .safeAreaInset(edge: .bottom) {
                 bottomActionBar
             }
-            .navigationTitle("Portrait Video")
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("Video Creator")
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         cancelExport()
                         dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
                     }
+                    .accessibilityLabel("Close")
                 }
             }
             .interactiveDismissDisabled(exportTask != nil)
@@ -77,45 +87,47 @@ struct PortraitVideoExportSheet: View {
             .sheet(isPresented: $isShowingFilesExporter, onDismiss: {
                 cleanupExportedVideo()
                 progress = nil
-                statusMessage = nil
-                isStatusSuccess = false
             }) {
                 if let exportedVideoURL {
-                    ExportDocumentPicker(urls: [exportedVideoURL])
+                    ExportDocumentPicker(urls: [exportedVideoURL]) { didExport in
+                        if didExport {
+                            showStatus("Saved to Files.", success: true, autoDismiss: true)
+                        }
+                    }
                 }
+            }
+            .sheet(isPresented: $isShowingFailedPhotos) {
+                PortraitVideoExportFailuresView(failures: failedPhotos)
             }
             .onAppear {
                 picturesPerSecond = clampedPicturesPerSecond
+                selectedQualityRawValue = selectedQuality.rawValue
             }
         }
     }
 
     private var summarySection: some View {
         Section {
-            VStack(alignment: .leading, spacing: 14) {
-                Label("Portrait Video", systemImage: "film.stack")
-                    .font(.title2.weight(.semibold))
-
-                HStack(spacing: 12) {
-                    summaryPill(
-                        title: "\(matchingPhotos.count)",
-                        subtitle: matchingPhotos.count == 1 ? "Photo" : "Photos",
-                        systemImage: "photo.stack"
-                    )
-                    summaryPill(
-                        title: formattedDuration(Double(matchingPhotos.count) / Double(picturesPerSecond)),
-                        subtitle: "Length",
-                        systemImage: "timer"
-                    )
-                    summaryPill(
-                        title: "\(picturesPerSecond)/s",
-                        subtitle: "Speed",
-                        systemImage: "speedometer"
-                    )
-                }
+            HStack(spacing: 10) {
+                summaryPill(
+                    title: "\(matchingPhotos.count)",
+                    subtitle: matchingPhotos.count == 1 ? "Photo" : "Photos",
+                    systemImage: "photo.stack"
+                )
+                summaryPill(
+                    title: formattedDuration(Double(matchingPhotos.count) / Double(picturesPerSecond)),
+                    subtitle: "Length",
+                    systemImage: "timer"
+                )
+                summaryPill(
+                    title: "\(picturesPerSecond)/s",
+                    subtitle: "Speed",
+                    systemImage: "speedometer"
+                )
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 0)
         }
+        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
         .listRowBackground(Color.clear)
     }
 
@@ -141,6 +153,10 @@ struct PortraitVideoExportSheet: View {
                 Label("Show Date Banner", systemImage: "calendar")
             }
 
+            Toggle(isOn: $includesLocationBanner) {
+                Label("Show Location Banner", systemImage: "location")
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 Picker("Quality", selection: selectedQualityBinding) {
                     ForEach(PortraitVideoExportQuality.allCases) { quality in
@@ -154,33 +170,41 @@ struct PortraitVideoExportSheet: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
-
-            LabeledContent("Format", value: "2:3 portrait HEVC MP4")
-            LabeledContent("Resolution", value: "1080 x 1620")
         }
         .disabled(exportTask != nil)
     }
 
     private var dateRangeSection: some View {
-        Section("Date Range") {
-            DatePicker(
-                "From",
-                selection: $startDate,
-                in: availableDateRange,
-                displayedComponents: [.date]
-            )
-            DatePicker(
-                "To",
-                selection: $endDate,
-                in: availableDateRange,
-                displayedComponents: [.date]
-            )
+        Section("Photos") {
+            Toggle(isOn: $usesAllPhotos) {
+                Label("All Photos", systemImage: "photo.stack")
+            }
+
+            if !usesAllPhotos {
+                DatePicker(
+                    "From",
+                    selection: $startDate,
+                    in: availableDateRange,
+                    displayedComponents: [.date]
+                )
+                DatePicker(
+                    "To",
+                    selection: $endDate,
+                    in: availableDateRange,
+                    displayedComponents: [.date]
+                )
+            }
+
             LabeledContent("Selected", value: dateRangeSummary)
         }
         .disabled(exportTask != nil)
     }
 
     private var matchingPhotos: [PortraitVideoExportItem] {
+        guard !usesAllPhotos else {
+            return photos
+        }
+
         let lowerBound = calendar.startOfDay(for: startDate)
         let upperBound = calendar.endOfDay(for: endDate)
 
@@ -217,7 +241,7 @@ struct PortraitVideoExportSheet: View {
 
     private var selectedQuality: PortraitVideoExportQuality {
         get {
-            PortraitVideoExportQuality(rawValue: selectedQualityRawValue) ?? .balanced
+            PortraitVideoExportQuality(rawValue: selectedQualityRawValue) ?? .best
         }
         nonmutating set {
             selectedQualityRawValue = newValue.rawValue
@@ -240,6 +264,18 @@ struct PortraitVideoExportSheet: View {
             if let statusMessage {
                 statusView(statusMessage)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if !failedPhotos.isEmpty {
+                Button {
+                    isShowingFailedPhotos = true
+                } label: {
+                    Label(skippedPhotosButtonTitle, systemImage: "exclamationmark.triangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
             }
 
             if exportTask != nil {
@@ -251,7 +287,7 @@ struct PortraitVideoExportSheet: View {
                 .controlSize(.large)
             } else if exportedVideoURL == nil {
                 Button(action: startExport) {
-                    Label("Create Portrait Video", systemImage: "film.stack")
+                    Label("Create Video", systemImage: "film.stack")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -282,6 +318,7 @@ struct PortraitVideoExportSheet: View {
         .padding(.top, 12)
         .padding(.bottom, 8)
         .background(.bar)
+        .animation(.easeInOut(duration: 0.25), value: statusMessage)
     }
 
     @ViewBuilder
@@ -316,6 +353,9 @@ struct PortraitVideoExportSheet: View {
         Label(message, systemImage: isStatusSuccess ? "checkmark.circle.fill" : "info.circle")
             .font(.footnote)
             .foregroundStyle(statusColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(statusColor.opacity(0.12), in: Capsule())
     }
 
     private var statusColor: Color {
@@ -339,8 +379,12 @@ struct PortraitVideoExportSheet: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
+        .padding(10)
         .background(.background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.secondary.opacity(0.24), lineWidth: 1)
+        }
     }
 
     private func startExport() {
@@ -348,14 +392,14 @@ struct PortraitVideoExportSheet: View {
 
         let selectedPhotos = matchingPhotos
         guard !selectedPhotos.isEmpty else {
-            statusMessage = PortraitVideoExportError.noPhotos.localizedDescription
+            showStatus(PortraitVideoExportError.noPhotos.localizedDescription, success: false)
             return
         }
 
         cleanupExportedVideo()
         exportedVideoURL = nil
-        statusMessage = nil
-        isStatusSuccess = false
+        failedPhotos = []
+        clearStatus()
         progress = PortraitVideoExportProgress(
             completedPhotoCount: 0,
             totalPhotoCount: selectedPhotos.count,
@@ -364,27 +408,33 @@ struct PortraitVideoExportSheet: View {
 
         exportTask = Task { @MainActor in
             do {
-                let videoURL = try await PortraitVideoExportService.shared.createVideo(
+                let result = try await PortraitVideoExportService.shared.createVideo(
                     from: selectedPhotos,
                     picturesPerSecond: picturesPerSecond,
                     quality: selectedQuality,
-                    includesDateBanner: includesDateBanner
+                    includesDateBanner: includesDateBanner,
+                    includesLocationBanner: includesLocationBanner
                 ) { newProgress in
                     progress = newProgress
                 }
 
-                exportedVideoURL = videoURL
+                exportedVideoURL = result.videoURL
+                failedPhotos = result.failedPhotos
                 progress = nil
                 isStatusSuccess = true
-                statusMessage = "Video ready."
+                statusMessage = result.failedPhotos.isEmpty
+                    ? "Video ready."
+                    : "Video ready. \(result.failedPhotos.count) skipped."
             } catch is CancellationError {
                 progress = nil
-                isStatusSuccess = false
-                statusMessage = "Video creation cancelled."
+                showStatus("Video creation cancelled.", success: false)
+            } catch PortraitVideoExportError.noFramesWritten(let failures) {
+                failedPhotos = failures
+                progress = nil
+                showStatus("No video created. \(failures.count) skipped.", success: false)
             } catch {
                 progress = nil
-                isStatusSuccess = false
-                statusMessage = "Video creation failed: \(error.localizedDescription)"
+                showStatus("Video creation failed: \(error.localizedDescription)", success: false)
             }
 
             exportTask = nil
@@ -394,8 +444,7 @@ struct PortraitVideoExportSheet: View {
     private func cancelExport() {
         exportTask?.cancel()
         if exportTask != nil {
-            isStatusSuccess = false
-            statusMessage = "Cancelling..."
+            showStatus("Cancelling...", success: false)
         }
     }
 
@@ -403,8 +452,7 @@ struct PortraitVideoExportSheet: View {
         guard let exportedVideoURL, !isSavingToPhotos else { return }
 
         isSavingToPhotos = true
-        statusMessage = nil
-        isStatusSuccess = false
+        clearStatus()
 
         Task { @MainActor in
             defer {
@@ -420,15 +468,39 @@ struct PortraitVideoExportSheet: View {
                 try await saveVideoToPhotoLibrary(exportedVideoURL)
                 cleanupExportedVideo()
                 progress = nil
-                isStatusSuccess = true
-                statusMessage = "Saved to Photos."
+                showStatus("Saved to Photos.", success: true, autoDismiss: true)
             } catch let error as PortraitVideoSaveError {
-                isStatusSuccess = false
-                statusMessage = error.localizedDescription
+                showStatus(error.localizedDescription, success: false)
             } catch {
-                isStatusSuccess = false
-                statusMessage = "Unable to save video to Photos."
+                showStatus("Unable to save video to Photos.", success: false)
             }
+        }
+    }
+
+    private func showStatus(_ message: String, success: Bool, autoDismiss: Bool = false) {
+        statusClearTask?.cancel()
+
+        withAnimation(.easeInOut(duration: 0.25)) {
+            isStatusSuccess = success
+            statusMessage = message
+        }
+
+        guard autoDismiss else { return }
+
+        statusClearTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, statusMessage == message else { return }
+            clearStatus()
+        }
+    }
+
+    private func clearStatus() {
+        statusClearTask?.cancel()
+        statusClearTask = nil
+
+        withAnimation(.easeInOut(duration: 0.25)) {
+            statusMessage = nil
+            isStatusSuccess = false
         }
     }
 
@@ -463,7 +535,7 @@ struct PortraitVideoExportSheet: View {
         case .loading:
             return "Loading photos \(countText)"
         case .writing:
-            return "Writing frames \(countText)"
+            return "Loading photos \(countText)"
         case .finishing:
             return "Finishing video..."
         }
@@ -479,6 +551,48 @@ struct PortraitVideoExportSheet: View {
         }
 
         return "\(seconds)s"
+    }
+
+    private var skippedPhotosButtonTitle: String {
+        "\(failedPhotos.count) skipped photo\(failedPhotos.count == 1 ? "" : "s")"
+    }
+}
+
+private struct PortraitVideoExportFailuresView: View {
+    let failures: [PortraitVideoExportFailedPhoto]
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(failures) { failure in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(failure.captureDate.formatted(date: .abbreviated, time: .omitted))
+                        .font(.headline)
+
+                    if let assetName = failure.assetName {
+                        Text(assetName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Text(failure.reason)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+            .navigationTitle("Skipped Photos")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 }
 

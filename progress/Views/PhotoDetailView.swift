@@ -594,44 +594,32 @@ struct PhotoDetailView: View {
     }
 
     private func resolveLocationName(for location: CLLocation) async throws -> String {
-        if #available(iOS 26.0, *),
-           let request = MKReverseGeocodingRequest(location: location) {
-            return try await withCheckedThrowingContinuation { continuation in
-                request.getMapItems { mapItems, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                        return
+        guard let request = MKReverseGeocodingRequest(location: location) else {
+            return "Pinned location"
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            request.getMapItems { mapItems, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let resolvedName = mapItems?
+                    .compactMap { mapItem in
+                        [
+                            mapItem.addressRepresentations?.cityWithContext(.short),
+                            mapItem.addressRepresentations?.cityName,
+                            mapItem.address?.shortAddress,
+                            mapItem.name,
+                            mapItem.addressRepresentations?.fullAddress(includingRegion: false, singleLine: true)
+                        ].compactMap { $0 }
+                            .first(where: { !$0.isEmpty })
                     }
+                    .first ?? "Pinned location"
 
-                    let resolvedName = mapItems?
-                        .compactMap { mapItem in
-                            [
-                                mapItem.addressRepresentations?.cityWithContext(.short),
-                                mapItem.addressRepresentations?.cityName,
-                                mapItem.address?.shortAddress,
-                                mapItem.name,
-                                mapItem.addressRepresentations?.fullAddress(includingRegion: false, singleLine: true)
-                            ].compactMap { $0 }
-                                .first(where: { !$0.isEmpty })
-                        }
-                        .first ?? "Pinned location"
-
-                    continuation.resume(returning: resolvedName)
-                }
+                continuation.resume(returning: resolvedName)
             }
-        } else {
-            let geocoder = CLGeocoder()
-            let placemarks = try await geocoder.reverseGeocodeLocation(location)
-            return placemarks
-                .compactMap { placemark in
-                    [
-                        placemark.locality,
-                        placemark.subLocality,
-                        placemark.name
-                    ].compactMap { $0 }
-                        .first(where: { !$0.isEmpty })
-                }
-                .first ?? "Pinned location"
         }
     }
 

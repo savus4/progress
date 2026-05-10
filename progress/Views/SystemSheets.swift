@@ -17,14 +17,36 @@ struct ActivityView: UIViewControllerRepresentable {
 
 struct ExportDocumentPicker: UIViewControllerRepresentable {
     let urls: [URL]
+    var onCompletion: (Bool) -> Void = { _ in }
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let picker = UIDocumentPickerViewController(forExporting: urls, asCopy: true)
         picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
         return picker
     }
 
     func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCompletion: onCompletion)
+    }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onCompletion: (Bool) -> Void
+
+        init(onCompletion: @escaping (Bool) -> Void) {
+            self.onCompletion = onCompletion
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onCompletion(true)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onCompletion(false)
+        }
     }
 }
 

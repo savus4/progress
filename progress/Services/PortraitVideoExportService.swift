@@ -5,6 +5,7 @@ import CoreText
 import CoreVideo
 import Foundation
 import ImageIO
+import MapKit
 import UniformTypeIdentifiers
 
 nonisolated struct PortraitVideoExportProgress: Equatable {
@@ -20,12 +21,41 @@ nonisolated struct PortraitVideoExportProgress: Equatable {
     let phase: Phase
 }
 
+nonisolated struct PortraitVideoExportFailedPhoto: Identifiable, Equatable, Sendable {
+    let id: String
+    let captureDate: Date
+    let assetName: String?
+    let reason: String
+
+    init(photo: PortraitVideoExportItem, reason: String) {
+        id = photo.objectID.uriRepresentation().absoluteString
+        captureDate = photo.captureDate
+        assetName = photo.fullImageAssetName
+        self.reason = reason
+    }
+}
+
+nonisolated struct PortraitVideoExportResult: Sendable {
+    let videoURL: URL
+    let failedPhotos: [PortraitVideoExportFailedPhoto]
+}
+
+nonisolated private struct PortraitVideoBannerText: Sendable {
+    let primary: String
+    let secondary: String?
+
+    var hasSecondary: Bool {
+        secondary != nil
+    }
+}
+
 nonisolated enum PortraitVideoExportError: LocalizedError {
     case noPhotos
     case noImageAsset
     case cannotCreatePixelBuffer
     case cannotCreateImageContext
     case cannotReadImage
+    case noFramesWritten([PortraitVideoExportFailedPhoto])
     case writerFailed(String)
 
     var errorDescription: String? {
@@ -40,6 +70,8 @@ nonisolated enum PortraitVideoExportError: LocalizedError {
             return "Unable to create a video drawing context."
         case .cannotReadImage:
             return "Unable to read one of the still images."
+        case .noFramesWritten:
+            return "No photos could be written to the video."
         case .writerFailed(let message):
             return message
         }
@@ -48,7 +80,6 @@ nonisolated enum PortraitVideoExportError: LocalizedError {
 
 nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable, Sendable {
     case compact
-    case balanced
     case best
 
     var id: String { rawValue }
@@ -57,8 +88,6 @@ nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable,
         switch self {
         case .compact:
             return "Compact"
-        case .balanced:
-            return "Balanced"
         case .best:
             return "Best"
         }
@@ -68,8 +97,6 @@ nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable,
         switch self {
         case .compact:
             return "Smaller file"
-        case .balanced:
-            return "Recommended"
         case .best:
             return "Higher quality"
         }
@@ -79,8 +106,6 @@ nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable,
         switch self {
         case .compact:
             return 2_800_000
-        case .balanced:
-            return 6_000_000
         case .best:
             return 12_000_000
         }
@@ -93,6 +118,7 @@ final class PortraitVideoExportService {
     private let cloudKitService = CloudKitService.shared
     private let outputSize = CGSize(width: 1080, height: 1620)
     private let thumbnailMaxPixelSize = 3240
+    private let maximumPhotoAttempts = 3
 
     private init() {}
 
@@ -117,8 +143,9 @@ final class PortraitVideoExportService {
         picturesPerSecond: Int,
         quality: PortraitVideoExportQuality,
         includesDateBanner: Bool,
+        includesLocationBanner: Bool,
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
-    ) async throws -> URL {
+    ) async throws -> PortraitVideoExportResult {
         guard !photos.isEmpty else { throw PortraitVideoExportError.noPhotos }
 
         let sortedPhotos = photos.sorted { lhs, rhs in
@@ -176,11 +203,11 @@ final class PortraitVideoExportService {
         writer.startSession(atSourceTime: .zero)
 
         do {
+            var failedPhotos: [PortraitVideoExportFailedPhoto] = []
+            var writtenFrameCount = 0
+
             for (index, photo) in sortedPhotos.enumerated() {
                 try Task.checkCancellation()
-                guard let assetName = photo.fullImageAssetName else {
-                    throw PortraitVideoExportError.noImageAsset
-                }
 
                 await progress(
                     PortraitVideoExportProgress(
@@ -190,20 +217,41 @@ final class PortraitVideoExportService {
                     )
                 )
 
-                let imageURL = try await cloudKitService.loadAssetURL(named: assetName)
-                defer {
-                    cloudKitService.discardTemporaryReadableAsset(named: assetName)
-                }
+                do {
+                    guard let assetName = photo.fullImageAssetName else {
+                        throw PortraitVideoExportError.noImageAsset
+                    }
 
-                let image = try loadScaledImage(from: imageURL)
-                try await append(
-                    image,
-                    dateText: includesDateBanner ? Self.dateBannerText(for: photo.captureDate) : nil,
-                    atFrameIndex: index,
-                    picturesPerSecond: picturesPerSecond,
-                    input: input,
-                    adaptor: adaptor
-                )
+                    let image = try await loadImageWithRetries(named: assetName)
+                    try await retryPhotoOperation {
+                        try await append(
+                            image,
+                            bannerText: await Self.makeBannerText(
+                                for: photo,
+                                includesDate: includesDateBanner,
+                                includesLocation: includesLocationBanner
+                            ),
+                            atFrameIndex: writtenFrameCount,
+                            picturesPerSecond: picturesPerSecond,
+                            input: input,
+                            adaptor: adaptor
+                        )
+                    }
+                    writtenFrameCount += 1
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    failedPhotos.append(
+                        PortraitVideoExportFailedPhoto(
+                            photo: photo,
+                            reason: failureReason(for: error)
+                        )
+                    )
+
+                    if writer.status == .failed || writer.status == .cancelled {
+                        throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Video export failed.")
+                    }
+                }
 
                 await progress(
                     PortraitVideoExportProgress(
@@ -212,6 +260,10 @@ final class PortraitVideoExportService {
                         phase: .writing
                     )
                 )
+            }
+
+            guard writtenFrameCount > 0 else {
+                throw PortraitVideoExportError.noFramesWritten(failedPhotos)
             }
 
             await progress(
@@ -229,7 +281,7 @@ final class PortraitVideoExportService {
                 throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Video export failed.")
             }
 
-            return outputURL
+            return PortraitVideoExportResult(videoURL: outputURL, failedPhotos: failedPhotos)
         } catch {
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: outputURL)
@@ -237,9 +289,42 @@ final class PortraitVideoExportService {
         }
     }
 
+    nonisolated private func loadImageWithRetries(named assetName: String) async throws -> CGImage {
+        try await retryPhotoOperation {
+            let imageURL = try await cloudKitService.loadAssetURL(named: assetName)
+            defer {
+                cloudKitService.discardTemporaryReadableAsset(named: assetName)
+            }
+
+            return try loadScaledImage(from: imageURL)
+        }
+    }
+
+    nonisolated private func retryPhotoOperation<T>(
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+
+        for attempt in 1...maximumPhotoAttempts {
+            do {
+                return try await operation()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+
+                if attempt < maximumPhotoAttempts {
+                    try await Task.sleep(for: .milliseconds(250 * attempt))
+                }
+            }
+        }
+
+        throw lastError ?? PortraitVideoExportError.cannotReadImage
+    }
+
     nonisolated private func append(
         _ image: CGImage,
-        dateText: String?,
+        bannerText: PortraitVideoBannerText?,
         atFrameIndex frameIndex: Int,
         picturesPerSecond: Int,
         input: AVAssetWriterInput,
@@ -260,7 +345,7 @@ final class PortraitVideoExportService {
             throw PortraitVideoExportError.cannotCreatePixelBuffer
         }
 
-        try draw(image, dateText: dateText, into: pixelBuffer)
+        try draw(image, bannerText: bannerText, into: pixelBuffer)
 
         let presentationTime = CMTime(
             value: CMTimeValue(frameIndex),
@@ -271,7 +356,7 @@ final class PortraitVideoExportService {
         }
     }
 
-    nonisolated private func draw(_ image: CGImage, dateText: String?, into pixelBuffer: CVPixelBuffer) throws {
+    nonisolated private func draw(_ image: CGImage, bannerText: PortraitVideoBannerText?, into pixelBuffer: CVPixelBuffer) throws {
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         defer {
             CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
@@ -306,14 +391,15 @@ final class PortraitVideoExportService {
         context.interpolationQuality = .high
         context.draw(image, in: aspectFillRect(for: image, in: frame))
 
-        if let dateText {
-            drawDateBanner(dateText, in: context, frame: frame)
+        if let bannerText {
+            drawBanner(bannerText, in: context, frame: frame)
         }
     }
 
-    nonisolated private func drawDateBanner(_ text: String, in context: CGContext, frame: CGRect) {
-        let bannerWidth = min(frame.width - 96, 620)
-        let bannerHeight: CGFloat = 82
+    nonisolated private func drawBanner(_ text: PortraitVideoBannerText, in context: CGContext, frame: CGRect) {
+        let widestTextCount = max(text.primary.count, text.secondary?.count ?? 0)
+        let bannerWidth = min(frame.width - 96, text.hasSecondary || widestTextCount > 16 ? 880 : 620)
+        let bannerHeight: CGFloat = text.hasSecondary ? 126 : 82
         let bannerRect = CGRect(
             x: (frame.width - bannerWidth) / 2,
             y: frame.height - bannerHeight - 78,
@@ -336,19 +422,64 @@ final class PortraitVideoExportService {
         context.strokePath()
         context.restoreGState()
 
-        let font = CTFontCreateWithName("AvenirNext-DemiBold" as CFString, 36, nil)
+        if let secondary = text.secondary {
+            drawBannerLine(
+                text.primary,
+                fontSize: 36,
+                alpha: 0.98,
+                centerY: bannerRect.midY + 22,
+                in: context,
+                bannerRect: bannerRect
+            )
+            drawBannerLine(
+                secondary,
+                fontSize: secondary.count > 28 ? 28 : 30,
+                alpha: 0.86,
+                centerY: bannerRect.midY - 24,
+                in: context,
+                bannerRect: bannerRect
+            )
+        } else {
+            drawBannerLine(
+                text.primary,
+                fontSize: text.primary.count > 28 ? 32 : 36,
+                alpha: 0.96,
+                centerY: bannerRect.midY,
+                in: context,
+                bannerRect: bannerRect
+            )
+        }
+    }
+
+    nonisolated private func drawBannerLine(
+        _ text: String,
+        fontSize: CGFloat,
+        alpha: CGFloat,
+        centerY: CGFloat,
+        in context: CGContext,
+        bannerRect: CGRect
+    ) {
+        let font = CTFontCreateWithName("Menlo-Bold" as CFString, fontSize, nil)
         let attributes: [CFString: Any] = [
             kCTFontAttributeName: font,
-            kCTForegroundColorAttributeName: CGColor(red: 1, green: 1, blue: 1, alpha: 0.96),
+            kCTForegroundColorAttributeName: CGColor(red: 1, green: 1, blue: 1, alpha: alpha),
             kCTKernAttributeName: 0.4
         ]
+
         guard let attributedText = CFAttributedStringCreate(nil, text as CFString, attributes as CFDictionary) else {
             return
         }
-        let line = CTLineCreateWithAttributedString(attributedText)
+
+        let fullLine = CTLineCreateWithAttributedString(attributedText)
+        let line = CTLineCreateTruncatedLine(
+            fullLine,
+            Double(max(bannerRect.width - 56, 1)),
+            .end,
+            nil
+        ) ?? fullLine
         let lineBounds = CTLineGetBoundsWithOptions(line, [.useGlyphPathBounds])
         let textX = bannerRect.midX - lineBounds.width / 2 - lineBounds.minX
-        let textY = bannerRect.midY - lineBounds.height / 2 - lineBounds.minY
+        let textY = centerY - lineBounds.height / 2 - lineBounds.minY
 
         context.saveGState()
         context.textMatrix = .identity
@@ -432,9 +563,108 @@ final class PortraitVideoExportService {
     }
 
     nonisolated private static func dateBannerText(for date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter.string(from: date)
+        let components = Calendar(identifier: .gregorian)
+            .dateComponents([.year, .month, .day], from: date)
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
+
+    nonisolated private static func makeBannerText(
+        for photo: PortraitVideoExportItem,
+        includesDate: Bool,
+        includesLocation: Bool
+    ) async -> PortraitVideoBannerText? {
+        let dateText = includesDate ? dateBannerText(for: photo.captureDate) : nil
+        let locationText = includesLocation ? await locationBannerText(for: photo) : nil
+
+        if let dateText {
+            return PortraitVideoBannerText(primary: dateText, secondary: locationText)
+        }
+
+        if let locationText {
+            return PortraitVideoBannerText(primary: locationText, secondary: nil)
+        }
+
+        return nil
+    }
+
+    nonisolated private static func locationBannerText(for photo: PortraitVideoExportItem) async -> String? {
+        if let locationName = photo.locationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !locationName.isEmpty {
+            return locationName
+        }
+
+        guard photo.latitude != 0 || photo.longitude != 0 else {
+            return nil
+        }
+
+        if let cachedLocationName = await LocationNameCacheService.shared.cachedName(
+            for: photo.latitude,
+            longitude: photo.longitude
+        ) {
+            return cachedLocationName
+        }
+
+        let fallbackText = coordinateBannerText(latitude: photo.latitude, longitude: photo.longitude)
+        let location = CLLocation(latitude: photo.latitude, longitude: photo.longitude)
+
+        do {
+            let resolvedName = try await resolveLocationName(for: location)
+            await LocationNameCacheService.shared.setCachedName(
+                resolvedName,
+                for: photo.latitude,
+                longitude: photo.longitude
+            )
+            return resolvedName
+        } catch {
+            return fallbackText
+        }
+    }
+
+    nonisolated private static func coordinateBannerText(latitude: Double, longitude: Double) -> String {
+        return String(format: "%.4f, %.4f", latitude, longitude)
+    }
+
+    nonisolated private static func resolveLocationName(for location: CLLocation) async throws -> String {
+        guard let request = MKReverseGeocodingRequest(location: location) else {
+            return "Pinned location"
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            request.getMapItems { mapItems, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                let resolvedName = mapItems?
+                    .compactMap { mapItem in
+                        [
+                            mapItem.addressRepresentations?.cityWithContext(.short),
+                            mapItem.addressRepresentations?.cityName,
+                            mapItem.address?.shortAddress,
+                            mapItem.name,
+                            mapItem.addressRepresentations?.fullAddress(includingRegion: false, singleLine: true)
+                        ].compactMap { $0 }
+                            .first(where: { !$0.isEmpty })
+                    }
+                    .first ?? "Pinned location"
+
+                continuation.resume(returning: resolvedName)
+            }
+        }
+    }
+
+    nonisolated private func failureReason(for error: Error) -> String {
+        if case PortraitVideoExportError.noImageAsset = error {
+            return "No still image asset."
+        }
+
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        return "Failed after \(maximumPhotoAttempts) attempts: \(message)"
     }
 }
