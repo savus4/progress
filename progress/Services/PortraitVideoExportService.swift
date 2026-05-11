@@ -19,6 +19,22 @@ nonisolated struct PortraitVideoExportProgress: Equatable {
     let completedPhotoCount: Int
     let totalPhotoCount: Int
     let phase: Phase
+    let completedWorkUnitCount: Double
+    let totalWorkUnitCount: Double
+
+    init(
+        completedPhotoCount: Int,
+        totalPhotoCount: Int,
+        phase: Phase,
+        completedWorkUnitCount: Double? = nil,
+        totalWorkUnitCount: Double? = nil
+    ) {
+        self.completedPhotoCount = completedPhotoCount
+        self.totalPhotoCount = totalPhotoCount
+        self.phase = phase
+        self.completedWorkUnitCount = completedWorkUnitCount ?? Double(completedPhotoCount)
+        self.totalWorkUnitCount = totalWorkUnitCount ?? Double(totalPhotoCount)
+    }
 }
 
 nonisolated struct PortraitVideoExportFailedPhoto: Identifiable, Equatable, Sendable {
@@ -38,6 +54,102 @@ nonisolated struct PortraitVideoExportFailedPhoto: Identifiable, Equatable, Send
 nonisolated struct PortraitVideoExportResult: Sendable {
     let videoURL: URL
     let failedPhotos: [PortraitVideoExportFailedPhoto]
+}
+
+nonisolated private struct PortraitVideoExportWorkEstimate: Sendable {
+    enum AssetReadKind: Sendable {
+        case local
+        case remote
+    }
+
+    private static let defaultRemoteWorkUnit = 4.0
+    private static let storageKey = "portraitVideoRemotePhotoWorkUnit"
+    private static let minimumRemoteWorkUnit = 1.25
+    private static let maximumRemoteWorkUnit = 20.0
+
+    let photoReadKinds: [AssetReadKind]
+    private(set) var remoteWorkUnit: Double
+    private var localDurationTotal: TimeInterval = 0
+    private var localDurationCount = 0
+    private var remoteDurationTotal: TimeInterval = 0
+    private var remoteDurationCount = 0
+
+    init(photoReadKinds: [AssetReadKind]) {
+        self.photoReadKinds = photoReadKinds
+        remoteWorkUnit = Self.storedRemoteWorkUnit()
+    }
+
+    var totalWorkUnitCount: Double {
+        photoReadKinds.reduce(0) { partialResult, kind in
+            partialResult + workUnit(for: kind)
+        }
+    }
+
+    func completedWorkUnitCount(before index: Int) -> Double {
+        let endIndex = min(max(index, 0), photoReadKinds.count)
+        return photoReadKinds.prefix(endIndex).reduce(0) { partialResult, kind in
+            partialResult + workUnit(for: kind)
+        }
+    }
+
+    func completedWorkUnitCount(through index: Int) -> Double {
+        completedWorkUnitCount(before: index + 1)
+    }
+
+    mutating func recordPhotoDuration(at index: Int, duration: TimeInterval) {
+        guard photoReadKinds.indices.contains(index), duration > 0 else { return }
+
+        switch photoReadKinds[index] {
+        case .local:
+            localDurationTotal += duration
+            localDurationCount += 1
+        case .remote:
+            remoteDurationTotal += duration
+            remoteDurationCount += 1
+        }
+
+        updateRemoteWorkUnitFromObservations()
+    }
+
+    func saveCalibration() {
+        guard localDurationCount > 0, remoteDurationCount > 0 else { return }
+        Self.storeRemoteWorkUnit(remoteWorkUnit)
+    }
+
+    private func workUnit(for kind: AssetReadKind) -> Double {
+        switch kind {
+        case .local:
+            return 1
+        case .remote:
+            return remoteWorkUnit
+        }
+    }
+
+    private mutating func updateRemoteWorkUnitFromObservations() {
+        guard localDurationCount > 0, remoteDurationCount > 0 else { return }
+
+        let localAverage = max(localDurationTotal / Double(localDurationCount), 0.05)
+        let remoteAverage = max(remoteDurationTotal / Double(remoteDurationCount), 0.05)
+        let observedRemoteWorkUnit = Self.clampedRemoteWorkUnit(remoteAverage / localAverage)
+        remoteWorkUnit = Self.clampedRemoteWorkUnit(remoteWorkUnit * 0.8 + observedRemoteWorkUnit * 0.2)
+    }
+
+    private static func storedRemoteWorkUnit() -> Double {
+        let storedValue = UserDefaults.standard.double(forKey: storageKey)
+        guard storedValue > 0 else {
+            return defaultRemoteWorkUnit
+        }
+
+        return clampedRemoteWorkUnit(storedValue)
+    }
+
+    private static func storeRemoteWorkUnit(_ remoteWorkUnit: Double) {
+        UserDefaults.standard.set(clampedRemoteWorkUnit(remoteWorkUnit), forKey: storageKey)
+    }
+
+    private static func clampedRemoteWorkUnit(_ remoteWorkUnit: Double) -> Double {
+        min(max(remoteWorkUnit, minimumRemoteWorkUnit), maximumRemoteWorkUnit)
+    }
 }
 
 nonisolated private struct PortraitVideoBannerText: Sendable {
@@ -154,6 +266,7 @@ final class PortraitVideoExportService {
             }
             return lhs.captureDate < rhs.captureDate
         }
+        var workEstimate = makeWorkEstimate(for: sortedPhotos)
 
         let outputURL = try makeOutputURL()
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
@@ -193,7 +306,9 @@ final class PortraitVideoExportService {
             PortraitVideoExportProgress(
                 completedPhotoCount: 0,
                 totalPhotoCount: sortedPhotos.count,
-                phase: .preparing
+                phase: .preparing,
+                completedWorkUnitCount: 0,
+                totalWorkUnitCount: workEstimate.totalWorkUnitCount
             )
         )
 
@@ -213,10 +328,13 @@ final class PortraitVideoExportService {
                     PortraitVideoExportProgress(
                         completedPhotoCount: index,
                         totalPhotoCount: sortedPhotos.count,
-                        phase: .loading
+                        phase: .loading,
+                        completedWorkUnitCount: workEstimate.completedWorkUnitCount(before: index),
+                        totalWorkUnitCount: workEstimate.totalWorkUnitCount
                     )
                 )
 
+                let photoStartedAt = Date()
                 do {
                     guard let assetName = photo.fullImageAssetName else {
                         throw PortraitVideoExportError.noImageAsset
@@ -252,12 +370,18 @@ final class PortraitVideoExportService {
                         throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Video export failed.")
                     }
                 }
+                workEstimate.recordPhotoDuration(
+                    at: index,
+                    duration: Date().timeIntervalSince(photoStartedAt)
+                )
 
                 await progress(
                     PortraitVideoExportProgress(
                         completedPhotoCount: index + 1,
                         totalPhotoCount: sortedPhotos.count,
-                        phase: .writing
+                        phase: .writing,
+                        completedWorkUnitCount: workEstimate.completedWorkUnitCount(through: index),
+                        totalWorkUnitCount: workEstimate.totalWorkUnitCount
                     )
                 )
             }
@@ -270,7 +394,9 @@ final class PortraitVideoExportService {
                 PortraitVideoExportProgress(
                     completedPhotoCount: sortedPhotos.count,
                     totalPhotoCount: sortedPhotos.count,
-                    phase: .finishing
+                    phase: .finishing,
+                    completedWorkUnitCount: workEstimate.totalWorkUnitCount,
+                    totalWorkUnitCount: workEstimate.totalWorkUnitCount
                 )
             )
 
@@ -281,12 +407,27 @@ final class PortraitVideoExportService {
                 throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Video export failed.")
             }
 
+            workEstimate.saveCalibration()
             return PortraitVideoExportResult(videoURL: outputURL, failedPhotos: failedPhotos)
         } catch {
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: outputURL)
             throw error
         }
+    }
+
+    nonisolated private func makeWorkEstimate(for photos: [PortraitVideoExportItem]) -> PortraitVideoExportWorkEstimate {
+        PortraitVideoExportWorkEstimate(
+            photoReadKinds: photos.map { photo in
+                guard let assetName = photo.fullImageAssetName else {
+                    return .local
+                }
+
+                return cloudKitService.isAssetAvailableForImmediateRead(named: assetName)
+                    ? .local
+                    : .remote
+            }
+        )
     }
 
     nonisolated private func loadImageWithRetries(named assetName: String) async throws -> CGImage {

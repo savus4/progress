@@ -22,6 +22,9 @@ struct PortraitVideoExportSheet: View {
     @State private var statusMessage: String?
     @State private var isStatusSuccess = false
     @State private var statusClearTask: Task<Void, Never>?
+    @State private var exportStartedAt: Date?
+    @State private var smoothedRemainingSeconds: TimeInterval?
+    @State private var isShowingDiscardUnsavedExportAlert = false
 
     private let calendar = Calendar.current
     private let availableDateRange: ClosedRange<Date>
@@ -44,31 +47,43 @@ struct PortraitVideoExportSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                summarySection
                 videoSection
                 dateRangeSection
             }
-            .contentMargins(.top, 0, for: .scrollContent)
+            .contentMargins(.top, 110, for: .scrollContent)
             .listSectionSpacing(10)
             .scrollContentBackground(.hidden)
             .background(Color(.systemGroupedBackground))
+            .overlay(alignment: .top) {
+                floatingSummaryStats
+            }
             .safeAreaInset(edge: .bottom) {
                 bottomActionBar
             }
             .navigationTitle("Video Creator")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        cancelExport()
-                        dismiss()
+                        requestDismiss()
                     } label: {
                         Image(systemName: "xmark")
+                            .foregroundStyle(exportTask == nil ? .primary : .tertiary)
                     }
                     .accessibilityLabel("Close")
+                    .disabled(exportTask != nil)
                 }
             }
-            .interactiveDismissDisabled(exportTask != nil)
+            .interactiveDismissDisabled(exportTask != nil || hasUnsavedExportedVideo)
+            .alert("Discard Unsaved Video?", isPresented: $isShowingDiscardUnsavedExportAlert) {
+                Button("Keep Editing", role: .cancel) {}
+                Button("Discard Video", role: .destructive) {
+                    cleanupExportedVideo()
+                    dismiss()
+                }
+            } message: {
+                Text("This video has not been saved. Closing Video Creator will delete it.")
+            }
             .onChange(of: startDate) { _, newValue in
                 if newValue > endDate {
                     endDate = newValue
@@ -106,29 +121,33 @@ struct PortraitVideoExportSheet: View {
         }
     }
 
-    private var summarySection: some View {
-        Section {
-            HStack(spacing: 10) {
-                summaryPill(
-                    title: "\(matchingPhotos.count)",
-                    subtitle: matchingPhotos.count == 1 ? "Photo" : "Photos",
-                    systemImage: "photo.stack"
-                )
-                summaryPill(
-                    title: formattedDuration(Double(matchingPhotos.count) / Double(picturesPerSecond)),
-                    subtitle: "Length",
-                    systemImage: "timer"
-                )
-                summaryPill(
-                    title: "\(picturesPerSecond)/s",
-                    subtitle: "Speed",
-                    systemImage: "speedometer"
-                )
-            }
-            .padding(.vertical, 0)
+    private var floatingSummaryStats: some View {
+        HStack(spacing: 10) {
+            summaryPill(
+                title: "\(matchingPhotos.count)",
+                subtitle: matchingPhotos.count == 1 ? "Photo" : "Photos",
+                systemImage: "photo.stack"
+            )
+            summaryPill(
+                title: formattedDuration(Double(matchingPhotos.count) / Double(picturesPerSecond)),
+                subtitle: "Length",
+                systemImage: "timer"
+            )
+            summaryPill(
+                title: "\(picturesPerSecond)/s",
+                subtitle: "Speed",
+                systemImage: "speedometer"
+            )
         }
-        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-        .listRowBackground(Color.clear)
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
     }
 
     private var videoSection: some View {
@@ -255,111 +274,203 @@ struct PortraitVideoExportSheet: View {
         )
     }
 
+    private var hasUnsavedExportedVideo: Bool {
+        exportedVideoURL != nil && !isSavingToPhotos
+    }
+
     private var bottomActionBar: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             if let progress {
                 progressView(for: progress)
             }
 
             if let statusMessage {
                 statusView(statusMessage)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(.scale(scale: 0.94).combined(with: .opacity))
             }
 
-            if !failedPhotos.isEmpty {
+            if !failedPhotos.isEmpty, exportTask == nil {
                 Button {
                     isShowingFailedPhotos = true
                 } label: {
-                    Label(skippedPhotosButtonTitle, systemImage: "exclamationmark.triangle")
+                    Label(skippedPhotosButtonTitle, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote.weight(.semibold))
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
+                .buttonStyle(floatingOverlayButtonStyle)
+                .foregroundStyle(.orange)
             }
 
             if exportTask != nil {
                 Button(role: .destructive, action: cancelExport) {
-                    Label("Cancel", systemImage: "xmark.circle")
+                    Label("Cancel Export", systemImage: "xmark.circle.fill")
+                        .font(.headline.weight(.semibold))
                         .frame(maxWidth: .infinity)
+                        .frame(height: 52)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
+                .buttonStyle(floatingOverlayButtonStyle)
+                .foregroundStyle(.red)
             } else if exportedVideoURL == nil {
                 Button(action: startExport) {
-                    Label("Create Video", systemImage: "film.stack")
-                        .frame(maxWidth: .infinity)
+                    Label("Create Video", systemImage: "film.stack.fill")
+                        .font(.headline.weight(.semibold))
+                        .padding(.horizontal, 24)
+                        .frame(minWidth: 220)
+                        .frame(height: 56)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(floatingOverlayButtonStyle)
                 .disabled(exportTask != nil || matchingPhotos.isEmpty)
             } else {
+                unsavedVideoReadyView
+
                 HStack(spacing: 10) {
                     Button(action: saveToPhotos) {
                         saveToPhotosLabel
                             .frame(maxWidth: .infinity)
+                            .frame(height: 52)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(floatingOverlayButtonStyle)
                     .disabled(isSavingToPhotos)
 
                     Button {
                         isShowingFilesExporter = true
                     } label: {
-                        Label("Files", systemImage: "folder")
+                        Label("Save to Files", systemImage: "folder.fill")
+                            .font(.headline.weight(.semibold))
                             .frame(maxWidth: .infinity)
+                            .frame(height: 52)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
+                    .buttonStyle(floatingOverlayButtonStyle)
                 }
             }
         }
-        .padding(.horizontal)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
-        .background(.bar)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 10)
+        .frame(maxWidth: 440)
+        .frame(maxWidth: .infinity)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: exportTask != nil)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: exportedVideoURL != nil)
         .animation(.easeInOut(duration: 0.25), value: statusMessage)
+    }
+
+    private var unsavedVideoReadyView: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.green)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Video Ready")
+                    .font(.headline.weight(.semibold))
+
+                Text(videoReadyDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .floatingOverlayGlass(cornerRadius: 24)
+    }
+
+    private var videoReadyDescription: String {
+        if failedPhotos.isEmpty {
+            return "Save it before closing. Unsaved export will be deleted."
+        }
+
+        let photoText = failedPhotos.count == 1 ? "photo was" : "photos were"
+        return "Save it before closing. \(failedPhotos.count) \(photoText) skipped."
     }
 
     @ViewBuilder
     private var saveToPhotosLabel: some View {
         if isSavingToPhotos {
-            HStack {
+            HStack(spacing: 8) {
                 ProgressView()
+                    .controlSize(.small)
                 Text("Saving...")
             }
+            .font(.headline.weight(.semibold))
         } else {
-            Label("Photos", systemImage: "photo.on.rectangle")
+            Label("Save to Photos", systemImage: "photo.on.rectangle.fill")
+                .font(.headline.weight(.semibold))
         }
     }
 
     private func progressView(for progress: PortraitVideoExportProgress) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(progressText(for: progress))
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+
+                Text(progressText(for: progress))
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+
+                Spacer(minLength: 8)
+
+                if let remainingText = progressTimeRemainingText(for: progress) {
+                    Text(remainingText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
 
             ProgressView(
                 value: Double(progress.completedPhotoCount),
                 total: Double(max(progress.totalPhotoCount, 1))
             )
+            .tint(.primary)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .floatingOverlayGlass(cornerRadius: 24)
+        .transition(.asymmetric(
+            insertion: .scale(scale: 0.9).combined(with: .opacity),
+            removal: .scale(scale: 0.96).combined(with: .opacity)
+        ))
     }
 
     private func statusView(_ message: String) -> some View {
         Label(message, systemImage: isStatusSuccess ? "checkmark.circle.fill" : "info.circle")
-            .font(.footnote)
+            .font(.footnote.weight(.semibold))
             .foregroundStyle(statusColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(statusColor.opacity(0.12), in: Capsule())
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .floatingOverlayGlass(cornerRadius: 22)
     }
 
     private var statusColor: Color {
         isStatusSuccess ? .green : .secondary
+    }
+
+    private var floatingOverlayButtonStyle: some PrimitiveButtonStyle {
+        if #available(iOS 26.0, *) {
+            return .glass(.regular.interactive())
+        } else {
+            return .plain
+        }
+    }
+
+    private func progressTimeRemainingText(for progress: PortraitVideoExportProgress) -> String? {
+        guard progress.phase != .preparing else { return nil }
+        guard progress.phase != .finishing else { return "<1 min left" }
+        guard let smoothedRemainingSeconds else { return nil }
+
+        if smoothedRemainingSeconds < 60 {
+            return "<1 min left"
+        }
+
+        let minutes = max(1, Int((smoothedRemainingSeconds / 60).rounded(.up)))
+        return "~\(minutes) min left"
     }
 
     private func summaryPill(title: String, subtitle: String, systemImage: String) -> some View {
@@ -399,6 +510,8 @@ struct PortraitVideoExportSheet: View {
         cleanupExportedVideo()
         exportedVideoURL = nil
         failedPhotos = []
+        exportStartedAt = Date()
+        smoothedRemainingSeconds = nil
         clearStatus()
         progress = PortraitVideoExportProgress(
             completedPhotoCount: 0,
@@ -415,29 +528,81 @@ struct PortraitVideoExportSheet: View {
                     includesDateBanner: includesDateBanner,
                     includesLocationBanner: includesLocationBanner
                 ) { newProgress in
-                    progress = newProgress
+                    updateProgress(newProgress)
                 }
 
                 exportedVideoURL = result.videoURL
                 failedPhotos = result.failedPhotos
                 progress = nil
-                isStatusSuccess = true
-                statusMessage = result.failedPhotos.isEmpty
-                    ? "Video ready."
-                    : "Video ready. \(result.failedPhotos.count) skipped."
+                smoothedRemainingSeconds = nil
+                clearStatus()
             } catch is CancellationError {
                 progress = nil
+                smoothedRemainingSeconds = nil
                 showStatus("Video creation cancelled.", success: false)
             } catch PortraitVideoExportError.noFramesWritten(let failures) {
                 failedPhotos = failures
                 progress = nil
+                smoothedRemainingSeconds = nil
                 showStatus("No video created. \(failures.count) skipped.", success: false)
             } catch {
                 progress = nil
+                smoothedRemainingSeconds = nil
                 showStatus("Video creation failed: \(error.localizedDescription)", success: false)
             }
 
             exportTask = nil
+        }
+    }
+
+    private func updateProgress(_ newProgress: PortraitVideoExportProgress) {
+        progress = newProgress
+        updateRemainingTimeEstimate(for: newProgress)
+    }
+
+    private func updateRemainingTimeEstimate(for progress: PortraitVideoExportProgress) {
+        guard progress.phase == .loading || progress.phase == .writing else {
+            if progress.phase == .preparing {
+                smoothedRemainingSeconds = nil
+            }
+            return
+        }
+
+        guard progress.completedPhotoCount >= 3,
+              progress.completedPhotoCount < progress.totalPhotoCount,
+              let exportStartedAt else {
+            smoothedRemainingSeconds = nil
+            return
+        }
+
+        let elapsedSeconds = Date().timeIntervalSince(exportStartedAt)
+        guard elapsedSeconds >= 1 else {
+            smoothedRemainingSeconds = nil
+            return
+        }
+
+        let completedWork = max(progress.completedWorkUnitCount, 0.1)
+        let remainingWork = max(progress.totalWorkUnitCount - progress.completedWorkUnitCount, 0)
+        let rawRemainingSeconds = elapsedSeconds / completedWork * remainingWork
+
+        if let previous = smoothedRemainingSeconds {
+            smoothedRemainingSeconds = previous * 0.85 + rawRemainingSeconds * 0.15
+        } else {
+            smoothedRemainingSeconds = rawRemainingSeconds
+        }
+    }
+
+    private func requestDismiss() {
+        if exportTask != nil {
+            cancelExport()
+            dismiss()
+            return
+        }
+
+        if hasUnsavedExportedVideo {
+            isShowingDiscardUnsavedExportAlert = true
+        } else {
+            dismiss()
         }
     }
 
@@ -602,6 +767,17 @@ private extension Calendar {
             byAdding: DateComponents(day: 1, second: -1),
             to: startOfDay(for: date)
         ) ?? date
+    }
+}
+
+private extension View {
+    func floatingOverlayGlass(cornerRadius: CGFloat) -> some View {
+        background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(.white.opacity(0.22), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.14), radius: 18, y: 10)
     }
 }
 

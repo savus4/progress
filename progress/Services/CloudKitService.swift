@@ -219,6 +219,13 @@ final class CloudKitService {
         return stagedURL
     }
 
+    nonisolated func isAssetAvailableForImmediateRead(named assetName: String) -> Bool {
+        let fileManager = FileManager.default
+        let stagedURL = Self.makeStagingDirectoryURL().appendingPathComponent(assetName)
+        let readableURL = Self.makeTemporaryReadableAssetsDirectoryURL().appendingPathComponent(assetName)
+        return fileManager.fileExists(atPath: stagedURL.path) || fileManager.fileExists(atPath: readableURL.path)
+    }
+
     func uploadStagedAsset(named assetName: String, photoID: UUID, role: PhotoAssetRole) async throws {
         guard let sourceURL = localAssetURLForUpload(named: assetName) else {
             logger.error("upload-staged-asset-missing name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public)")
@@ -617,7 +624,7 @@ final class CloudKitService {
             .appendingPathComponent("CloudKit", isDirectory: true)
     }
 
-    private static func makeTemporaryReadableAssetsDirectoryURL() -> URL {
+    nonisolated private static func makeTemporaryReadableAssetsDirectoryURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("CloudKitReadableAssets", isDirectory: true)
     }
@@ -653,7 +660,7 @@ final class CloudKitService {
         return values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0
     }
 
-    private static func makeStagingDirectoryURL() -> URL {
+    nonisolated private static func makeStagingDirectoryURL() -> URL {
         let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let bundleIdentifier = Bundle.main.bundleIdentifier ?? "progress"
