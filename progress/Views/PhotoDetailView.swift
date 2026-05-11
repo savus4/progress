@@ -260,7 +260,6 @@ struct PhotoDetailView: View {
     @State private var areControlsVisible = true
     @State private var isShowingShareSheet = false
     @State private var shareSheetURLs: [URL] = []
-    @State private var isShowingDeleteConfirmation = false
     @State private var actionError: PhotoDetailActionError?
     @State private var isPerformingAction = false
     @State private var hasSavedCurrentItemToLibrary = false
@@ -302,7 +301,7 @@ struct PhotoDetailView: View {
                 onClose: closeCurrentPhoto,
                 onShare: shareStillPhoto,
                 onSave: saveCurrentAssetToPhotoLibrary,
-                onDelete: { isShowingDeleteConfirmation = true }
+                onDelete: deleteCurrentPhoto
             )
         }
         .offset(y: verticalDismissOffset)
@@ -321,14 +320,6 @@ struct PhotoDetailView: View {
         }
         .sheet(isPresented: $isShowingShareSheet) {
             ActivityView(activityItems: shareSheetURLs.map { $0 as Any })
-        }
-        .alert("Delete Photo?", isPresented: $isShowingDeleteConfirmation, presenting: currentItem) { _ in
-            Button("Delete", role: .destructive) {
-                deleteCurrentPhoto()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("This removes the photo from your timeline.")
         }
         .alert("Action Failed", isPresented: actionErrorBinding) {
             Button("OK", role: .cancel) {
@@ -761,12 +752,7 @@ private final class ToolbarConfigViewController: UIViewController {
             save.sharesBackground = true
         }
 
-        let delete = Self.compactBarButtonItem(
-            systemName: "trash",
-            accessibilityLabel: "Delete",
-            target: self,
-            action: #selector(deleteTapped)
-        )
+        let delete = deleteBarButtonItem()
         delete.tintColor = .systemRed
         delete.isEnabled = configuration.isDeleteEnabled
 
@@ -861,6 +847,28 @@ private final class ToolbarConfigViewController: UIViewController {
         return item
     }
 
+    private func deleteBarButtonItem() -> UIBarButtonItem {
+        let image = UIImage(systemName: "trash")?.applyingSymbolConfiguration(
+            UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        )
+        let deleteAction = UIAction(
+            title: "Delete Photo",
+            image: UIImage(systemName: "trash"),
+            attributes: .destructive
+        ) { [weak self] _ in
+            self?.configuration?.onDelete()
+        }
+        let item = UIBarButtonItem(
+            image: image,
+            style: .plain,
+            target: nil,
+            action: nil
+        )
+        item.accessibilityLabel = "Delete"
+        item.menu = UIMenu(title: "Delete photo?", children: [deleteAction])
+        return item
+    }
+
     @objc private func closeTapped() {
         configuration?.onClose()
     }
@@ -871,10 +879,6 @@ private final class ToolbarConfigViewController: UIViewController {
 
     @objc private func saveTapped() {
         configuration?.onSave()
-    }
-
-    @objc private func deleteTapped() {
-        configuration?.onDelete()
     }
 
     private func setChromeVisible(_ isVisible: Bool, in navigationController: UINavigationController) {

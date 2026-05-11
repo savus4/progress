@@ -174,6 +174,20 @@ struct PhotoGridView: View {
                             }
                         }
                         .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
+                        .confirmationDialog(
+                            "Delete selected photos?",
+                            isPresented: $showingDeleteConfirmation,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Delete \(selectedPhotoIDs.count) Photo\(selectedPhotoIDs.count == 1 ? "" : "s")", role: .destructive) {
+                                deleteSelectedPhotos()
+                            }
+                            .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
+
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This action cannot be undone.")
+                        }
                     } else {
                         Button(action: openPortraitVideoExporter) {
                             Image(systemName: "film.stack")
@@ -217,20 +231,6 @@ struct PhotoGridView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(exportAlertMessage ?? "")
-            }
-            .confirmationDialog(
-                "Delete selected photos?",
-                isPresented: $showingDeleteConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("Delete \(selectedPhotoIDs.count) Photo\(selectedPhotoIDs.count == 1 ? "" : "s")", role: .destructive) {
-                    deleteSelectedPhotos()
-                }
-                .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
-
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This action cannot be undone.")
             }
         }
         .onAppear {
