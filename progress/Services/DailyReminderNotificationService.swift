@@ -37,7 +37,7 @@ struct DailyReminderTime: Codable, Identifiable, Hashable {
 final class DailyReminderNotificationService {
     static let shared = DailyReminderNotificationService()
 
-    static let maxRemindersPerDay = 3
+    static let maxRemindersPerDay = 5
     static let notificationUserInfoDestinationKey = "destination"
     static let notificationUserInfoSourceKey = "source"
     static let notificationCameraDestinationValue = "camera"
