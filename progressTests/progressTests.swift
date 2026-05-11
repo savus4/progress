@@ -165,6 +165,51 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
+    @Test("DecodedThumbnailCache returns cached prepared image")
+    func decodedThumbnailCacheReturnsCachedPreparedImage() async throws {
+        DecodedThumbnailCache.shared.removeAllImages()
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let photo = DailyPhoto(context: context)
+        photo.id = UUID()
+        try context.obtainPermanentIDs(for: [photo])
+
+        let input = makeImage(size: CGSize(width: 900, height: 700), color: .purple)
+        let thumbnailData = try #require(ThumbnailService.shared.generateThumbnail(from: input))
+
+        let firstImage = try #require(
+            await DecodedThumbnailCache.shared.image(for: photo.objectID, data: thumbnailData)
+        )
+        let cachedImage = try #require(DecodedThumbnailCache.shared.cachedImage(for: photo.objectID))
+        let secondImage = try #require(
+            await DecodedThumbnailCache.shared.image(for: photo.objectID, data: thumbnailData)
+        )
+
+        #expect(firstImage === cachedImage)
+        #expect(secondImage === cachedImage)
+    }
+
+    @MainActor
+    @Test("DecodedThumbnailCache coalesces duplicate decode requests")
+    func decodedThumbnailCacheCoalescesDuplicateDecodeRequests() async throws {
+        DecodedThumbnailCache.shared.removeAllImages()
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let photo = DailyPhoto(context: context)
+        photo.id = UUID()
+        try context.obtainPermanentIDs(for: [photo])
+
+        let input = makeImage(size: CGSize(width: 1200, height: 1200), color: .brown)
+        let thumbnailData = try #require(ThumbnailService.shared.generateThumbnail(from: input))
+
+        async let first = DecodedThumbnailCache.shared.image(for: photo.objectID, data: thumbnailData)
+        async let second = DecodedThumbnailCache.shared.image(for: photo.objectID, data: thumbnailData)
+        let (firstResult, secondResult) = await (first, second)
+        let firstImage = try #require(firstResult)
+        let secondImage = try #require(secondResult)
+
+        #expect(firstImage === secondImage)
+    }
+
+    @MainActor
     @Test("CloudKitService caches image bytes and resolves asset URL")
     func cloudKitCachesImageDataAndLoadsURL() async throws {
         let image = makeImage(size: CGSize(width: 320, height: 320), color: .green)

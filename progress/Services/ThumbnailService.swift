@@ -136,36 +136,60 @@ final class DecodedThumbnailCache {
     static let shared = DecodedThumbnailCache()
 
     private let cache = NSCache<NSString, UIImage>()
-    private let workerQueue = DispatchQueue(
-        label: "me.riepl.progress.thumbnail-decoding",
-        qos: .userInitiated
-    )
+    private let workerQueue: OperationQueue
+    private let inFlightLock = NSLock()
+    private var inFlightContinuations: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
 
     private init() {
         cache.countLimit = 512
         cache.totalCostLimit = 128 * 1_024 * 1_024
+        workerQueue = OperationQueue()
+        workerQueue.name = "me.riepl.progress.thumbnail-decoding"
+        workerQueue.qualityOfService = .userInitiated
+        workerQueue.maxConcurrentOperationCount = 4
     }
 
     func image(for objectID: NSManagedObjectID, data: Data?) async -> UIImage? {
         guard let data else { return nil }
 
         let stringKey = objectID.uriRepresentation().absoluteString
-        let key = stringKey as NSString
-        if let cachedImage = cache.object(forKey: key) {
+        if let cachedImage = cache.object(forKey: stringKey as NSString) {
             return cachedImage
         }
 
         return await withCheckedContinuation { continuation in
-            workerQueue.async {
-                let cacheKey = stringKey as NSString
-                guard let image = self.decodeThumbnailImage(from: data) else {
+            inFlightLock.lock()
+            if let cachedImage = cache.object(forKey: stringKey as NSString) {
+                inFlightLock.unlock()
+                continuation.resume(returning: cachedImage)
+                return
+            }
+            if inFlightContinuations[stringKey] != nil {
+                inFlightContinuations[stringKey]?.append(continuation)
+                inFlightLock.unlock()
+                return
+            }
+            inFlightContinuations[stringKey] = [continuation]
+            inFlightLock.unlock()
+
+            workerQueue.addOperation { [weak self] in
+                guard let self else {
                     continuation.resume(returning: nil)
                     return
                 }
 
+                guard let image = self.decodeThumbnailImage(from: data) else {
+                    self.resumeInFlightContinuations(for: stringKey, image: nil)
+                    return
+                }
+
                 let preparedImage = image.preparingForDisplay() ?? image
-                self.cache.setObject(preparedImage, forKey: cacheKey, cost: self.cacheCost(for: preparedImage))
-                continuation.resume(returning: preparedImage)
+                self.cache.setObject(
+                    preparedImage,
+                    forKey: stringKey as NSString,
+                    cost: self.cacheCost(for: preparedImage)
+                )
+                self.resumeInFlightContinuations(for: stringKey, image: preparedImage)
             }
         }
     }
@@ -180,6 +204,16 @@ final class DecodedThumbnailCache {
 
     func removeAllImages() {
         cache.removeAllObjects()
+    }
+
+    private func resumeInFlightContinuations(for stringKey: String, image: UIImage?) {
+        inFlightLock.lock()
+        let continuations = inFlightContinuations.removeValue(forKey: stringKey) ?? []
+        inFlightLock.unlock()
+
+        for continuation in continuations {
+            continuation.resume(returning: image)
+        }
     }
 
     private func cacheKey(for objectID: NSManagedObjectID) -> NSString {

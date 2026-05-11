@@ -249,7 +249,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var selectionPanAnchorIndexPath: IndexPath?
     private var selectionPanBaseSelection: Set<NSManagedObjectID> = []
     private var selectionPanOperation: SelectionPanOperation = .select
-    private var thumbnailTasks: [NSManagedObjectID: Task<Void, Never>] = [:]
+    private var thumbnailTasks: [NSManagedObjectID: ThumbnailTaskRecord] = [:]
     private var currentItemIDs: [NSManagedObjectID] = []
     private var itemIndexByID: [NSManagedObjectID: Int] = [:]
     private var currentChangeToken: Int?
@@ -278,6 +278,26 @@ final class PhotoGridCollectionViewController: UIViewController {
         case up
         case down
         case none
+    }
+
+    private enum ThumbnailLoadRole: Hashable {
+        case visible
+        case prefetch
+
+        var taskPriority: TaskPriority {
+            switch self {
+            case .visible:
+                return .userInitiated
+            case .prefetch:
+                return .utility
+            }
+        }
+    }
+
+    private struct ThumbnailTaskRecord {
+        let role: ThumbnailLoadRole
+        let token: UUID
+        let task: Task<Void, Never>
     }
 
     init() {
@@ -399,7 +419,7 @@ final class PhotoGridCollectionViewController: UIViewController {
                 isSelectionMode: self.isSelectionMode,
                 isSelected: self.selectedPhotoIDs.contains(objectID)
             )
-            self.loadThumbnail(for: item, into: cell)
+            self.prepareThumbnail(for: item, in: cell)
         }
 
         dataSource = UICollectionViewDiffableDataSource<UIKitPhotoGridSection, NSManagedObjectID>(
@@ -486,49 +506,23 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
     }
 
-    private func loadThumbnail(for item: UIKitPhotoGridItem, into cell: PhotoGridCollectionViewCell) {
+    private func prepareThumbnail(for item: UIKitPhotoGridItem, in cell: PhotoGridCollectionViewCell) {
         let objectID = item.objectID
+        let wasRepresentingObject = cell.representedObjectID == objectID
         cell.representedObjectID = objectID
 
         if let cachedImage = DecodedThumbnailCache.shared.cachedImage(for: objectID) {
             cell.setThumbnailImage(cachedImage)
-            return
+        } else if !wasRepresentingObject {
+            cell.setThumbnailImage(nil)
         }
+    }
 
-        thumbnailTasks[objectID]?.cancel()
-        let maxInflight = isScrollMotionActive ? maxInflightThumbnailTasksDuringScroll : maxInflightThumbnailTasks
-        guard thumbnailTasks.count < maxInflight else { return }
-        let thumbnailDataProvider = thumbnailDataProvider
-        thumbnailTasks[objectID] = Task.detached(priority: .utility) { [weak self, weak cell] in
-            guard !Task.isCancelled else {
-                await MainActor.run { [weak self] in
-                    self?.thumbnailTasks[objectID] = nil
-                }
-                return
-            }
+    private func loadThumbnail(for item: UIKitPhotoGridItem, into cell: PhotoGridCollectionViewCell) {
+        prepareThumbnail(for: item, in: cell)
 
-            let data = await thumbnailDataProvider.thumbnailData(for: objectID)
-            guard !Task.isCancelled else {
-                await MainActor.run { [weak self] in
-                    self?.thumbnailTasks[objectID] = nil
-                }
-                return
-            }
-
-            let image = await DecodedThumbnailCache.shared.image(for: objectID, data: data)
-            guard !Task.isCancelled else {
-                await MainActor.run { [weak self] in
-                    self?.thumbnailTasks[objectID] = nil
-                }
-                return
-            }
-            await MainActor.run { [weak self, weak cell] in
-                if cell?.representedObjectID == objectID {
-                    cell?.setThumbnailImage(image)
-                }
-                self?.thumbnailTasks[objectID] = nil
-            }
-        }
+        guard DecodedThumbnailCache.shared.cachedImage(for: item.objectID) == nil else { return }
+        startThumbnailTask(for: item.objectID, role: .visible, cell: cell)
     }
 
     private func prefetchThumbnail(for item: UIKitPhotoGridItem) {
@@ -536,46 +530,80 @@ final class PhotoGridCollectionViewController: UIViewController {
         if DecodedThumbnailCache.shared.cachedImage(for: objectID) != nil { return }
         guard thumbnailTasks[objectID] == nil else { return }
         let maxInflight = isScrollMotionActive ? maxInflightThumbnailTasksDuringScroll : maxInflightThumbnailTasks
-        guard thumbnailTasks.count < maxInflight else { return }
+        guard activePrefetchThumbnailTaskCount < maxInflight else { return }
+        startThumbnailTask(for: objectID, role: .prefetch, cell: nil)
+    }
+
+    private var activePrefetchThumbnailTaskCount: Int {
+        thumbnailTasks.values.reduce(0) { count, record in
+            record.role == .prefetch ? count + 1 : count
+        }
+    }
+
+    private func startThumbnailTask(
+        for objectID: NSManagedObjectID,
+        role: ThumbnailLoadRole,
+        cell: PhotoGridCollectionViewCell?
+    ) {
+        if let existingRecord = thumbnailTasks[objectID] {
+            switch (existingRecord.role, role) {
+            case (.visible, _), (.prefetch, .prefetch):
+                return
+            case (.prefetch, .visible):
+                existingRecord.task.cancel()
+                thumbnailTasks[objectID] = nil
+            }
+        }
+
         let thumbnailDataProvider = thumbnailDataProvider
-        thumbnailTasks[objectID] = Task.detached(priority: .utility) { [weak self] in
+        let token = UUID()
+        let task = Task.detached(priority: role.taskPriority) { [weak self, weak cell] in
             guard !Task.isCancelled else {
-                await MainActor.run { [weak self] in
-                    self?.thumbnailTasks[objectID] = nil
-                }
+                await self?.finishThumbnailTask(for: objectID, token: token)
                 return
             }
 
             let data = await thumbnailDataProvider.thumbnailData(for: objectID)
             guard !Task.isCancelled else {
-                await MainActor.run { [weak self] in
-                    self?.thumbnailTasks[objectID] = nil
-                }
+                await self?.finishThumbnailTask(for: objectID, token: token)
                 return
             }
 
-            _ = await DecodedThumbnailCache.shared.image(for: objectID, data: data)
+            let image = await DecodedThumbnailCache.shared.image(for: objectID, data: data)
             guard !Task.isCancelled else {
-                await MainActor.run { [weak self] in
-                    self?.thumbnailTasks[objectID] = nil
-                }
+                await self?.finishThumbnailTask(for: objectID, token: token)
                 return
             }
-            await MainActor.run { [weak self] in
-                self?.thumbnailTasks[objectID] = nil
+            await MainActor.run { [weak self, weak cell] in
+                guard let self else { return }
+                guard self.thumbnailTasks[objectID]?.token == token else { return }
+                if role == .visible, cell?.representedObjectID == objectID {
+                    cell?.setThumbnailImage(image)
+                }
+                self.thumbnailTasks[objectID] = nil
             }
         }
+
+        thumbnailTasks[objectID] = ThumbnailTaskRecord(role: role, token: token, task: task)
     }
 
-    private func cancelThumbnailTask(for objectID: NSManagedObjectID?) {
+    private func finishThumbnailTask(for objectID: NSManagedObjectID, token: UUID) {
+        guard thumbnailTasks[objectID]?.token == token else {
+            return
+        }
+        thumbnailTasks[objectID] = nil
+    }
+
+    private func cancelThumbnailTask(for objectID: NSManagedObjectID?, roles: Set<ThumbnailLoadRole>) {
         guard let objectID else { return }
-        thumbnailTasks[objectID]?.cancel()
+        guard let record = thumbnailTasks[objectID], roles.contains(record.role) else { return }
+        record.task.cancel()
         thumbnailTasks[objectID] = nil
     }
 
     private func cancelAllThumbnailTasks() {
-        for task in thumbnailTasks.values {
-            task.cancel()
+        for record in thumbnailTasks.values {
+            record.task.cancel()
         }
         thumbnailTasks.removeAll(keepingCapacity: false)
     }
@@ -841,20 +869,28 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
 
     func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
         for indexPath in indexPaths where indexPath.item < items.count {
-            cancelThumbnailTask(for: items[indexPath.item].objectID)
+            cancelThumbnailTask(for: items[indexPath.item].objectID, roles: [.prefetch])
         }
     }
 
-    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-        guard let gridCell = cell as? PhotoGridCollectionViewCell else { return }
-        if let representedObjectID = gridCell.representedObjectID {
-            cancelThumbnailTask(for: representedObjectID)
+    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        guard indexPath.item < items.count,
+              let gridCell = cell as? PhotoGridCollectionViewCell else {
             return
         }
 
-        if indexPath.item < items.count {
-            cancelThumbnailTask(for: items[indexPath.item].objectID)
-        }
+        let item = items[indexPath.item]
+        gridCell.configure(
+            with: item,
+            isSelectionMode: isSelectionMode,
+            isSelected: selectedPhotoIDs.contains(item.objectID)
+        )
+        loadThumbnail(for: item, into: gridCell)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        // Let visible loads finish into the shared cache. Rubber-band scrolling can briefly
+        // end-display cells that immediately reappear; canceling here causes visible flicker.
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
