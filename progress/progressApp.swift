@@ -39,6 +39,8 @@ struct progressApp: App {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    private var backgroundUploadTask: UIBackgroundTaskIdentifier = .invalid
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -73,6 +75,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func applicationDidEnterBackground(_ application: UIApplication) {
         PhotoUploadService.scheduleBackgroundProcessing()
+        beginBackgroundUploadTaskIfNeeded(application)
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
@@ -104,5 +107,28 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         await MainActor.run {
             NotificationNavigationCoordinator.shared.requestCameraOpenFromNotification()
         }
+    }
+
+    private func beginBackgroundUploadTaskIfNeeded(_ application: UIApplication) {
+        guard backgroundUploadTask == .invalid else { return }
+
+        backgroundUploadTask = application.beginBackgroundTask(withName: "PhotoUpload") { [weak self] in
+            Task { @MainActor in
+                await PhotoUploadService.shared.cancelPendingWork()
+                self?.endBackgroundUploadTask(application)
+            }
+        }
+
+        Task { @MainActor in
+            await PhotoUploadService.shared.processPendingUploadsDuringBackgroundTime()
+            endBackgroundUploadTask(application)
+        }
+    }
+
+    private func endBackgroundUploadTask(_ application: UIApplication) {
+        guard backgroundUploadTask != .invalid else { return }
+
+        application.endBackgroundTask(backgroundUploadTask)
+        backgroundUploadTask = .invalid
     }
 }

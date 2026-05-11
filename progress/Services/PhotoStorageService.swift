@@ -1924,6 +1924,12 @@ actor PhotoUploadService {
         _ = await processPendingUploads(maxCount: nil)
     }
 
+    func processPendingUploadsDuringBackgroundTime() async {
+        cancelProcessingRequested = false
+        await expediteRetryableUploadsIfPossible(force: false)
+        _ = await processPendingUploads(maxCount: nil, schedulesRemainingWork: false)
+    }
+
     func processPendingUploadsForTesting() async {
         cancelProcessingRequested = false
         _ = await processPendingUploads(maxCount: nil)
@@ -1966,7 +1972,7 @@ actor PhotoUploadService {
     }
 
     @discardableResult
-    private func processPendingUploads(maxCount: Int?) async -> Int {
+    private func processPendingUploads(maxCount: Int?, schedulesRemainingWork: Bool = true) async -> Int {
         guard !isProcessing else {
             return await pendingUploadCount()
         }
@@ -2042,7 +2048,7 @@ actor PhotoUploadService {
         }
 
         let remaining = await pendingUploadCount()
-        if remaining > 0 {
+        if schedulesRemainingWork, remaining > 0 {
             Self.scheduleBackgroundProcessing(earliestBeginDate: await nextRetryDate())
         }
         return remaining
