@@ -77,8 +77,8 @@ final class DailyReminderNotificationService {
 
             for (index, reminderTime) in sanitizedTimes.enumerated() {
                 let content = UNMutableNotificationContent()
-                content.title = "Take today's progress photo"
-                content.body = "Open the camera and capture your daily picture."
+                content.title = "Take today's \(Self.appDisplayName) photo"
+                content.body = "Open \(Self.appDisplayName) and capture your daily picture."
                 content.sound = .default
                 content.userInfo = [
                     Self.notificationUserInfoDestinationKey: Self.notificationCameraDestinationValue,
@@ -117,6 +117,10 @@ final class DailyReminderNotificationService {
             && source == Self.notificationSourceValue
     }
 
+    func clearAllDeliveredNotifications() {
+        center.removeAllDeliveredNotifications()
+    }
+
     private func persistReminderTimes(_ times: [DailyReminderTime]) {
         guard let data = try? JSONEncoder().encode(times) else { return }
         UserDefaults.standard.set(data, forKey: reminderTimesKey)
@@ -153,10 +157,27 @@ final class DailyReminderNotificationService {
         "daily-photo-reminder-\(index)"
     }
 
+    private static var appDisplayName: String {
+        if let displayName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String,
+           !displayName.isEmpty {
+            return displayName
+        }
+
+        if let bundleName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String,
+           !bundleName.isEmpty {
+            return bundleName
+        }
+
+        return "Work in Progress"
+    }
+
+    private var reminderIdentifiers: [String] {
+        (0..<Self.maxRemindersPerDay).map(reminderIdentifier)
+    }
+
     private func clearReminderNotifications() async {
-        let identifiers = (0..<Self.maxRemindersPerDay).map(reminderIdentifier)
-        center.removePendingNotificationRequests(withIdentifiers: identifiers)
-        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        center.removePendingNotificationRequests(withIdentifiers: reminderIdentifiers)
+        clearAllDeliveredNotifications()
     }
 
     private func ensureAuthorization() async throws -> Bool {

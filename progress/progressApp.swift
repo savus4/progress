@@ -13,6 +13,7 @@ import OSLog
 @main
 struct progressApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
 
     let persistenceController = PersistenceController.shared
 
@@ -24,6 +25,10 @@ struct progressApp: App {
         WindowGroup {
             ContentView()
                 .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
+                }
         }
     }
 
@@ -79,6 +84,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
+        DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
+
         Task {
             await PhotoUploadService.shared.enqueuePendingUploads(
                 expeditingRetries: true,
@@ -99,6 +106,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        center.removeAllDeliveredNotifications()
+
         let userInfo = response.notification.request.content.userInfo
         guard DailyReminderNotificationService.shared.isDailyReminderNotification(userInfo: userInfo) else {
             return

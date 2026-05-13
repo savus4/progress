@@ -394,11 +394,12 @@ final class PhotoGridCollectionViewController: UIViewController {
             itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.objectID, $0) })
             itemIndexByID = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.objectID, $0.offset) })
 
+            let previousItemIDs = currentItemIDs
             let nextItemIDs = items.map(\.objectID)
-            if nextItemIDs != currentItemIDs {
+            if nextItemIDs != previousItemIDs {
                 currentItemIDs = nextItemIDs
                 lastAppliedSelectedPhotoIDs = []
-                applySnapshot()
+                applySnapshot(animatingDifferences: previousItemIDs.isEmpty == false && collectionView.window != nil)
             }
         }
 
@@ -429,11 +430,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
     }
 
-    private func applySnapshot() {
+    private func applySnapshot(animatingDifferences: Bool = false) {
         var snapshot = NSDiffableDataSourceSnapshot<UIKitPhotoGridSection, NSManagedObjectID>()
         snapshot.appendSections([UIKitPhotoGridSection.main])
         snapshot.appendItems(items.map(\.objectID), toSection: UIKitPhotoGridSection.main)
-        dataSource.apply(snapshot, animatingDifferences: false)
+        dataSource.apply(snapshot, animatingDifferences: animatingDifferences)
     }
 
     private func synchronizeSelection(animated: Bool) {
