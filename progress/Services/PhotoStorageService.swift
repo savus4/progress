@@ -110,7 +110,8 @@ final class PhotoStorageService {
         livePhotoImageData: Data? = nil,
         livePhotoVideoURL: URL? = nil,
         location: (latitude: Double, longitude: Double)?,
-        context: NSManagedObjectContext
+        context: NSManagedObjectContext,
+        enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let photoID = UUID()
         let sourceImageData = livePhotoImageData ?? imageData
@@ -181,23 +182,28 @@ final class PhotoStorageService {
             await PendingUploadManifestService.shared.remove(photoID: photoID)
             throw error
         }
-        Task.detached(priority: .utility) {
-            await PhotoUploadService.shared.enqueuePendingUploads()
+        if enqueuesPendingUpload {
+            Task.detached(priority: .utility) {
+                await PhotoUploadService.shared.enqueuePendingUploads()
+            }
         }
         return objectID
     }
 
     func saveImportedPhoto(
         imageData: Data,
-        context: NSManagedObjectContext
+        context: NSManagedObjectContext,
+        enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: nil,
             context: context
         )
-        Task.detached(priority: .utility) {
-            await PhotoUploadService.shared.enqueuePendingUploads()
+        if enqueuesPendingUpload {
+            Task.detached(priority: .utility) {
+                await PhotoUploadService.shared.enqueuePendingUploads()
+            }
         }
         return storedPhoto.objectID
     }
@@ -205,15 +211,18 @@ final class PhotoStorageService {
     func saveImportedLivePhoto(
         imageData: Data,
         videoURL: URL,
-        context: NSManagedObjectContext
+        context: NSManagedObjectContext,
+        enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: videoURL,
             context: context
         )
-        Task.detached(priority: .utility) {
-            await PhotoUploadService.shared.enqueuePendingUploads()
+        if enqueuesPendingUpload {
+            Task.detached(priority: .utility) {
+                await PhotoUploadService.shared.enqueuePendingUploads()
+            }
         }
         return storedPhoto.objectID
     }
@@ -221,7 +230,8 @@ final class PhotoStorageService {
     func saveImportedPhotos(
         _ payloads: [ImportedPhotoPayload],
         batchSize: Int = 4,
-        context: NSManagedObjectContext? = nil
+        context: NSManagedObjectContext? = nil,
+        enqueuesPendingUploads: Bool = true
     ) async -> ImportedPhotoBatchResult {
         guard !payloads.isEmpty else {
             return ImportedPhotoBatchResult(importedCount: 0, duplicateCount: 0, failedCount: 0, failureMessages: [])
@@ -367,7 +377,7 @@ final class PhotoStorageService {
             "Imported \(importedCount, privacy: .public) photos, skipped \(duplicateCount, privacy: .public) duplicates, failed \(failedCount, privacy: .public), elapsed \(String(describing: elapsed), privacy: .public)"
         )
 
-        if importedCount > 0 {
+        if importedCount > 0, enqueuesPendingUploads {
             Task.detached(priority: .utility) {
                 await PhotoUploadService.shared.enqueuePendingUploads()
             }
@@ -539,6 +549,44 @@ final class PhotoStorageService {
             return assetNames
         }
         await deleteAssets(named: assetNames)
+    }
+
+    func deletePhotos(
+        _ objectIDs: [NSManagedObjectID],
+        context: NSManagedObjectContext,
+        deletesAssetsInBackground: Bool = true
+    ) async throws -> Int {
+        let uniqueObjectIDs = Array(Set(objectIDs))
+        guard !uniqueObjectIDs.isEmpty else { return 0 }
+
+        let (assetNames, deletedCount) = try await context.perform {
+            var assetNames = Set<String>()
+            var deletedCount = 0
+
+            for objectID in uniqueObjectIDs {
+                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
+                    continue
+                }
+
+                assetNames.formUnion(self.assetNames(for: photo))
+                context.delete(photo)
+                deletedCount += 1
+            }
+
+            if context.hasChanges {
+                try context.save()
+            }
+
+            return (assetNames, deletedCount)
+        }
+
+        if deletesAssetsInBackground {
+            await deleteAssetsInBackground(named: assetNames)
+        } else {
+            await deleteAssets(named: assetNames)
+        }
+
+        return deletedCount
     }
 
     func photoCount(
@@ -1175,6 +1223,19 @@ final class PhotoStorageService {
         await RemoteAssetDeletionService.shared.enqueue(assetNames: assetNames)
     }
 
+    private func deleteAssetsInBackground(named assetNames: Set<String>) async {
+        guard !assetNames.isEmpty else { return }
+
+        await RemoteAssetDeletionService.shared.enqueueForDeferredProcessing(assetNames: assetNames)
+        Task.detached(priority: .utility) {
+            for assetName in assetNames {
+                await CloudKitService.shared.deleteAsset(named: assetName)
+            }
+
+            await RemoteAssetDeletionService.shared.processPendingDeletions()
+        }
+    }
+
     private func deleteAssetsAndWaitForRemoteCleanup(named assetNames: Set<String>) async -> Set<String> {
         guard !assetNames.isEmpty else { return [] }
 
@@ -1613,6 +1674,28 @@ actor RemoteAssetDeletionService {
         }
 
         await processPendingDeletions()
+    }
+
+    func enqueueForDeferredProcessing(assetNames: Set<String>) async {
+        guard !assetNames.isEmpty else { return }
+        loadQueueIfNeeded()
+
+        var didChangeQueue = false
+        for assetName in assetNames {
+            if queuedDeletionsByAssetName[assetName] == nil {
+                queuedDeletionsByAssetName[assetName] = PendingRemoteAssetDeletion(
+                    assetName: assetName,
+                    attemptCount: 0,
+                    retryAfter: nil,
+                    lastErrorDescription: nil
+                )
+                didChangeQueue = true
+            }
+        }
+
+        if didChangeQueue {
+            persistQueue()
+        }
     }
 
     func enqueueAndAttemptImmediateDeletion(assetNames: Set<String>) async -> Set<String> {

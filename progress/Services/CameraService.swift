@@ -33,6 +33,13 @@ class CameraService: NSObject, ObservableObject {
     }
     
     func checkAuthorization() async {
+        if usesMockCapture {
+            await MainActor.run {
+                isAuthorized = true
+            }
+            return
+        }
+
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             await MainActor.run {
@@ -122,7 +129,7 @@ class CameraService: NSObject, ObservableObject {
     }
     
     func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
-        if processInfo.arguments.contains("UI_TEST_MOCK_CAPTURE") {
+        if usesMockCapture {
             simulateMockCapture(location: location)
             return
         }
@@ -207,12 +214,18 @@ class CameraService: NSObject, ObservableObject {
         capturedPhotoData = data
         capturedStillImage = image
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
             self.capturedImage = image
             self.capturedImageData = data
             self.captureFinished += 1
             self.captureCompleted += 1
         }
+    }
+
+    private var usesMockCapture: Bool {
+        processInfo.arguments.contains("UI_TEST_MOCK_CAPTURE")
+            || processInfo.environment["UI_TEST_MOCK_CAPTURE"] == "1"
     }
 
     private func gpsMetadataDictionary(for location: CLLocation) -> [String: Any] {

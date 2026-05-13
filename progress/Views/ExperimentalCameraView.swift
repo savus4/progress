@@ -67,6 +67,11 @@ struct ExperimentalCameraView: View {
         guideInteractionDisabled || isEditingGuides
     }
 
+    private var usesMockCapture: Bool {
+        processInfo.arguments.contains("UI_TEST_MOCK_CAPTURE")
+            || processInfo.environment["UI_TEST_MOCK_CAPTURE"] == "1"
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let bottomInset = geometry.safeAreaInsets.bottom
@@ -145,13 +150,20 @@ struct ExperimentalCameraView: View {
             )
         }
         .task {
+            if usesMockCapture {
+                presentMockCapturePreview()
+                return
+            }
+
             await cameraService.checkAuthorization()
             if cameraService.isAuthorized {
                 cameraService.setupCamera()
                 cameraService.startSession()
             }
 
-            locationService.requestPermission()
+            if !usesMockCapture {
+                locationService.requestPermission()
+            }
         }
         .onDisappear {
             cameraService.stopSession()
@@ -355,6 +367,12 @@ struct ExperimentalCameraView: View {
 
     private func capturePhoto() {
         guard !showingCapturePreview else { return }
+
+        if usesMockCapture {
+            presentMockCapturePreview()
+            return
+        }
+
         isCapturing = true
         #if targetEnvironment(simulator)
         captureFeedbackStage = .processingCapture
@@ -367,6 +385,38 @@ struct ExperimentalCameraView: View {
         #else
         cameraService.capturePhoto(withLivePhoto: true, location: captureLocation)
         #endif
+    }
+
+    private func presentMockCapturePreview() {
+        let size = CGSize(width: 1200, height: 1600)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            UIColor.systemYellow.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: 96),
+                .foregroundColor: UIColor.black,
+                .paragraphStyle: paragraphStyle
+            ]
+            let text = "UI TEST"
+            let rect = CGRect(x: 0, y: size.height / 2 - 60, width: size.width, height: 120)
+            text.draw(in: rect, withAttributes: attributes)
+        }
+
+        pendingCaptureImage = image
+        pendingCaptureImageData = image.jpegData(compressionQuality: 0.95)
+        pendingLivePhotoImageData = nil
+        pendingLivePhotoImageURL = nil
+        pendingLivePhotoVideoURL = nil
+        isCapturing = false
+        captureFeedbackStage = nil
+        isAnimatingPreviewToGrid = false
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+            showingCapturePreview = true
+        }
     }
 
     private func retakeCapture() {

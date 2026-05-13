@@ -490,9 +490,11 @@ struct PhotoGridView: View {
 
         Task { @MainActor in
             do {
-                for photoID in photoIDsToDelete {
-                    try await PhotoStorageService.shared.deletePhoto(photoID, context: viewContext)
-                }
+                _ = try await PhotoStorageService.shared.deletePhotos(
+                    photoIDsToDelete,
+                    context: viewContext,
+                    deletesAssetsInBackground: true
+                )
 
                 isDeletingSelection = false
                 isSelectionMode = false

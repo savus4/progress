@@ -282,6 +282,11 @@ final class CloudKitService {
         if fileManager.fileExists(atPath: stagedURL.path) {
             try? fileManager.removeItem(at: stagedURL)
         }
+
+        let readableURL = temporaryReadableURL(for: assetName)
+        if fileManager.fileExists(atPath: readableURL.path) {
+            try? fileManager.removeItem(at: readableURL)
+        }
     }
 
     func deleteRemoteAsset(named assetName: String) async {

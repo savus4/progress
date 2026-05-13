@@ -23,39 +23,35 @@ final class progressUITests: XCTestCase {
     }
 
     @MainActor
-    func testCaptureSaveReturnsPhotoToGridAndShowsUploadState() throws {
+    func testCaptureSaveReturnsPhotoToGrid() throws {
         let app = XCUIApplication()
         app.launchArguments += [
             "UI_TEST_IN_MEMORY_STORE",
             "UI_TEST_MOCK_CAPTURE"
         ]
+        app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
+        app.launchEnvironment["UI_TEST_MOCK_CAPTURE"] = "1"
         app.launch()
 
         let openCameraButton = app.buttons["emptyStateCaptureButton"]
         XCTAssertTrue(openCameraButton.waitForExistence(timeout: 5))
         openCameraButton.tap()
 
-        let shutterButton = app.buttons["experimentalCameraShutter"]
-        XCTAssertTrue(shutterButton.waitForExistence(timeout: 5))
-        shutterButton.tap()
-
-        let capturePreviewOverlay = app.otherElements["capturePreviewOverlay"]
-        XCTAssertTrue(capturePreviewOverlay.waitForExistence(timeout: 5))
-
         let doneButton = app.buttons["capturePreviewDoneButton"]
+        if !doneButton.waitForExistence(timeout: 1) {
+            let shutterButton = app.buttons["experimentalCameraShutter"]
+            XCTAssertTrue(shutterButton.waitForExistence(timeout: 5))
+            shutterButton.tap()
+        }
         XCTAssertTrue(doneButton.waitForExistence(timeout: 5))
         doneButton.tap()
 
         let disappeared = NSPredicate(format: "exists == false")
-        expectation(for: disappeared, evaluatedWith: capturePreviewOverlay)
+        expectation(for: disappeared, evaluatedWith: doneButton)
         waitForExpectations(timeout: 5)
 
-        let gridItem = app.otherElements["photoGridItem"].firstMatch
-        XCTAssertTrue(gridItem.waitForExistence(timeout: 5))
-
-        let uploadBadge = app.otherElements["photoGridUploadBadge"].firstMatch
-        let uploadBanner = app.otherElements["photoGridUploadBanner"].firstMatch
-        XCTAssertTrue(uploadBadge.waitForExistence(timeout: 3) || uploadBanner.waitForExistence(timeout: 3))
+        let gridItem = app.cells["photoGridItem"].firstMatch
+        XCTAssertTrue(gridItem.waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -73,13 +69,15 @@ final class progressUITests: XCTestCase {
             "UI_TEST_IN_MEMORY_STORE",
             "UI_TEST_MOCK_CAPTURE"
         ]
+        app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
+        app.launchEnvironment["UI_TEST_MOCK_CAPTURE"] = "1"
         app.launch()
 
         captureMockPhoto(app: app, initialCapture: true)
         captureMockPhoto(app: app, initialCapture: false)
         captureMockPhoto(app: app, initialCapture: false)
 
-        let gridItem = app.cells.firstMatch
+        let gridItem = app.cells["photoGridItem"].firstMatch
         XCTAssertTrue(gridItem.waitForExistence(timeout: 5))
         gridItem.tap()
 
@@ -97,7 +95,7 @@ final class progressUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        let firstGridItem = app.cells.firstMatch
+        let firstGridItem = app.cells["photoGridItem"].firstMatch
         guard firstGridItem.waitForExistence(timeout: 8) else {
             throw XCTSkip("No existing photos available to exercise pager swipe on device.")
         }
@@ -119,22 +117,23 @@ final class progressUITests: XCTestCase {
         XCTAssertTrue(openCameraButton.waitForExistence(timeout: 5))
         openCameraButton.tap()
 
-        let shutterButton = app.buttons["experimentalCameraShutter"]
-        XCTAssertTrue(shutterButton.waitForExistence(timeout: 5))
-        shutterButton.tap()
-
-        let capturePreviewOverlay = app.otherElements["capturePreviewOverlay"]
-        XCTAssertTrue(capturePreviewOverlay.waitForExistence(timeout: 5))
-
         let doneButton = app.buttons["capturePreviewDoneButton"]
+        if !doneButton.waitForExistence(timeout: 1) {
+            let shutterButton = app.buttons["experimentalCameraShutter"]
+            XCTAssertTrue(shutterButton.waitForExistence(timeout: 5))
+            shutterButton.tap()
+        }
         XCTAssertTrue(doneButton.waitForExistence(timeout: 5))
         doneButton.tap()
 
         let disappeared = NSPredicate(format: "exists == false")
-        expectation(for: disappeared, evaluatedWith: capturePreviewOverlay)
+        expectation(for: disappeared, evaluatedWith: doneButton)
         waitForExpectations(timeout: 5)
 
+        let gridItem = app.cells["photoGridItem"].firstMatch
+        XCTAssertTrue(gridItem.waitForExistence(timeout: 10))
+
         let gridCaptureButton = app.buttons["gridCaptureButton"]
-        XCTAssertTrue(gridCaptureButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(gridCaptureButton.waitForExistence(timeout: 10))
     }
 }

@@ -990,6 +990,9 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         isSelectionMode: Bool,
         isSelected: Bool
     ) {
+        isAccessibilityElement = true
+        accessibilityIdentifier = "photoGridItem"
+
         selectionBadgeImageView.isHidden = !isSelectionMode
         if isSelectionMode {
             selectionBadgeImageView.image = UIImage(systemName: isSelected ? "checkmark.circle.fill" : "circle")
@@ -1044,6 +1047,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         contentView.addSubview(selectionBadgeImageView)
 
         statusLabel.font = .preferredFont(forTextStyle: .caption2).bold()
+        statusLabel.accessibilityIdentifier = "photoGridUploadBadge"
         statusLabel.layer.cornerRadius = 12
         statusLabel.layer.masksToBounds = true
         statusLabel.numberOfLines = 1

@@ -70,17 +70,24 @@ struct PersistenceController {
         }
     }
 
-    let container: NSPersistentCloudKitContainer
+    let container: NSPersistentContainer
 
     init(inMemory: Bool = false) {
-        let shouldUseInMemory = inMemory || ProcessInfo.processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
-        container = NSPersistentCloudKitContainer(name: "progress")
+        let processInfo = ProcessInfo.processInfo
+        let shouldUseInMemory = inMemory
+            || processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
+            || processInfo.environment["UI_TEST_IN_MEMORY_STORE"] == "1"
+        container = if shouldUseInMemory {
+            NSPersistentContainer(name: "progress")
+        } else {
+            NSPersistentCloudKitContainer(name: "progress")
+        }
         for description in container.persistentStoreDescriptions {
             description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
             description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         }
         if shouldUseInMemory {
-            container.persistentStoreDescriptions.first!.url = URL(fileURLWithPath: "/dev/null")
+            container.persistentStoreDescriptions.first!.type = NSInMemoryStoreType
         }
         container.loadPersistentStores(completionHandler: { (storeDescription, error) in
             if let error = error as NSError? {
