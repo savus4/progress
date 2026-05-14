@@ -579,7 +579,7 @@ final class PortraitVideoExportService {
                 seconds: Double(frameOffset) / Double(outputFrameRate),
                 preferredTimescale: 600
             )
-            let image = try generator.copyCGImage(at: frameTime, actualTime: nil)
+            let image = try await generator.image(at: frameTime).image
 
             try await appendFrame(
                 image,

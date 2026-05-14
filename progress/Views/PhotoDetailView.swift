@@ -864,9 +864,9 @@ private final class ToolbarConfigViewController: UIViewController {
             save,
             Self.flexibleSpaceItem(),
             heart,
+            Self.fixedSpaceItem(width: 44),
             Self.flexibleSpaceItem(),
-            delete,
-            Self.invisibleBalanceItem()
+            delete
         ]
 
         chromeViewController.setToolbarItems(items, animated: false)
@@ -920,12 +920,9 @@ private final class ToolbarConfigViewController: UIViewController {
         UIBarButtonItem(systemItem: .flexibleSpace)
     }
 
-    private static func invisibleBalanceItem() -> UIBarButtonItem {
-        let view = UIView(frame: CGRect(x: 0, y: 0, width: 44, height: 1))
-        view.isUserInteractionEnabled = false
-        view.isAccessibilityElement = false
-        let item = UIBarButtonItem(customView: view)
-        item.isEnabled = false
+    private static func fixedSpaceItem(width: CGFloat) -> UIBarButtonItem {
+        let item = UIBarButtonItem(systemItem: .fixedSpace)
+        item.width = width
         return item
     }
 

@@ -1,3 +1,4 @@
+import AVKit
 import Photos
 import SwiftUI
 
@@ -10,7 +11,7 @@ struct PortraitVideoExportSheet: View {
     @AppStorage("portraitVideoIncludesDateBanner") private var includesDateBanner = false
     @AppStorage("portraitVideoIncludesLocationBanner") private var includesLocationBanner = false
     @AppStorage("portraitVideoIncludesHeartedLivePhotoVideos") private var includesHeartedLivePhotoVideos = false
-    @State private var usesAllPhotos = true
+    @AppStorage(PortraitVideoExportStorageKeys.usesAllPhotos) private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
     @State private var progress: PortraitVideoExportProgress?
@@ -19,6 +20,7 @@ struct PortraitVideoExportSheet: View {
     @State private var failedPhotos: [PortraitVideoExportFailedPhoto] = []
     @State private var isShowingFilesExporter = false
     @State private var isShowingFailedPhotos = false
+    @State private var isShowingVideoPreview = false
     @State private var isSavingToPhotos = false
     @State private var statusMessage: String?
     @State private var isStatusSuccess = false
@@ -26,6 +28,7 @@ struct PortraitVideoExportSheet: View {
     @State private var exportStartedAt: Date?
     @State private var smoothedRemainingSeconds: TimeInterval?
     @State private var isShowingDiscardUnsavedExportAlert = false
+    @State private var isShowingDiscardExportConfirmation = false
 
     private let calendar = Calendar.current
     private let availableDateRange: ClosedRange<Date>
@@ -41,8 +44,13 @@ struct PortraitVideoExportSheet: View {
         let upperBound = calendar.endOfDay(for: maximumDate)
 
         availableDateRange = lowerBound...upperBound
-        _startDate = State(initialValue: lowerBound)
-        _endDate = State(initialValue: calendar.startOfDay(for: maximumDate))
+        let selectedRange = Self.storedSelectedRange(
+            availableDateRange: lowerBound...upperBound,
+            defaultEndDate: calendar.startOfDay(for: maximumDate),
+            calendar: calendar
+        )
+        _startDate = State(initialValue: selectedRange.lowerBound)
+        _endDate = State(initialValue: selectedRange.upperBound)
     }
 
     var body: some View {
@@ -75,7 +83,12 @@ struct PortraitVideoExportSheet: View {
                     .disabled(exportTask != nil)
                 }
             }
-            .interactiveDismissDisabled(exportTask != nil || hasUnsavedExportedVideo)
+            .background {
+                InteractiveDismissAttemptReader(
+                    isDismissDisabled: isInteractiveDismissDisabled,
+                    onAttempt: handleInteractiveDismissAttempt
+                )
+            }
             .alert("Discard Unsaved Video?", isPresented: $isShowingDiscardUnsavedExportAlert) {
                 Button("Keep Editing", role: .cancel) {}
                 Button("Discard Video", role: .destructive) {
@@ -89,14 +102,16 @@ struct PortraitVideoExportSheet: View {
                 if newValue > endDate {
                     endDate = newValue
                 }
+                storeSelectedRange()
             }
             .onChange(of: endDate) { _, newValue in
                 if newValue < startDate {
                     startDate = newValue
                 }
+                storeSelectedRange()
             }
             .onDisappear {
-                if !isShowingFilesExporter {
+                if !isShowingFilesExporter && !isShowingVideoPreview {
                     cleanupExportedVideo()
                 }
             }
@@ -107,7 +122,7 @@ struct PortraitVideoExportSheet: View {
                 if let exportedVideoURL {
                     ExportDocumentPicker(urls: [exportedVideoURL]) { didExport in
                         if didExport {
-                            showStatus("Saved to Files.", success: true, autoDismiss: true)
+                            showStatus("Saved to Files.", success: true)
                         }
                     }
                 }
@@ -115,9 +130,18 @@ struct PortraitVideoExportSheet: View {
             .sheet(isPresented: $isShowingFailedPhotos) {
                 PortraitVideoExportFailuresView(failures: failedPhotos)
             }
+            .fullScreenCover(isPresented: $isShowingVideoPreview) {
+                if let exportedVideoURL {
+                    PortraitVideoPreviewPlayer(url: exportedVideoURL) {
+                        isShowingVideoPreview = false
+                    }
+                        .ignoresSafeArea()
+                }
+            }
             .onAppear {
                 picturesPerSecond = clampedPicturesPerSecond
                 selectedQualityRawValue = selectedQuality.rawValue
+                clampAndStoreSelectedRange()
             }
         }
     }
@@ -177,8 +201,21 @@ struct PortraitVideoExportSheet: View {
                 Label("Show Location Banner", systemImage: "location")
             }
 
-            Toggle(isOn: $includesHeartedLivePhotoVideos) {
-                Label("Use Favorite Live Motion", systemImage: "heart.fill")
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: includesHeartedLivePhotoVideosBinding) {
+                    Label("Use Live Photos of Favorites", systemImage: "heart.fill")
+                }
+                .disabled(!hasHeartedPhotos)
+
+                Text("Video part of your favorited photos is inserted into the video.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if !hasHeartedPhotos {
+                    Text("No photos have been hearted yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -262,8 +299,16 @@ struct PortraitVideoExportSheet: View {
         min(max(picturesPerSecond, 1), 60)
     }
 
+    private var hasHeartedPhotos: Bool {
+        photos.contains(where: \.isHearted)
+    }
+
+    private var effectiveIncludesHeartedLivePhotoVideos: Bool {
+        hasHeartedPhotos && includesHeartedLivePhotoVideos
+    }
+
     private var heartedLivePhotoVideoCount: Int {
-        guard includesHeartedLivePhotoVideos else { return 0 }
+        guard effectiveIncludesHeartedLivePhotoVideos else { return 0 }
         return matchingPhotos.filter(\.hasHeartedLivePhotoVideo).count
     }
 
@@ -291,8 +336,19 @@ struct PortraitVideoExportSheet: View {
         )
     }
 
+    private var includesHeartedLivePhotoVideosBinding: Binding<Bool> {
+        Binding(
+            get: { effectiveIncludesHeartedLivePhotoVideos },
+            set: { includesHeartedLivePhotoVideos = $0 }
+        )
+    }
+
     private var hasUnsavedExportedVideo: Bool {
         exportedVideoURL != nil && !isSavingToPhotos
+    }
+
+    private var isInteractiveDismissDisabled: Bool {
+        exportTask != nil || hasUnsavedExportedVideo
     }
 
     private var bottomActionBar: some View {
@@ -340,6 +396,17 @@ struct PortraitVideoExportSheet: View {
             } else {
                 unsavedVideoReadyView
 
+                Button {
+                    isShowingVideoPreview = true
+                } label: {
+                    Label("Preview Video", systemImage: "play.rectangle.fill")
+                        .font(.headline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 52)
+                }
+                .buttonStyle(floatingOverlayButtonStyle)
+                .disabled(exportedVideoURL == nil)
+
                 HStack(spacing: 10) {
                     Button(action: saveToPhotos) {
                         saveToPhotosLabel
@@ -352,12 +419,35 @@ struct PortraitVideoExportSheet: View {
                     Button {
                         isShowingFilesExporter = true
                     } label: {
-                        Label("Save to Files", systemImage: "folder.fill")
-                            .font(.headline.weight(.semibold))
+                        centeredActionLabel(title: "Save to Files", systemImage: "folder.fill")
                             .frame(maxWidth: .infinity)
                             .frame(height: 52)
                     }
                     .buttonStyle(floatingOverlayButtonStyle)
+
+                    Button(role: .destructive) {
+                        isShowingDiscardExportConfirmation = true
+                    } label: {
+                        Image(systemName: "trash.fill")
+                            .font(.headline.weight(.semibold))
+                            .frame(width: 52, height: 52)
+                    }
+                    .buttonStyle(floatingOverlayButtonStyle)
+                    .foregroundStyle(.red)
+                    .disabled(isSavingToPhotos)
+                    .confirmationDialog(
+                        "Discard video?",
+                        isPresented: $isShowingDiscardExportConfirmation,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Discard Video", role: .destructive) {
+                            discardExportedVideo()
+                        }
+
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This action cannot be undone.")
+                    }
                 }
             }
         }
@@ -412,9 +502,27 @@ struct PortraitVideoExportSheet: View {
             }
             .font(.headline.weight(.semibold))
         } else {
-            Label("Save to Photos", systemImage: "photo.on.rectangle.fill")
-                .font(.headline.weight(.semibold))
+            centeredActionLabel(title: "Save to Photos", systemImage: "photo.on.rectangle.fill")
         }
+    }
+
+    private func centeredActionLabel(title: String, systemImage: String) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.headline.weight(.semibold))
+                .frame(width: 20, height: 20, alignment: .center)
+                .offset(x: -5)
+
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .minimumScaleFactor(0.8)
     }
 
     private func progressView(for progress: PortraitVideoExportProgress) -> some View {
@@ -544,7 +652,7 @@ struct PortraitVideoExportSheet: View {
                     quality: selectedQuality,
                     includesDateBanner: includesDateBanner,
                     includesLocationBanner: includesLocationBanner,
-                    includesHeartedLivePhotoVideo: includesHeartedLivePhotoVideos
+                    includesHeartedLivePhotoVideo: effectiveIncludesHeartedLivePhotoVideos
                 ) { newProgress in
                     updateProgress(newProgress)
                 }
@@ -624,6 +732,11 @@ struct PortraitVideoExportSheet: View {
         }
     }
 
+    private func handleInteractiveDismissAttempt() {
+        guard exportTask == nil else { return }
+        requestDismiss()
+    }
+
     private func cancelExport() {
         exportTask?.cancel()
         if exportTask != nil {
@@ -651,7 +764,7 @@ struct PortraitVideoExportSheet: View {
                 try await saveVideoToPhotoLibrary(exportedVideoURL)
                 cleanupExportedVideo()
                 progress = nil
-                showStatus("Saved to Photos.", success: true, autoDismiss: true)
+                showStatus("Saved to Photos.", success: true)
             } catch let error as PortraitVideoSaveError {
                 showStatus(error.localizedDescription, success: false)
             } catch {
@@ -660,7 +773,7 @@ struct PortraitVideoExportSheet: View {
         }
     }
 
-    private func showStatus(_ message: String, success: Bool, autoDismiss: Bool = false) {
+    private func showStatus(_ message: String, success: Bool, autoDismissDelay: Duration? = .seconds(5)) {
         statusClearTask?.cancel()
 
         withAnimation(.easeInOut(duration: 0.25)) {
@@ -668,10 +781,10 @@ struct PortraitVideoExportSheet: View {
             statusMessage = message
         }
 
-        guard autoDismiss else { return }
+        guard let autoDismissDelay else { return }
 
         statusClearTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: autoDismissDelay)
             guard !Task.isCancelled, statusMessage == message else { return }
             clearStatus()
         }
@@ -685,6 +798,14 @@ struct PortraitVideoExportSheet: View {
             statusMessage = nil
             isStatusSuccess = false
         }
+    }
+
+    private func discardExportedVideo() {
+        cleanupExportedVideo()
+        progress = nil
+        failedPhotos = []
+        smoothedRemainingSeconds = nil
+        showStatus("Video discarded.", success: false)
     }
 
     private func cleanupExportedVideo() {
@@ -739,6 +860,62 @@ struct PortraitVideoExportSheet: View {
     private var skippedPhotosButtonTitle: String {
         "\(failedPhotos.count) skipped photo\(failedPhotos.count == 1 ? "" : "s")"
     }
+
+    private static func storedSelectedRange(
+        availableDateRange: ClosedRange<Date>,
+        defaultEndDate: Date,
+        calendar: Calendar
+    ) -> ClosedRange<Date> {
+        let defaults = UserDefaults.standard
+        let storedStartDate = defaults
+            .object(forKey: PortraitVideoExportStorageKeys.startDate) as? TimeInterval
+        let storedEndDate = defaults
+            .object(forKey: PortraitVideoExportStorageKeys.endDate) as? TimeInterval
+
+        let startDate = storedStartDate.map(Date.init(timeIntervalSinceReferenceDate:)) ?? availableDateRange.lowerBound
+        let endDate = storedEndDate.map(Date.init(timeIntervalSinceReferenceDate:)) ?? defaultEndDate
+        let clampedStartDate = clampedSelectedDate(startDate, in: availableDateRange, calendar: calendar)
+        let clampedEndDate = clampedSelectedDate(endDate, in: availableDateRange, calendar: calendar)
+
+        if clampedStartDate > clampedEndDate {
+            return clampedStartDate...clampedStartDate
+        }
+
+        return clampedStartDate...clampedEndDate
+    }
+
+    private static func clampedSelectedDate(
+        _ date: Date,
+        in availableDateRange: ClosedRange<Date>,
+        calendar: Calendar
+    ) -> Date {
+        let selectedDate = calendar.startOfDay(for: date)
+        let minimumDate = calendar.startOfDay(for: availableDateRange.lowerBound)
+        let maximumDate = calendar.startOfDay(for: availableDateRange.upperBound)
+
+        return min(max(selectedDate, minimumDate), maximumDate)
+    }
+
+    private func clampAndStoreSelectedRange() {
+        let clampedStartDate = Self.clampedSelectedDate(startDate, in: availableDateRange, calendar: calendar)
+        let clampedEndDate = Self.clampedSelectedDate(endDate, in: availableDateRange, calendar: calendar)
+
+        startDate = min(clampedStartDate, clampedEndDate)
+        endDate = max(clampedStartDate, clampedEndDate)
+        storeSelectedRange()
+    }
+
+    private func storeSelectedRange() {
+        let defaults = UserDefaults.standard
+        defaults.set(startDate.timeIntervalSinceReferenceDate, forKey: PortraitVideoExportStorageKeys.startDate)
+        defaults.set(endDate.timeIntervalSinceReferenceDate, forKey: PortraitVideoExportStorageKeys.endDate)
+    }
+}
+
+private enum PortraitVideoExportStorageKeys {
+    static let usesAllPhotos = "portraitVideoUsesAllPhotos"
+    static let startDate = "portraitVideoStartDate"
+    static let endDate = "portraitVideoEndDate"
 }
 
 private struct PortraitVideoExportFailuresView: View {
@@ -774,6 +951,131 @@ private struct PortraitVideoExportFailuresView: View {
                         dismiss()
                     }
                 }
+            }
+        }
+    }
+}
+
+private struct PortraitVideoPreviewPlayer: UIViewControllerRepresentable {
+    let url: URL
+    let onSwipeDown: () -> Void
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        let player = AVPlayer(url: url)
+        controller.player = player
+        controller.showsPlaybackControls = true
+        let swipeDown = UISwipeGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleSwipeDown)
+        )
+        swipeDown.direction = .down
+        swipeDown.cancelsTouchesInView = false
+        controller.view.addGestureRecognizer(swipeDown)
+        player.play()
+        return controller
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSwipeDown: onSwipeDown)
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        context.coordinator.onSwipeDown = onSwipeDown
+
+        guard let currentAsset = controller.player?.currentItem?.asset as? AVURLAsset,
+              currentAsset.url == url else {
+            let player = AVPlayer(url: url)
+            controller.player = player
+            player.play()
+            return
+        }
+    }
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) {
+        controller.player?.pause()
+        controller.player = nil
+    }
+
+    final class Coordinator: NSObject {
+        var onSwipeDown: () -> Void
+
+        init(onSwipeDown: @escaping () -> Void) {
+            self.onSwipeDown = onSwipeDown
+        }
+
+        @objc func handleSwipeDown() {
+            onSwipeDown()
+        }
+    }
+}
+
+private struct InteractiveDismissAttemptReader: UIViewControllerRepresentable {
+    let isDismissDisabled: Bool
+    let onAttempt: () -> Void
+
+    func makeUIViewController(context: Context) -> DismissAttemptViewController {
+        let controller = DismissAttemptViewController()
+        controller.coordinator = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: DismissAttemptViewController, context: Context) {
+        context.coordinator.isDismissDisabled = isDismissDisabled
+        context.coordinator.onAttempt = onAttempt
+        controller.installPresentationDelegate()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isDismissDisabled: isDismissDisabled, onAttempt: onAttempt)
+    }
+
+    final class Coordinator: NSObject, UIAdaptivePresentationControllerDelegate {
+        var isDismissDisabled: Bool
+        var onAttempt: () -> Void
+
+        init(isDismissDisabled: Bool, onAttempt: @escaping () -> Void) {
+            self.isDismissDisabled = isDismissDisabled
+            self.onAttempt = onAttempt
+        }
+
+        func presentationControllerShouldDismiss(_ presentationController: UIPresentationController) -> Bool {
+            !isDismissDisabled
+        }
+
+        func presentationControllerDidAttemptToDismiss(_ presentationController: UIPresentationController) {
+            onAttempt()
+        }
+    }
+
+    final class DismissAttemptViewController: UIViewController {
+        weak var coordinator: Coordinator?
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            installPresentationDelegate()
+        }
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            installPresentationDelegate()
+        }
+
+        func installPresentationDelegate() {
+            guard let coordinator else { return }
+
+            DispatchQueue.main.async { [weak self, weak coordinator] in
+                guard let self, let coordinator else { return }
+
+                var controller: UIViewController? = self
+                while let currentController = controller {
+                    if let presentationController = currentController.presentationController {
+                        presentationController.delegate = coordinator
+                    }
+                    controller = currentController.parent
+                }
+
+                self.view.window?.rootViewController?.presentedViewController?.presentationController?.delegate = coordinator
             }
         }
     }

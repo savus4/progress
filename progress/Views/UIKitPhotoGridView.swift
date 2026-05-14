@@ -6,17 +6,32 @@ import Combine
 @MainActor
 final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResultsControllerDelegate {
     @Published private(set) var photoCount = 0
+    @Published private(set) var totalPhotoCount = 0
+    @Published private(set) var heartedPhotoCount = 0
     @Published private(set) var isEmpty = true
     @Published private(set) var changeToken = 0
 
     private var fetchedResultsController: NSFetchedResultsController<DailyPhoto>?
+    private weak var context: NSManagedObjectContext?
+    private var showsHeartedOnly = false
+    private var photosByID: [NSManagedObjectID: DailyPhoto] = [:]
     private(set) var itemsSnapshot: [UIKitPhotoGridItem] = []
 
-    func configureIfNeeded(context: NSManagedObjectContext) {
-        guard fetchedResultsController == nil else { return }
+    var hasAnyPhotos: Bool {
+        totalPhotoCount > 0
+    }
+
+    func configureIfNeeded(context: NSManagedObjectContext, showsHeartedOnly: Bool) {
+        self.context = context
+        self.showsHeartedOnly = showsHeartedOnly
+        guard fetchedResultsController == nil else {
+            setShowsHeartedOnly(showsHeartedOnly)
+            return
+        }
 
         let request = DailyPhoto.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false)]
+        request.predicate = fetchPredicate
         request.fetchBatchSize = 80
 
         let controller = NSFetchedResultsController(
@@ -32,14 +47,47 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
             try controller.performFetch()
             rebuildSnapshot(from: controller.fetchedObjects ?? [])
         } catch {
+            photosByID = [:]
             itemsSnapshot = []
             photoCount = 0
             isEmpty = true
+            refreshCounts()
+        }
+    }
+
+    func setShowsHeartedOnly(_ showsHeartedOnly: Bool) {
+        guard self.showsHeartedOnly != showsHeartedOnly else { return }
+        self.showsHeartedOnly = showsHeartedOnly
+        fetchedResultsController?.fetchRequest.predicate = fetchPredicate
+
+        do {
+            try fetchedResultsController?.performFetch()
+            rebuildSnapshot(from: fetchedResultsController?.fetchedObjects ?? [])
+        } catch {
+            photosByID = [:]
+            itemsSnapshot = []
+            photoCount = 0
+            isEmpty = true
+            refreshCounts()
         }
     }
 
     var allPhotos: [DailyPhoto] {
         fetchedResultsController?.fetchedObjects ?? []
+    }
+
+    func allStoredPhotos() -> [DailyPhoto] {
+        guard let context else { return allPhotos }
+
+        let request = DailyPhoto.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false)]
+        request.includesPendingChanges = true
+
+        do {
+            return try context.fetch(request)
+        } catch {
+            return allPhotos
+        }
     }
 
     func photo(at index: Int) -> DailyPhoto? {
@@ -49,7 +97,13 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     func photos(for objectIDs: Set<NSManagedObjectID>) -> [DailyPhoto] {
-        allPhotos.filter { objectIDs.contains($0.objectID) }
+        objectIDs.compactMap { photosByID[$0] }
+    }
+
+    func shouldHeartPhotos(for objectIDs: Set<NSManagedObjectID>) -> Bool {
+        let photos = photos(for: objectIDs)
+        guard !photos.isEmpty else { return true }
+        return photos.contains { !$0.isHearted }
     }
 
     func index(of objectID: NSManagedObjectID) -> Int? {
@@ -61,10 +115,43 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     private func rebuildSnapshot(from photos: [DailyPhoto]) {
+        photosByID = Dictionary(uniqueKeysWithValues: photos.map { ($0.objectID, $0) })
         itemsSnapshot = photos.map(UIKitPhotoGridItem.init(photo:))
         photoCount = photos.count
         isEmpty = photos.isEmpty
+        refreshCounts()
         changeToken &+= 1
+    }
+
+    private var fetchPredicate: NSPredicate? {
+        showsHeartedOnly ? NSPredicate(format: "isHearted == YES") : nil
+    }
+
+    private func refreshCounts() {
+        guard let context else {
+            totalPhotoCount = photoCount
+            heartedPhotoCount = showsHeartedOnly ? photoCount : 0
+            return
+        }
+
+        totalPhotoCount = countPhotos(in: context, predicate: nil)
+        heartedPhotoCount = countPhotos(
+            in: context,
+            predicate: NSPredicate(format: "isHearted == YES")
+        )
+    }
+
+    private func countPhotos(in context: NSManagedObjectContext, predicate: NSPredicate?) -> Int {
+        let request = NSFetchRequest<NSNumber>(entityName: "DailyPhoto")
+        request.resultType = .countResultType
+        request.includesPendingChanges = true
+        request.predicate = predicate
+
+        do {
+            return try context.count(for: request)
+        } catch {
+            return 0
+        }
     }
 }
 
@@ -968,6 +1055,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     private let imageView = UIImageView()
     private let placeholderView = UIView()
     private let selectionBadgeImageView = UIImageView()
+    private let heartBadgeImageView = UIImageView()
     private let statusLabel = PaddingLabel()
 
     override init(frame: CGRect) {
@@ -986,6 +1074,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         imageView.image = nil
         statusLabel.isHidden = true
         selectionBadgeImageView.isHidden = true
+        heartBadgeImageView.isHidden = true
     }
 
     func configure(
@@ -995,12 +1084,15 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     ) {
         isAccessibilityElement = true
         accessibilityIdentifier = "photoGridItem"
+        accessibilityValue = item.isHearted ? "Favorite" : nil
 
         selectionBadgeImageView.isHidden = !isSelectionMode
         if isSelectionMode {
             selectionBadgeImageView.image = UIImage(systemName: isSelected ? "checkmark.circle.fill" : "circle")
             selectionBadgeImageView.tintColor = isSelected ? .systemBlue : UIColor.white.withAlphaComponent(0.85)
         }
+
+        heartBadgeImageView.isHidden = !item.isHearted
 
         let badge: (text: String, systemName: String, backgroundColor: UIColor, foregroundColor: UIColor)?
         switch item.uploadState {
@@ -1049,6 +1141,13 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         selectionBadgeImageView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(selectionBadgeImageView)
 
+        heartBadgeImageView.image = UIImage(systemName: "heart.fill")
+        heartBadgeImageView.tintColor = .white
+        heartBadgeImageView.contentMode = .center
+        heartBadgeImageView.isHidden = true
+        heartBadgeImageView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(heartBadgeImageView)
+
         statusLabel.font = .preferredFont(forTextStyle: .caption2).bold()
         statusLabel.accessibilityIdentifier = "photoGridUploadBadge"
         statusLabel.layer.cornerRadius = 12
@@ -1070,6 +1169,11 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
 
             selectionBadgeImageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
             selectionBadgeImageView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+
+            heartBadgeImageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 7),
+            heartBadgeImageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -7),
+            heartBadgeImageView.widthAnchor.constraint(equalToConstant: 22),
+            heartBadgeImageView.heightAnchor.constraint(equalToConstant: 22),
 
             statusLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
             statusLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8)

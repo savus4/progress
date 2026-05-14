@@ -44,14 +44,14 @@ struct PhotoGridView: View {
     @State private var showingDeleteConfirmation = false
     @State private var isDeletingSelection = false
     @State private var didSyncExifMetadata = false
+    @State private var showsHeartedOnly = false
     @State private var metadataSyncTask: Task<Void, Never>?
     private let enableScrollDateDebugLogs = false
 
     var body: some View {
         NavigationStack {
             ZStack {
-                    if dataController.isEmpty {
-                        // Empty state
+                    if !dataController.hasAnyPhotos {
                         VStack(spacing: 20) {
                             Image(systemName: "camera.fill")
                                 .font(.system(size: 60))
@@ -75,6 +75,10 @@ struct PhotoGridView: View {
                             .accessibilityIdentifier("emptyStateCaptureButton")
                             .padding(.top)
                         }
+                    } else if dataController.isEmpty {
+                        favoriteEmptyState
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .ignoresSafeArea(.container, edges: [.top, .bottom])
                     } else {
                         UIKitPhotoGridView(
                             dataController: dataController,
@@ -120,14 +124,21 @@ struct PhotoGridView: View {
                                     .transition(.move(edge: .top).combined(with: .opacity))
                             }
                         }
-                        .overlay(alignment: .bottom) {
-                            if !isSelectionMode {
-                                floatingCaptureButton
-                                    .padding(.bottom, 20)
-                            }
-                        }
                     }
 
+            }
+            .overlay(alignment: .bottom) {
+                if dataController.hasAnyPhotos, !isSelectionMode {
+                    floatingCaptureButton
+                        .padding(.bottom, 20)
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if dataController.hasAnyPhotos, !isSelectionMode {
+                    floatingHeartFilterButton
+                        .padding(.leading, 18)
+                        .padding(.bottom, 24)
+                }
             }
             .navigationTitle("Work in Progress")
             .toolbar {
@@ -146,6 +157,13 @@ struct PhotoGridView: View {
 
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if isSelectionMode {
+                        Button(action: toggleHeartForSelectedPhotos) {
+                            Image(systemName: selectedHeartButtonSystemName)
+                                .font(.title3)
+                        }
+                        .foregroundStyle(selectedHeartButtonColor)
+                        .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
+
                         Menu {
                             Button(action: exportSelectedPhotos) {
                                 Label("Export Selected (\(selectedPhotoIDs.count))", systemImage: "square.and.arrow.up")
@@ -193,7 +211,7 @@ struct PhotoGridView: View {
                             Image(systemName: "film.stack")
                                 .font(.title3)
                         }
-                        .disabled(dataController.isEmpty)
+                        .disabled(!dataController.hasAnyPhotos)
 
                         Button(action: { showingNotificationSettings = true }) {
                             Image(systemName: "gearshape")
@@ -234,9 +252,18 @@ struct PhotoGridView: View {
             }
         }
         .onAppear {
-            dataController.configureIfNeeded(context: viewContext)
+            dataController.configureIfNeeded(
+                context: viewContext,
+                showsHeartedOnly: showsHeartedOnly
+            )
             openCameraIfNeededFromNotification()
             scheduleMetadataSyncIfNeeded()
+        }
+        .onChange(of: showsHeartedOnly) { _, newValue in
+            selectedPhotoIDs.removeAll()
+            pendingDetailDismissObjectID = nil
+            gridCenteringRequest = nil
+            dataController.setShowsHeartedOnly(newValue)
         }
         .onChange(of: dataController.changeToken) { _, _ in
             scheduleMetadataSyncIfNeeded()
@@ -319,6 +346,69 @@ struct PhotoGridView: View {
     private func finalizePhotoDetailDismissal() {
         activePhotoDetailObjectID = nil
         photoDetailPresentation = nil
+    }
+
+    private var favoriteEmptyState: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "heart")
+                .font(.system(size: 56))
+                .foregroundStyle(.secondary)
+
+            Text("No Favorites Yet")
+                .font(.title2.weight(.semibold))
+
+            Text("Heart photos from the detail view to focus this grid.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+    }
+
+    private var floatingHeartFilterButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showsHeartedOnly.toggle()
+            }
+        } label: {
+            heartFilterButtonLabel
+        }
+        .contentShape(.circle)
+        .buttonStyle(floatingCaptureButtonStyle)
+        .accessibilityLabel(showsHeartedOnly ? "Show All Photos" : "Show Favorites Only")
+        .accessibilityIdentifier("gridHeartFilterButton")
+    }
+
+    @ViewBuilder
+    private var heartFilterButtonLabel: some View {
+        let systemName = showsHeartedOnly ? "heart.fill" : "heart"
+        let foregroundStyle: Color = showsHeartedOnly ? .red : .primary
+
+        if #available(iOS 26.0, *) {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(foregroundStyle)
+                .frame(width: 42, height: 42)
+                .background(
+                    Circle()
+                        .fill(.clear)
+                )
+                .shadow(color: .black.opacity(0.1), radius: 12, y: 7)
+        } else {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+
+                Circle()
+                    .stroke(Color.white.opacity(0.5), lineWidth: 1)
+
+                Image(systemName: systemName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(foregroundStyle)
+            }
+            .frame(width: 42, height: 42)
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 7)
+        }
     }
 
     private var floatingCaptureButton: some View {
@@ -461,9 +551,49 @@ struct PhotoGridView: View {
         startExport(for: selectedPhotos)
     }
 
+    private var selectedPhotos: [DailyPhoto] {
+        dataController.photos(for: selectedPhotoIDs)
+    }
+
+    private var shouldHeartSelectedPhotos: Bool {
+        dataController.shouldHeartPhotos(for: selectedPhotoIDs)
+    }
+
+    private var selectedHeartButtonSystemName: String {
+        shouldHeartSelectedPhotos ? "heart" : "heart.fill"
+    }
+
+    private var selectedHeartButtonColor: Color {
+        shouldHeartSelectedPhotos ? .primary : .red
+    }
+
+    private func toggleHeartForSelectedPhotos() {
+        let photos = selectedPhotos
+        guard !photos.isEmpty else {
+            exportAlertMessage = "Please select at least one photo."
+            return
+        }
+
+        let nextValue = shouldHeartSelectedPhotos
+        let now = Date()
+
+        do {
+            for photo in photos {
+                photo.isHearted = nextValue
+                photo.modifiedAt = now
+            }
+            try viewContext.save()
+            selectedPhotoIDs.removeAll()
+            isSelectionMode = false
+        } catch {
+            viewContext.rollback()
+            exportAlertMessage = "Unable to update favorites."
+        }
+    }
+
     private func openPortraitVideoExporter() {
         portraitVideoExportPresentation = PortraitVideoExportPresentation(
-            photos: dataController.allPhotos.map(PortraitVideoExportItem.init(photo:))
+            photos: dataController.allStoredPhotos().map(PortraitVideoExportItem.init(photo:))
         )
     }
 

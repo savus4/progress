@@ -145,16 +145,6 @@ struct NotificationSettingsView: View {
                     }
                     .disabled(isImportingPhotos)
 
-                    PhotosPicker(
-                        selection: $selectedPrivatePhotoItems,
-                        maxSelectionCount: nil,
-                        matching: .any(of: [.images, .livePhotos]),
-                        photoLibrary: .shared()
-                    ) {
-                        Label("Import Privately (Experimental)", systemImage: "lock.shield")
-                    }
-                    .disabled(isImportingPhotos)
-
                     Button {
                         presentAlbumImportSheet()
                     } label: {
@@ -162,7 +152,17 @@ struct NotificationSettingsView: View {
                     }
                     .disabled(isImportingPhotos || isLoadingImportAlbums)
 
-                    Text("Standard import preserves Live Photos. Private import remains experimental and may import Live Photos as still images.")
+                    PhotosPicker(
+                        selection: $selectedPrivatePhotoItems,
+                        maxSelectionCount: nil,
+                        matching: .any(of: [.images, .livePhotos]),
+                        photoLibrary: .shared()
+                    ) {
+                        Label("Import Privately (No Live Photos)", systemImage: "lock.shield")
+                    }
+                    .disabled(isImportingPhotos)
+
+                    Text("Import Photos and Import Album preserve Live Photos, which is great for video creation! Import Privately imports still images only, but you dont't have to grant the App access to you Photos library. No matter what, we do not collect any data of you.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
