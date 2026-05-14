@@ -2,6 +2,8 @@ import SwiftUI
 import AVFoundation
 import CoreData
 import CoreLocation
+import ImageIO
+import UniformTypeIdentifiers
 
 struct ExperimentalCameraView: View {
     private enum CaptureFeedbackStage {
@@ -41,6 +43,7 @@ struct ExperimentalCameraView: View {
     @ObservedObject private var alignmentGuideStore = AlignmentGuideStore.shared
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("experimentalCameraLivePhotoCaptureEnabled") private var isLivePhotoCaptureEnabled = true
 
     let gridTargetFrameInGlobal: CGRect?
 
@@ -107,6 +110,21 @@ struct ExperimentalCameraView: View {
                                 for: captureFeedbackStage,
                                 bottomInset: bottomInset
                             )
+                        }
+
+                        if shouldShowLivePhotoToggle {
+                            VStack {
+                                HStack {
+                                    Spacer()
+                                    livePhotoToggleButton
+                                }
+                                .padding(.top, 16)
+                                .padding(.trailing, 16)
+
+                                Spacer()
+                            }
+                            .frame(width: previewWidth, height: actualPreviewHeight)
+                            .transition(.opacity)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -200,6 +218,14 @@ struct ExperimentalCameraView: View {
                 captureFeedbackStage = .processingCapture
             }
         }
+    }
+
+    private var shouldShowLivePhotoToggle: Bool {
+        !isEditingGuides && !showingCapturePreview
+    }
+
+    private var shouldCaptureLivePhoto: Bool {
+        isLivePhotoCaptureEnabled && cameraService.isLivePhotoCaptureSupported
     }
 
     @ViewBuilder
@@ -315,6 +341,45 @@ struct ExperimentalCameraView: View {
         .frame(height: height)
     }
 
+    private var livePhotoToggleButton: some View {
+        Button {
+            isLivePhotoCaptureEnabled.toggle()
+        } label: {
+            Image(systemName: livePhotoToggleSymbolName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(.black.opacity(0.46), in: Circle())
+                .overlay(
+                    Circle()
+                        .stroke(.white.opacity(shouldCaptureLivePhoto ? 0.44 : 0.16), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("experimentalCameraLivePhotoToggle")
+        .accessibilityLabel(livePhotoToggleAccessibilityLabel)
+        .accessibilityValue(livePhotoToggleAccessibilityValue)
+        .disabled(guideInteractionDisabled || !cameraService.isLivePhotoCaptureSupported)
+    }
+
+    private var livePhotoToggleSymbolName: String {
+        shouldCaptureLivePhoto ? "livephoto" : "livephoto.slash"
+    }
+
+    private var livePhotoToggleAccessibilityLabel: String {
+        guard cameraService.isLivePhotoCaptureSupported else {
+            return "Live Photos Unavailable"
+        }
+        return isLivePhotoCaptureEnabled ? "Turn Off Live Photos" : "Turn On Live Photos"
+    }
+
+    private var livePhotoToggleAccessibilityValue: String {
+        guard cameraService.isLivePhotoCaptureSupported else {
+            return "Unavailable"
+        }
+        return isLivePhotoCaptureEnabled ? "On" : "Off"
+    }
+
     private var eyeLinePositionBinding: Binding<Double> {
         Binding(
             get: { draftEyeLinePosition ?? alignmentGuideStore.eyeLinePosition },
@@ -377,13 +442,13 @@ struct ExperimentalCameraView: View {
         #if targetEnvironment(simulator)
         captureFeedbackStage = .processingCapture
         #else
-        captureFeedbackStage = .recordingLivePhoto
+        captureFeedbackStage = shouldCaptureLivePhoto ? .recordingLivePhoto : .processingCapture
         #endif
         let captureLocation = locationService.currentLocation
         #if targetEnvironment(simulator)
         cameraService.capturePhoto(withLivePhoto: false, location: captureLocation)
         #else
-        cameraService.capturePhoto(withLivePhoto: true, location: captureLocation)
+        cameraService.capturePhoto(withLivePhoto: shouldCaptureLivePhoto, location: captureLocation)
         #endif
     }
 
@@ -427,6 +492,9 @@ struct ExperimentalCameraView: View {
         pendingLivePhotoImageData = nil
         if let pendingLivePhotoImageURL {
             try? FileManager.default.removeItem(at: pendingLivePhotoImageURL)
+        }
+        if let pendingLivePhotoVideoURL {
+            try? FileManager.default.removeItem(at: pendingLivePhotoVideoURL)
         }
         pendingLivePhotoImageURL = nil
         pendingLivePhotoVideoURL = nil
@@ -503,6 +571,9 @@ struct ExperimentalCameraView: View {
                     if let pendingLivePhotoImageURL {
                         try? FileManager.default.removeItem(at: pendingLivePhotoImageURL)
                     }
+                    if let pendingLivePhotoVideoURL {
+                        try? FileManager.default.removeItem(at: pendingLivePhotoVideoURL)
+                    }
                     pendingLivePhotoImageURL = nil
                     pendingLivePhotoVideoURL = nil
                     isAnimatingPreviewToGrid = false
@@ -566,7 +637,7 @@ struct ExperimentalCameraView: View {
     private func makeTemporaryPreviewImageURL(from imageData: Data) -> URL? {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("jpg")
+            .appendingPathExtension(temporaryPreviewImageExtension(for: imageData))
 
         do {
             try imageData.write(to: fileURL, options: .atomic)
@@ -574,6 +645,15 @@ struct ExperimentalCameraView: View {
         } catch {
             return nil
         }
+    }
+
+    private func temporaryPreviewImageExtension(for imageData: Data) -> String {
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let type = CGImageSourceGetType(source) else {
+            return "heic"
+        }
+
+        return UTType(type as String)?.preferredFilenameExtension ?? "heic"
     }
 }
 

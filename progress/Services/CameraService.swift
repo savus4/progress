@@ -15,6 +15,7 @@ class CameraService: NSObject, ObservableObject {
     @Published var captureCompleted: Int = 0
     @Published var captureFinished: Int = 0
     @Published var sensorAspectRatio: CGFloat
+    @Published var isLivePhotoCaptureSupported = false
     
     private let photoOutput = AVCapturePhotoOutput()
     private var livePhotoCompanionMovieURL: URL?
@@ -58,6 +59,7 @@ class CameraService: NSObject, ObservableObject {
     }
     
     func setupCamera() {
+        isLivePhotoCaptureSupported = false
         session.beginConfiguration()
         
         // Set session preset for high quality
@@ -89,9 +91,10 @@ class CameraService: NSObject, ObservableObject {
         // Add photo output
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
-            
+
             // Enable Live Photo capture
             photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
+            isLivePhotoCaptureSupported = photoOutput.isLivePhotoCaptureSupported
             photoOutput.maxPhotoQualityPrioritization = .quality
         }
         

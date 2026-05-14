@@ -207,10 +207,14 @@ struct NotificationSettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .foregroundStyle(isImportingPhotos ? .tertiary : .primary)
                     }
+                    .accessibilityLabel("Close")
                     .disabled(isImportingPhotos)
                 }
             }
