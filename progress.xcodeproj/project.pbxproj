@@ -24,9 +24,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		9A2471C32F47BB3C0021B434 /* progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = progress.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		9A2471D72F47BB3D0021B434 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		9A2471E12F47BB3D0021B434 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A2471C32F47BB3C0021B434 /* progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = progress.app; path = "/Users/simonriepl/Developer/progress/build/Debug-iphoneos/progress.app"; sourceTree = "<absolute>"; };
+		9A2471D72F47BB3D0021B434 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; name = progressTests.xctest; path = "/Users/simonriepl/Developer/progress/build/Debug-iphoneos/progress.app/PlugIns/progressTests.xctest"; sourceTree = "<absolute>"; };
+		9A2471E12F47BB3D0021B434 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; name = progressUITests.xctest; path = "/Users/simonriepl/Developer/progress/build/Debug-iphoneos/progressUITests-Runner.app/PlugIns/progressUITests.xctest"; sourceTree = "<absolute>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -91,18 +91,7 @@
 				9A2471C52F47BB3C0021B434 /* progress */,
 				9A2471DA2F47BB3D0021B434 /* progressTests */,
 				9A2471E42F47BB3D0021B434 /* progressUITests */,
-				9A2471C42F47BB3C0021B434 /* Products */,
 			);
-			sourceTree = "<group>";
-		};
-		9A2471C42F47BB3C0021B434 /* Products */ = {
-			isa = PBXGroup;
-			children = (
-				9A2471C32F47BB3C0021B434 /* progress.app */,
-				9A2471D72F47BB3D0021B434 /* progressTests.xctest */,
-				9A2471E12F47BB3D0021B434 /* progressUITests.xctest */,
-			);
-			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -209,7 +198,7 @@
 			mainGroup = 9A2471BA2F47BB3C0021B434;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = 9A2471C42F47BB3C0021B434 /* Products */;
+			productRefGroup = 9A2471BA2F47BB3C0021B434;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -285,7 +274,7 @@
 		9A2471EB2F47BB3D0021B434 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = wip_icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = progress/progress.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -325,7 +314,7 @@
 		9A2471EC2F47BB3D0021B434 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = wip_icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = progress/progress.entitlements;
 				CODE_SIGN_STYLE = Automatic;

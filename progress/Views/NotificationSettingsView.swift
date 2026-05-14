@@ -13,9 +13,6 @@ struct NotificationSettingsView: View {
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var didPersistChanges = false
-    @State private var localAssetStorageUsage = LocalPhotoAssetStorageUsage.empty
-    @State private var isLoadingLocalAssetStorageUsage = false
-
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var selectedPrivatePhotoItems: [PhotosPickerItem] = []
     @State private var showingAlbumImportSheet = false
@@ -30,10 +27,14 @@ struct NotificationSettingsView: View {
     @State private var importFailureMessages: [String] = []
     @State private var isRetryingUploads = false
     @State private var uploadRetryStatusMessage: String?
+    @State private var bottomRubberBandDistance: CGFloat = 0
 
     private let notificationService = DailyReminderNotificationService.shared
     private let importLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
     private let importFlushSize = 3
+    private let settingsCreditRevealOverscroll: CGFloat = 190
+    private let settingsCreditPlaceholderRevealOverscroll: CGFloat = 420
+    private let settingsCreditFadeOverscroll: CGFloat = 40
 
     var body: some View {
         NavigationStack {
@@ -181,60 +182,26 @@ struct NotificationSettingsView: View {
                     }
                 }
 
-                Section("Storage") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("System CloudKit Cache")
-                            Spacer()
-                            Text(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Text("Fetched originals live in CloudKit's system-managed cache. Pending Uploads stay local until iCloud has a copy.")
-                            .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    HStack {
-                        Text("Cached")
-                        Spacer()
-                        if isLoadingLocalAssetStorageUsage {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Text(storageUsageDescription)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if localAssetStorageUsage.pendingUploadBytes > 0 {
-                        Text("Pending uploads use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) until iCloud has a copy.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Button {
-                        refreshLocalAssetStorageUsage()
-                    } label: {
-                        Label("Recalculate Storage", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(isLoadingLocalAssetStorageUsage)
-
-                    NavigationLink {
-                        StorageDebugView()
-                    } label: {
-                        Label("Storage Debug", systemImage: "internaldrive")
-                    }
-                }
-
                 Section {
                     NavigationLink {
-                        SettingsMaintenanceView {
-                            refreshLocalAssetStorageUsage()
-                        }
+                        SettingsMaintenanceView()
                     } label: {
-                        Label("Delete Photos & Start Fresh", systemImage: "trash")
+                        Label("Storage Management", systemImage: "internaldrive")
                     }
+                }
+            }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                let bottomEdge = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom
+                return max(0, bottomEdge - geometry.contentSize.height)
+            } action: { _, newDistance in
+                bottomRubberBandDistance = newDistance
+            }
+
+            .overlay(alignment: .bottom) {
+                if bottomRubberBandDistance > settingsCreditRevealOverscroll {
+                    settingsCreditFooter
+                        .opacity(settingsCreditFooterOpacity)
+                        .allowsHitTesting(false)
                 }
             }
             .navigationTitle("Settings")
@@ -251,7 +218,6 @@ struct NotificationSettingsView: View {
                 reminderTimes = notificationService.loadReminderTimes()
                 authorizationStatus = await notificationService.authorizationStatus()
                 await cloudSyncMonitor.refreshUploadStatus()
-                refreshLocalAssetStorageUsage()
             }
             .onChange(of: selectedPhotoItems) { _, items in
                 guard !items.isEmpty else { return }
@@ -323,17 +289,57 @@ struct NotificationSettingsView: View {
         }
     }
 
-    private var storageUsageDescription: String {
-        PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes)
+    private var settingsCreditFooterOpacity: CGFloat {
+        settingsCreditOpacity(startingAt: settingsCreditRevealOverscroll)
     }
 
-    private func refreshLocalAssetStorageUsage() {
-        isLoadingLocalAssetStorageUsage = true
+    private var settingsCreditPlaceholderOpacity: CGFloat {
+        settingsCreditOpacity(startingAt: settingsCreditPlaceholderRevealOverscroll)
+    }
 
-        Task { @MainActor in
-            localAssetStorageUsage = await CloudKitService.shared.localAssetStorageUsage()
-            isLoadingLocalAssetStorageUsage = false
+    private var settingsCreditFooter: some View {
+        VStack(spacing: 6) {
+            Text("Made by Simon Riepl")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Text("🐢")
+                .font(.title3)
+                .accessibilityHidden(true)
+
+            Text(appVersionDescription)
+                .font(.caption2)
+                .foregroundStyle(Color.secondary.opacity(0.45))
+
+            Text("Hi Elin 👋")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .opacity(settingsCreditPlaceholderOpacity)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 18)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Made by Simon Riepl. \(appVersionAccessibilityDescription)")
+    }
+
+    private var appVersionDescription: String {
+        "v\(appVersion) (\(appBuild))"
+    }
+
+    private var appVersionAccessibilityDescription: String {
+        "Version \(appVersion), build \(appBuild)"
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+    }
+
+    private var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+    }
+
+    private func settingsCreditOpacity(startingAt overscroll: CGFloat) -> CGFloat {
+        min(1, max(0, (bottomRubberBandDistance - overscroll) / settingsCreditFadeOverscroll))
     }
 
     private func addReminder() {
@@ -747,10 +753,6 @@ struct NotificationSettingsView: View {
             }
 
             return (imported, duplicates, failed)
-        }
-
-        await MainActor.run {
-            refreshLocalAssetStorageUsage()
         }
 
         importLogger.log(

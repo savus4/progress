@@ -4,8 +4,8 @@ import CoreData
 struct SettingsMaintenanceView: View {
     @Environment(\.managedObjectContext) private var viewContext
 
-    let onPhotoLibraryChanged: () -> Void
-
+    @State private var localAssetStorageUsage = LocalPhotoAssetStorageUsage.empty
+    @State private var isLoadingLocalAssetStorageUsage = false
     @State private var deleteRangeStartDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @State private var deleteRangeEndDate = Date()
     @State private var deleteRangeMatchCount = 0
@@ -21,6 +21,52 @@ struct SettingsMaintenanceView: View {
 
     var body: some View {
         Form {
+            Section("Storage") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("System CloudKit Cache")
+                        Spacer()
+                        Text(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("Fetched originals live in CloudKit's system-managed cache. Pending Uploads stay local until iCloud has a copy.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("Cached")
+                    Spacer()
+                    if isLoadingLocalAssetStorageUsage {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(storageUsageDescription)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if localAssetStorageUsage.pendingUploadBytes > 0 {
+                    Text("Pending uploads use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) until iCloud has a copy.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    refreshLocalAssetStorageUsage()
+                } label: {
+                    Label("Recalculate Storage", systemImage: "arrow.clockwise")
+                }
+                .disabled(isLoadingLocalAssetStorageUsage)
+
+                NavigationLink {
+                    StorageDebugView()
+                } label: {
+                    Label("Storage Debug", systemImage: "internaldrive")
+                }
+            }
+
             Section("Delete Photos") {
                 DatePicker(
                     "From",
@@ -92,9 +138,10 @@ struct SettingsMaintenanceView: View {
                 }
             }
         }
-        .navigationTitle("Photo Management")
+        .navigationTitle("Storage Management")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            refreshLocalAssetStorageUsage()
             await configureDeleteRange()
             await refreshTotalPhotoCount()
         }
@@ -124,6 +171,10 @@ struct SettingsMaintenanceView: View {
         } message: {
             Text("This will permanently delete every photo from Work in Progress on this device and remove the matching records and stored assets from iCloud.")
         }
+    }
+
+    private var storageUsageDescription: String {
+        PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes)
     }
 
     private var deleteRangeStartBinding: Binding<Date> {
@@ -250,7 +301,7 @@ struct SettingsMaintenanceView: View {
                     : "Deleted \(deletedCount) photos."
                 refreshDeleteRangeMatchCount()
                 await refreshTotalPhotoCount()
-                onPhotoLibraryChanged()
+                refreshLocalAssetStorageUsage()
             } catch {
                 deleteRangeStatusMessage = "Failed to delete matching photos."
             }
@@ -276,7 +327,7 @@ struct SettingsMaintenanceView: View {
                 deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
-                onPhotoLibraryChanged()
+                refreshLocalAssetStorageUsage()
             } catch {
                 deleteAllStatusMessage = "Failed to delete all photos."
             }
@@ -308,6 +359,15 @@ struct SettingsMaintenanceView: View {
             return "\(photoCountDescription) locally. iCloud metadata deletion is still in progress."
         case .confirmed:
             return "\(photoCountDescription) locally. \(result.pendingRemoteAssetDeletionCount) iCloud asset deletion\(result.pendingRemoteAssetDeletionCount == 1 ? "" : "s") will keep retrying in the background."
+        }
+    }
+
+    private func refreshLocalAssetStorageUsage() {
+        isLoadingLocalAssetStorageUsage = true
+
+        Task { @MainActor in
+            localAssetStorageUsage = await CloudKitService.shared.localAssetStorageUsage()
+            isLoadingLocalAssetStorageUsage = false
         }
     }
 
