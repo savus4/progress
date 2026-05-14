@@ -167,6 +167,7 @@ nonisolated enum PortraitVideoExportError: LocalizedError {
     case cannotCreatePixelBuffer
     case cannotCreateImageContext
     case cannotReadImage
+    case cannotReadVideo
     case noFramesWritten([PortraitVideoExportFailedPhoto])
     case writerFailed(String)
 
@@ -182,6 +183,8 @@ nonisolated enum PortraitVideoExportError: LocalizedError {
             return "Unable to create a video drawing context."
         case .cannotReadImage:
             return "Unable to read one of the still images."
+        case .cannotReadVideo:
+            return "Unable to read one of the favorite Live Photo videos."
         case .noFramesWritten:
             return "No photos could be written to the video."
         case .writerFailed(let message):
@@ -256,6 +259,7 @@ final class PortraitVideoExportService {
         quality: PortraitVideoExportQuality,
         includesDateBanner: Bool,
         includesLocationBanner: Bool,
+        includesHeartedLivePhotoVideo: Bool,
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
     ) async throws -> PortraitVideoExportResult {
         guard !photos.isEmpty else { throw PortraitVideoExportError.noPhotos }
@@ -266,7 +270,10 @@ final class PortraitVideoExportService {
             }
             return lhs.captureDate < rhs.captureDate
         }
-        var workEstimate = makeWorkEstimate(for: sortedPhotos)
+        var workEstimate = makeWorkEstimate(
+            for: sortedPhotos,
+            includesHeartedLivePhotoVideo: includesHeartedLivePhotoVideo
+        )
 
         let outputURL = try makeOutputURL()
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
@@ -320,6 +327,8 @@ final class PortraitVideoExportService {
         do {
             var failedPhotos: [PortraitVideoExportFailedPhoto] = []
             var writtenFrameCount = 0
+            let outputFrameRate = max(clampedPicturesPerSecond(picturesPerSecond), 30)
+            let stillFrameCount = max(1, Int((Double(outputFrameRate) / Double(clampedPicturesPerSecond(picturesPerSecond))).rounded()))
 
             for (index, photo) in sortedPhotos.enumerated() {
                 try Task.checkCancellation()
@@ -336,26 +345,43 @@ final class PortraitVideoExportService {
 
                 let photoStartedAt = Date()
                 do {
-                    guard let assetName = photo.fullImageAssetName else {
-                        throw PortraitVideoExportError.noImageAsset
-                    }
+                    let bannerText = await Self.makeBannerText(
+                        for: photo,
+                        includesDate: includesDateBanner,
+                        includesLocation: includesLocationBanner
+                    )
 
-                    let image = try await loadImageWithRetries(named: assetName)
-                    try await retryPhotoOperation {
-                        try await append(
-                            image,
-                            bannerText: await Self.makeBannerText(
-                                for: photo,
-                                includesDate: includesDateBanner,
-                                includesLocation: includesLocationBanner
-                            ),
+                    if includesHeartedLivePhotoVideo,
+                       photo.hasHeartedLivePhotoVideo,
+                       let livePhotoVideoAssetName = photo.livePhotoVideoAssetName {
+                        let appendedFrameCount = try await appendLivePhotoVideoWithRetries(
+                            named: livePhotoVideoAssetName,
+                            bannerText: bannerText,
                             atFrameIndex: writtenFrameCount,
-                            picturesPerSecond: picturesPerSecond,
+                            outputFrameRate: outputFrameRate,
                             input: input,
                             adaptor: adaptor
                         )
+                        writtenFrameCount += appendedFrameCount
+                    } else {
+                        guard let assetName = photo.fullImageAssetName else {
+                            throw PortraitVideoExportError.noImageAsset
+                        }
+
+                        let image = try await loadImageWithRetries(named: assetName)
+                        try await retryPhotoOperation {
+                            try await appendStillPhoto(
+                                image,
+                                bannerText: bannerText,
+                                atFrameIndex: writtenFrameCount,
+                                frameCount: stillFrameCount,
+                                outputFrameRate: outputFrameRate,
+                                input: input,
+                                adaptor: adaptor
+                            )
+                        }
+                        writtenFrameCount += stillFrameCount
                     }
-                    writtenFrameCount += 1
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -416,10 +442,19 @@ final class PortraitVideoExportService {
         }
     }
 
-    nonisolated private func makeWorkEstimate(for photos: [PortraitVideoExportItem]) -> PortraitVideoExportWorkEstimate {
+    nonisolated private func makeWorkEstimate(
+        for photos: [PortraitVideoExportItem],
+        includesHeartedLivePhotoVideo: Bool
+    ) -> PortraitVideoExportWorkEstimate {
         PortraitVideoExportWorkEstimate(
             photoReadKinds: photos.map { photo in
-                guard let assetName = photo.fullImageAssetName else {
+                let exportAssetName = if includesHeartedLivePhotoVideo, photo.hasHeartedLivePhotoVideo {
+                    photo.livePhotoVideoAssetName
+                } else {
+                    photo.fullImageAssetName
+                }
+
+                guard let assetName = exportAssetName else {
                     return .local
                 }
 
@@ -430,6 +465,10 @@ final class PortraitVideoExportService {
         )
     }
 
+    nonisolated private func clampedPicturesPerSecond(_ picturesPerSecond: Int) -> Int {
+        min(max(picturesPerSecond, 1), 60)
+    }
+
     nonisolated private func loadImageWithRetries(named assetName: String) async throws -> CGImage {
         try await retryPhotoOperation {
             let imageURL = try await cloudKitService.loadAssetURL(named: assetName)
@@ -438,6 +477,31 @@ final class PortraitVideoExportService {
             }
 
             return try loadScaledImage(from: imageURL)
+        }
+    }
+
+    nonisolated private func appendLivePhotoVideoWithRetries(
+        named assetName: String,
+        bannerText: PortraitVideoBannerText?,
+        atFrameIndex frameIndex: Int,
+        outputFrameRate: Int,
+        input: AVAssetWriterInput,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor
+    ) async throws -> Int {
+        try await retryPhotoOperation {
+            let videoURL = try await cloudKitService.loadAssetURL(named: assetName)
+            defer {
+                cloudKitService.discardTemporaryReadableAsset(named: assetName)
+            }
+
+            return try await appendLivePhotoVideo(
+                from: videoURL,
+                bannerText: bannerText,
+                atFrameIndex: frameIndex,
+                outputFrameRate: outputFrameRate,
+                input: input,
+                adaptor: adaptor
+            )
         }
     }
 
@@ -463,11 +527,78 @@ final class PortraitVideoExportService {
         throw lastError ?? PortraitVideoExportError.cannotReadImage
     }
 
-    nonisolated private func append(
+    nonisolated private func appendStillPhoto(
         _ image: CGImage,
         bannerText: PortraitVideoBannerText?,
         atFrameIndex frameIndex: Int,
-        picturesPerSecond: Int,
+        frameCount: Int,
+        outputFrameRate: Int,
+        input: AVAssetWriterInput,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor
+    ) async throws {
+        for frameOffset in 0..<frameCount {
+            try Task.checkCancellation()
+            try await appendFrame(
+                image,
+                bannerText: bannerText,
+                atFrameIndex: frameIndex + frameOffset,
+                outputFrameRate: outputFrameRate,
+                input: input,
+                adaptor: adaptor
+            )
+        }
+    }
+
+    nonisolated private func appendLivePhotoVideo(
+        from videoURL: URL,
+        bannerText: PortraitVideoBannerText?,
+        atFrameIndex frameIndex: Int,
+        outputFrameRate: Int,
+        input: AVAssetWriterInput,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor
+    ) async throws -> Int {
+        let asset = AVURLAsset(url: videoURL)
+        let duration = try await asset.load(.duration)
+        let durationSeconds = duration.seconds
+
+        guard durationSeconds.isFinite, durationSeconds > 0 else {
+            throw PortraitVideoExportError.cannotReadVideo
+        }
+
+        let frameCount = max(1, Int((durationSeconds * Double(outputFrameRate)).rounded(.up)))
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: thumbnailMaxPixelSize, height: thumbnailMaxPixelSize)
+        generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: CMTimeScale(outputFrameRate * 2))
+        generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: CMTimeScale(outputFrameRate * 2))
+
+        for frameOffset in 0..<frameCount {
+            try Task.checkCancellation()
+
+            let frameTime = CMTime(
+                seconds: Double(frameOffset) / Double(outputFrameRate),
+                preferredTimescale: 600
+            )
+            let image = try generator.copyCGImage(at: frameTime, actualTime: nil)
+
+            try await appendFrame(
+                image,
+                bannerText: bannerText,
+                atFrameIndex: frameIndex + frameOffset,
+                outputFrameRate: outputFrameRate,
+                input: input,
+                adaptor: adaptor
+            )
+        }
+
+        return frameCount
+    }
+
+    nonisolated private func appendFrame(
+        _ image: CGImage,
+        bannerText: PortraitVideoBannerText?,
+        atFrameIndex frameIndex: Int,
+        outputFrameRate: Int,
         input: AVAssetWriterInput,
         adaptor: AVAssetWriterInputPixelBufferAdaptor
     ) async throws {
@@ -490,7 +621,7 @@ final class PortraitVideoExportService {
 
         let presentationTime = CMTime(
             value: CMTimeValue(frameIndex),
-            timescale: CMTimeScale(max(picturesPerSecond, 1))
+            timescale: CMTimeScale(outputFrameRate)
         )
         guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
             throw PortraitVideoExportError.writerFailed("Unable to append video frame.")

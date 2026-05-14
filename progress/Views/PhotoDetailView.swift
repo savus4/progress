@@ -219,6 +219,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
     let locationName: String?
     let latitude: Double
     let longitude: Double
+    var isHearted: Bool
 
     var id: NSManagedObjectID { objectID }
 
@@ -232,6 +233,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
         locationName = photo.locationName
         latitude = photo.latitude
         longitude = photo.longitude
+        isHearted = photo.isHearted
     }
 
     init(gridItem: UIKitPhotoGridItem) {
@@ -243,6 +245,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
         locationName = gridItem.locationName
         latitude = gridItem.latitude
         longitude = gridItem.longitude
+        isHearted = gridItem.isHearted
     }
 }
 
@@ -298,10 +301,13 @@ struct PhotoDetailView: View {
                 isShareEnabled: !isPerformingAction && currentItem != nil,
                 isSaveEnabled: !isPerformingAction && currentItem != nil && !hasSavedCurrentItemToLibrary,
                 isDeleteEnabled: !isPerformingAction && currentItem != nil,
+                isHeartEnabled: !isPerformingAction && currentItem != nil,
+                isHearted: currentItem?.isHearted ?? false,
                 saveImageSystemName: saveToLibraryButtonSystemImage,
                 onClose: closeCurrentPhoto,
                 onShare: shareStillPhoto,
                 onSave: saveCurrentAssetToPhotoLibrary,
+                onHeart: toggleCurrentPhotoHeart,
                 onDelete: deleteCurrentPhoto
             )
         }
@@ -492,6 +498,29 @@ struct PhotoDetailView: View {
         }
     }
 
+    private func toggleCurrentPhotoHeart() {
+        guard !isPerformingAction, let currentItem else { return }
+
+        do {
+            guard let photo = try viewContext.existingObject(with: currentItem.objectID) as? DailyPhoto else {
+                throw PhotoDetailHeartError.photoMissing
+            }
+
+            let nextValue = !photo.isHearted
+            photo.isHearted = nextValue
+            photo.modifiedAt = Date()
+            try viewContext.save()
+
+            if detailItems.indices.contains(selectedIndex),
+               detailItems[selectedIndex].objectID == currentItem.objectID {
+                detailItems[selectedIndex].isHearted = nextValue
+            }
+        } catch {
+            viewContext.rollback()
+            actionError = PhotoDetailActionError(message: "Unable to update this favorite.")
+        }
+    }
+
     private func deleteCurrentPhoto() {
         guard !isPerformingAction, let currentItem else { return }
 
@@ -677,6 +706,10 @@ private struct PhotoDetailActionError: Identifiable {
     let message: String
 }
 
+private enum PhotoDetailHeartError: Error {
+    case photoMissing
+}
+
 private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentable {
     let isVisible: Bool
     let locationTitle: String
@@ -684,10 +717,13 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
     let isShareEnabled: Bool
     let isSaveEnabled: Bool
     let isDeleteEnabled: Bool
+    let isHeartEnabled: Bool
+    let isHearted: Bool
     let saveImageSystemName: String
     let onClose: () -> Void
     let onShare: () -> Void
     let onSave: () -> Void
+    let onHeart: () -> Void
     let onDelete: () -> Void
 
     func makeUIViewController(context: Context) -> ToolbarConfigViewController {
@@ -702,10 +738,13 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
             isShareEnabled: isShareEnabled,
             isSaveEnabled: isSaveEnabled,
             isDeleteEnabled: isDeleteEnabled,
+            isHeartEnabled: isHeartEnabled,
+            isHearted: isHearted,
             saveImageSystemName: saveImageSystemName,
             onClose: onClose,
             onShare: onShare,
             onSave: onSave,
+            onHeart: onHeart,
             onDelete: onDelete
         )
         controller.applyConfigurationIfPossible()
@@ -725,10 +764,13 @@ private final class ToolbarConfigViewController: UIViewController {
         let isShareEnabled: Bool
         let isSaveEnabled: Bool
         let isDeleteEnabled: Bool
+        let isHeartEnabled: Bool
+        let isHearted: Bool
         let saveImageSystemName: String
         var onClose: () -> Void
         var onShare: () -> Void
         var onSave: () -> Void
+        var onHeart: () -> Void
         var onDelete: () -> Void
 
         static func == (lhs: Configuration, rhs: Configuration) -> Bool {
@@ -738,6 +780,8 @@ private final class ToolbarConfigViewController: UIViewController {
             lhs.isShareEnabled == rhs.isShareEnabled &&
             lhs.isSaveEnabled == rhs.isSaveEnabled &&
             lhs.isDeleteEnabled == rhs.isDeleteEnabled &&
+            lhs.isHeartEnabled == rhs.isHeartEnabled &&
+            lhs.isHearted == rhs.isHearted &&
             lhs.saveImageSystemName == rhs.saveImageSystemName
         }
     }
@@ -806,11 +850,23 @@ private final class ToolbarConfigViewController: UIViewController {
         delete.tintColor = .systemRed
         delete.isEnabled = configuration.isDeleteEnabled
 
+        let heart = Self.compactBarButtonItem(
+            systemName: configuration.isHearted ? "heart.fill" : "heart",
+            accessibilityLabel: configuration.isHearted ? "Remove Favorite" : "Favorite",
+            target: self,
+            action: #selector(heartTapped)
+        )
+        heart.tintColor = configuration.isHearted ? .systemRed : .white
+        heart.isEnabled = configuration.isHeartEnabled
+
         let items: [UIBarButtonItem] = [
             share,
             save,
             Self.flexibleSpaceItem(),
-            delete
+            heart,
+            Self.flexibleSpaceItem(),
+            delete,
+            Self.invisibleBalanceItem()
         ]
 
         chromeViewController.setToolbarItems(items, animated: false)
@@ -862,6 +918,15 @@ private final class ToolbarConfigViewController: UIViewController {
 
     private static func flexibleSpaceItem() -> UIBarButtonItem {
         UIBarButtonItem(systemItem: .flexibleSpace)
+    }
+
+    private static func invisibleBalanceItem() -> UIBarButtonItem {
+        let view = UIView(frame: CGRect(x: 0, y: 0, width: 44, height: 1))
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        let item = UIBarButtonItem(customView: view)
+        item.isEnabled = false
+        return item
     }
 
     private func closeItem() -> UIBarButtonItem {
@@ -929,6 +994,10 @@ private final class ToolbarConfigViewController: UIViewController {
 
     @objc private func saveTapped() {
         configuration?.onSave()
+    }
+
+    @objc private func heartTapped() {
+        configuration?.onHeart()
     }
 
     private func setChromeVisible(_ isVisible: Bool, in navigationController: UINavigationController) {

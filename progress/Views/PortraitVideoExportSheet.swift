@@ -9,6 +9,7 @@ struct PortraitVideoExportSheet: View {
     @AppStorage("portraitVideoQuality") private var selectedQualityRawValue = PortraitVideoExportQuality.best.rawValue
     @AppStorage("portraitVideoIncludesDateBanner") private var includesDateBanner = false
     @AppStorage("portraitVideoIncludesLocationBanner") private var includesLocationBanner = false
+    @AppStorage("portraitVideoIncludesHeartedLivePhotoVideos") private var includesHeartedLivePhotoVideos = false
     @State private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
@@ -129,7 +130,7 @@ struct PortraitVideoExportSheet: View {
                 systemImage: "photo.stack"
             )
             summaryPill(
-                title: formattedDuration(Double(matchingPhotos.count) / Double(picturesPerSecond)),
+                title: formattedDuration(estimatedVideoDuration),
                 subtitle: "Length",
                 systemImage: "timer"
             )
@@ -174,6 +175,10 @@ struct PortraitVideoExportSheet: View {
 
             Toggle(isOn: $includesLocationBanner) {
                 Label("Show Location Banner", systemImage: "location")
+            }
+
+            Toggle(isOn: $includesHeartedLivePhotoVideos) {
+                Label("Use Favorite Live Motion", systemImage: "heart.fill")
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -238,8 +243,7 @@ struct PortraitVideoExportSheet: View {
             return "No photos in range."
         }
 
-        let duration = Double(count) / Double(picturesPerSecond)
-        return "\(count) photo\(count == 1 ? "" : "s") · \(formattedDuration(duration))"
+        return "\(count) photo\(count == 1 ? "" : "s") · \(formattedDuration(estimatedVideoDuration))"
     }
 
     private var dateRangeSummary: String {
@@ -257,6 +261,19 @@ struct PortraitVideoExportSheet: View {
     private var clampedPicturesPerSecond: Int {
         min(max(picturesPerSecond, 1), 60)
     }
+
+    private var heartedLivePhotoVideoCount: Int {
+        guard includesHeartedLivePhotoVideos else { return 0 }
+        return matchingPhotos.filter(\.hasHeartedLivePhotoVideo).count
+    }
+
+    private var estimatedVideoDuration: TimeInterval {
+        let stillPhotoCount = matchingPhotos.count - heartedLivePhotoVideoCount
+        return Double(stillPhotoCount) / Double(clampedPicturesPerSecond) +
+            Double(heartedLivePhotoVideoCount) * Self.estimatedLivePhotoVideoDuration
+    }
+
+    private static let estimatedLivePhotoVideoDuration: TimeInterval = 3.0
 
     private var selectedQuality: PortraitVideoExportQuality {
         get {
@@ -526,7 +543,8 @@ struct PortraitVideoExportSheet: View {
                     picturesPerSecond: picturesPerSecond,
                     quality: selectedQuality,
                     includesDateBanner: includesDateBanner,
-                    includesLocationBanner: includesLocationBanner
+                    includesLocationBanner: includesLocationBanner,
+                    includesHeartedLivePhotoVideo: includesHeartedLivePhotoVideos
                 ) { newProgress in
                     updateProgress(newProgress)
                 }

@@ -77,6 +77,7 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
     let locationName: String?
     let latitude: Double
     let longitude: Double
+    let isHearted: Bool
     let uploadState: PhotoUploadState
     let assetNames: [String]
 
@@ -91,6 +92,7 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
         locationName = photo.locationName
         latitude = photo.latitude
         longitude = photo.longitude
+        isHearted = photo.isHearted
         uploadState = photo.uploadState
         assetNames = [
             fullImageAssetName,

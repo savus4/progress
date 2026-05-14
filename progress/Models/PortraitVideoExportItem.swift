@@ -8,8 +8,14 @@ nonisolated struct PortraitVideoExportItem: Identifiable, Equatable {
     let latitude: Double
     let longitude: Double
     let fullImageAssetName: String?
+    let livePhotoVideoAssetName: String?
+    let isHearted: Bool
 
     var id: NSManagedObjectID { objectID }
+
+    var hasHeartedLivePhotoVideo: Bool {
+        isHearted && livePhotoVideoAssetName != nil
+    }
 
     @MainActor
     init(photo: DailyPhoto) {
@@ -19,5 +25,7 @@ nonisolated struct PortraitVideoExportItem: Identifiable, Equatable {
         latitude = photo.latitude
         longitude = photo.longitude
         fullImageAssetName = photo.fullImageAssetName ?? photo.livePhotoImageAssetName
+        livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+        isHearted = photo.isHearted
     }
 }
