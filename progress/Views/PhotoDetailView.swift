@@ -482,31 +482,10 @@ struct PhotoDetailView: View {
             defer { isPerformingAction = false }
 
             do {
-                let authorizationStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-                guard authorizationStatus == .authorized || authorizationStatus == .limited else {
-                    throw PhotoDetailSaveError.photoLibraryAccessDenied
-                }
-
-                if let livePhotoImageAssetName = currentItem.livePhotoImageAssetName,
-                   let livePhotoVideoAssetName = currentItem.livePhotoVideoAssetName {
-                    let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
-                        imageAssetName: livePhotoImageAssetName,
-                        videoAssetName: livePhotoVideoAssetName
-                    )
-                    try await saveToPhotoLibrary(
-                        imageURL: resources.imageURL,
-                        videoURL: resources.videoURL,
-                        metadata: currentItem
-                    )
-                } else {
-                    let imageURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
-                        fullImageAssetName: currentItem.fullImageAssetName ?? currentItem.livePhotoImageAssetName
-                    )
-                    try await saveToPhotoLibrary(imageURL: imageURL, metadata: currentItem)
-                }
-
+                let saveItem = PhotoLibrarySaveItem(item: currentItem)
+                try await PhotoLibrarySaveService.shared.save(saveItem)
                 hasSavedCurrentItemToLibrary = true
-            } catch let error as PhotoDetailSaveError {
+            } catch let error as PhotoLibrarySaveError {
                 actionError = PhotoDetailActionError(message: error.localizedDescription)
             } catch {
                 actionError = PhotoDetailActionError(message: "Unable to save this photo to the Photos library.")
@@ -623,38 +602,6 @@ struct PhotoDetailView: View {
             hasSavedCurrentItemToLibrary = false
         }
         onCurrentItemChanged(detailItems[nextIndex].objectID)
-    }
-
-    private func saveToPhotoLibrary(
-        imageURL: URL,
-        videoURL: URL? = nil,
-        metadata: PhotoDetailItem
-    ) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHPhotoLibrary.shared().performChanges {
-                let creationRequest = PHAssetCreationRequest.forAsset()
-                creationRequest.creationDate = metadata.captureDate
-                creationRequest.location = photoLocation(for: metadata)
-                creationRequest.addResource(with: .photo, fileURL: imageURL, options: nil)
-
-                if let videoURL {
-                    creationRequest.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
-                }
-            } completionHandler: { success, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if success {
-                    continuation.resume(returning: ())
-                } else {
-                    continuation.resume(throwing: PhotoDetailSaveError.saveFailed)
-                }
-            }
-        }
-    }
-
-    private func photoLocation(for item: PhotoDetailItem) -> CLLocation? {
-        guard item.latitude != 0 || item.longitude != 0 else { return nil }
-        return CLLocation(latitude: item.latitude, longitude: item.longitude)
     }
 
     @MainActor
@@ -1131,20 +1078,6 @@ private final class ToolbarConfigViewController: UIViewController {
     }
 }
 
-private enum PhotoDetailSaveError: LocalizedError {
-    case photoLibraryAccessDenied
-    case saveFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .photoLibraryAccessDenied:
-            "Allow Photos access to save exports to your library."
-        case .saveFailed:
-            "The photo could not be saved to the Photos library."
-        }
-    }
-}
-
 private struct PhotoDetailPageView: View {
     let item: PhotoDetailItem
     let isCurrentPage: Bool
@@ -1154,8 +1087,6 @@ private struct PhotoDetailPageView: View {
 
     @State private var displayedImage: UIImage?
     @State private var hasLoadedFullResolutionImage = false
-    @State private var isLoadingLivePhotoResources = false
-    @State private var isDownloadingLivePhotoAsset = false
     @State private var livePhotoResources: LivePhotoResources?
     @State private var representedObjectID: NSManagedObjectID?
 
@@ -1190,11 +1121,7 @@ private struct PhotoDetailPageView: View {
 
             Group {
                 if isCurrentPage, shouldShowLivePhotoStatusIndicator {
-                    if shouldShowLivePhotoLoadingIndicator {
-                        LivePhotoLoadingIndicator(isDownloading: isDownloadingLivePhotoAsset)
-                    } else {
-                        LivePhotoStatusIndicator(isLivePhoto: hasLivePhoto)
-                    }
+                    LivePhotoStatusIndicator(isLivePhoto: hasLivePhoto)
                 }
             }
             .padding(.top, topChromeClearance)
@@ -1202,9 +1129,6 @@ private struct PhotoDetailPageView: View {
         }
         .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
             await loadImage()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: CloudKitService.assetTransferDidChangeNotification)) { notification in
-            handleAssetTransferNotification(notification)
         }
     }
 
@@ -1218,8 +1142,6 @@ private struct PhotoDetailPageView: View {
 
         hasLoadedFullResolutionImage = false
         livePhotoResources = nil
-        isLoadingLivePhotoResources = false
-        syncLivePhotoDownloadState()
 
         if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: objectID) {
             displayedImage = cachedThumbnail
@@ -1252,9 +1174,6 @@ private struct PhotoDetailPageView: View {
             return
         }
 
-        isLoadingLivePhotoResources = true
-        defer { isLoadingLivePhotoResources = false }
-
         guard let resources = try? await PhotoStorageService.shared.loadLivePhotoResources(
             imageAssetName: item.livePhotoImageAssetName,
             videoAssetName: item.livePhotoVideoAssetName
@@ -1267,42 +1186,14 @@ private struct PhotoDetailPageView: View {
             imageURL: resources.imageURL,
             videoURL: resources.videoURL
         )
-        syncLivePhotoDownloadState()
     }
 
     private var hasLivePhoto: Bool {
         item.livePhotoImageAssetName != nil && item.livePhotoVideoAssetName != nil
     }
 
-    private var shouldShowLivePhotoLoadingIndicator: Bool {
-        hasLivePhoto &&
-        displayedImage != nil &&
-        livePhotoResources == nil &&
-        (isLoadingLivePhotoResources || isDownloadingLivePhotoAsset)
-    }
-
     private var shouldShowLivePhotoStatusIndicator: Bool {
         hasLoadedFullResolutionImage
-    }
-
-    @MainActor
-    private func syncLivePhotoDownloadState() {
-        let assetNames = [item.livePhotoImageAssetName, item.livePhotoVideoAssetName].compactMap(\.self)
-        isDownloadingLivePhotoAsset = CloudSyncMonitor.shared.isDownloading(assetNames: assetNames)
-    }
-
-    @MainActor
-    private func handleAssetTransferNotification(_ notification: Notification) {
-        guard let assetName = notification.userInfo?["assetName"] as? String else {
-            return
-        }
-
-        let trackedAssetNames = [item.livePhotoImageAssetName, item.livePhotoVideoAssetName].compactMap(\.self)
-        guard trackedAssetNames.contains(assetName) else {
-            return
-        }
-
-        syncLivePhotoDownloadState()
     }
 }
 
@@ -1314,32 +1205,6 @@ private struct PhotoDetailPageTaskKey: Hashable {
 private struct LivePhotoResources {
     let imageURL: URL
     let videoURL: URL
-}
-
-private struct LivePhotoLoadingIndicator: View {
-    let isDownloading: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "livephoto")
-                .imageScale(.medium)
-
-            ProgressView()
-                .controlSize(.small)
-                .tint(.white)
-        }
-        .font(.subheadline.weight(.semibold))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.black.opacity(0.55), in: Capsule())
-        .overlay(
-            Capsule()
-                .stroke(.white.opacity(0.14), lineWidth: 1)
-        )
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isDownloading ? "Live Photo downloading" : "Preparing Live Photo")
-    }
 }
 
 private struct LivePhotoStatusIndicator: View {

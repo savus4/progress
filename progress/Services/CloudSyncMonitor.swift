@@ -42,16 +42,19 @@ final class CloudSyncMonitor: ObservableObject {
     @Published private(set) var pausedUploadCount = 0
     @Published private(set) var uploadingAssetCount = 0
     @Published private(set) var downloadingAssetCount = 0
+    @Published private(set) var isMetadataImportActive = false
     @Published private(set) var isUploadProcessorActive = false
 
     private var observer: NSObjectProtocol?
     private var uploadObserver: NSObjectProtocol?
     private var uploadProcessingObserver: NSObjectProtocol?
     private var contextSaveObserver: NSObjectProtocol?
+    private var remoteStoreChangeObserver: NSObjectProtocol?
     private var assetTransferObserver: NSObjectProtocol?
     private var activeDownloadAssetNames: Set<String> = []
     private var exportWaiters: [UUID: ExportWaiter] = [:]
     private var uploadStatusRefreshTask: Task<Void, Never>?
+    private var metadataImportQuietTask: Task<Void, Never>?
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudSync")
 
     private init() {
@@ -103,6 +106,16 @@ final class CloudSyncMonitor: ObservableObject {
             }
         }
 
+        remoteStoreChangeObserver = NotificationCenter.default.addObserver(
+            forName: .NSPersistentStoreRemoteChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleRemoteStoreChange()
+            }
+        }
+
         assetTransferObserver = NotificationCenter.default.addObserver(
             forName: CloudKitService.assetTransferDidChangeNotification,
             object: nil,
@@ -128,6 +141,7 @@ final class CloudSyncMonitor: ObservableObject {
 
     deinit {
         uploadStatusRefreshTask?.cancel()
+        metadataImportQuietTask?.cancel()
         if let observer {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -140,20 +154,26 @@ final class CloudSyncMonitor: ObservableObject {
         if let contextSaveObserver {
             NotificationCenter.default.removeObserver(contextSaveObserver)
         }
+        if let remoteStoreChangeObserver {
+            NotificationCenter.default.removeObserver(remoteStoreChangeObserver)
+        }
         if let assetTransferObserver {
             NotificationCenter.default.removeObserver(assetTransferObserver)
         }
     }
 
     var statusSymbolName: String {
-        if downloadingAssetCount > 0 {
-            return "arrow.down.circle.icloud"
-        }
         if pausedUploadCount > 0 {
             return "exclamationmark.icloud"
         }
         if uploadingAssetCount > 0 || pendingUploadCount > 0 || failedUploadCount > 0 {
             return "arrow.triangle.2.circlepath.icloud"
+        }
+        if isImportingMetadata {
+            return "arrow.triangle.2.circlepath.icloud"
+        }
+        if downloadingAssetCount > 0 {
+            return "arrow.down.circle.icloud"
         }
 
         switch syncState {
@@ -193,30 +213,20 @@ final class CloudSyncMonitor: ObservableObject {
             return "Preparing older photos for iCloud sync"
         }
 
-        if downloadingAssetCount > 0 {
-            return "Downloading original photos from iCloud"
-        }
-
         if pausedUploadCount > 0 {
             return "Some photo uploads are paused"
         }
 
-        if automaticOutstandingUploadCount > 0 {
-            if uploadingAssetCount > 0 || isUploadProcessorActive {
-                return automaticOutstandingUploadCount == 1
-                    ? "Uploading 1 original photo to iCloud"
-                    : "Uploading \(automaticOutstandingUploadCount) original photos to iCloud"
-            }
+        if let uploadTitle {
+            return uploadTitle
+        }
 
-            if pendingUploadCount > 0 {
-                return automaticOutstandingUploadCount == 1
-                    ? "Waiting to upload 1 original photo"
-                    : "Waiting to upload \(automaticOutstandingUploadCount) original photos"
-            }
+        if isImportingMetadata {
+            return "Downloading photo library from iCloud"
+        }
 
-            return automaticOutstandingUploadCount == 1
-                ? "1 photo upload will retry automatically"
-                : "\(automaticOutstandingUploadCount) photo uploads will retry automatically"
+        if downloadingAssetCount > 0 {
+            return "Downloading original photos from iCloud"
         }
 
         switch syncState {
@@ -245,30 +255,20 @@ final class CloudSyncMonitor: ObservableObject {
                 : "Backfilling older photos for cross-device access."
         }
 
-        if downloadingAssetCount > 0 {
-            return "Currently downloading \(downloadingAssetCount) photo\(downloadingAssetCount == 1 ? "" : "s") from iCloud for viewing."
-        }
-
         if pausedUploadCount > 0 {
             return "\(pausedUploadCount) photo\(pausedUploadCount == 1 ? "" : "s") need manual retry after account, quota, or asset issues are resolved."
         }
 
-        if automaticOutstandingUploadCount > 0 {
-            if uploadingAssetCount > 0 || isUploadProcessorActive {
-                return automaticOutstandingUploadCount == 1
-                    ? "1 photo is currently uploading in the background."
-                    : "\(automaticOutstandingUploadCount) photos are still queued for upload."
-            }
+        if let uploadDetail {
+            return uploadDetail + metadataImportSuffix
+        }
 
-            if pendingUploadCount > 0 {
-                return automaticOutstandingUploadCount == 1
-                    ? "1 photo is waiting to upload when network and background time allow."
-                    : "\(automaticOutstandingUploadCount) photos are still queued and will upload when network and background time allow."
-            }
+        if isImportingMetadata {
+            return "Photo metadata and thumbnails are downloading in the background."
+        }
 
-            return automaticOutstandingUploadCount == 1
-                ? "1 photo will retry automatically later."
-                : "\(automaticOutstandingUploadCount) photos are still in the automatic retry queue."
+        if downloadingAssetCount > 0 {
+            return "Currently downloading \(downloadingAssetCount) original photo\(downloadingAssetCount == 1 ? "" : "s") from iCloud."
         }
 
         if let lastMigrationError {
@@ -295,6 +295,53 @@ final class CloudSyncMonitor: ObservableObject {
         case .failed(let message):
             return message
         }
+    }
+
+    private var uploadTitle: String? {
+        guard automaticOutstandingUploadCount > 0 else { return nil }
+
+        if uploadingAssetCount > 0 || isUploadProcessorActive {
+            return automaticOutstandingUploadCount == 1
+                ? "Uploading 1 original photo to iCloud"
+                : "Uploading \(automaticOutstandingUploadCount) original photos to iCloud"
+        }
+
+        if pendingUploadCount > 0 {
+            return automaticOutstandingUploadCount == 1
+                ? "Waiting to upload 1 original photo"
+                : "Waiting to upload \(automaticOutstandingUploadCount) original photos"
+        }
+
+        return automaticOutstandingUploadCount == 1
+            ? "1 photo upload will retry automatically"
+            : "\(automaticOutstandingUploadCount) photo uploads will retry automatically"
+    }
+
+    private var uploadDetail: String? {
+        guard automaticOutstandingUploadCount > 0 else { return nil }
+
+        if uploadingAssetCount > 0 || isUploadProcessorActive {
+            return automaticOutstandingUploadCount == 1
+                ? "1 photo is currently uploading in the background."
+                : "\(automaticOutstandingUploadCount) photos are still queued for upload."
+        }
+
+        if pendingUploadCount > 0 {
+            return automaticOutstandingUploadCount == 1
+                ? "1 photo is waiting to upload when network and background time allow."
+                : "\(automaticOutstandingUploadCount) photos are still queued and will upload when network and background time allow."
+        }
+
+        return automaticOutstandingUploadCount == 1
+            ? "1 photo will retry automatically later."
+            : "\(automaticOutstandingUploadCount) photos are still in the automatic retry queue."
+    }
+
+    private var metadataImportSuffix: String {
+        if isImportingMetadata {
+            return " Photo metadata and thumbnails are also downloading."
+        }
+        return ""
     }
 
     func beginMigration(totalPending: Int) {
@@ -424,6 +471,8 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     private func handle(event: NSPersistentCloudKitContainer.Event) {
+        updateMetadataImportStatus(for: event)
+
         if event.type == .export, let endDate = event.endDate {
             if let error = event.error {
                 if !isSystemDeferredCloudKitError(error) {
@@ -448,6 +497,55 @@ final class CloudSyncMonitor: ObservableObject {
             }
         } else {
             syncState = .syncing(event.type)
+        }
+    }
+
+    private var isImportingMetadata: Bool {
+        if isMetadataImportActive {
+            return true
+        }
+        if case .syncing(.import) = syncState { return true }
+        return false
+    }
+
+    private func updateMetadataImportStatus(for event: NSPersistentCloudKitContainer.Event) {
+        guard event.type == .import else { return }
+
+        guard event.endDate != nil else {
+            markMetadataImportActive()
+            return
+        }
+
+        guard event.error == nil else {
+            metadataImportQuietTask?.cancel()
+            isMetadataImportActive = false
+            return
+        }
+
+        metadataImportQuietTask?.cancel()
+        isMetadataImportActive = false
+    }
+
+    private func handleRemoteStoreChange() {
+        markMetadataImportActive()
+        scheduleMetadataImportQuietFinish()
+        scheduleUploadStatusRefresh(delay: .milliseconds(100))
+    }
+
+    private func markMetadataImportActive() {
+        isMetadataImportActive = true
+    }
+
+    private func scheduleMetadataImportQuietFinish() {
+        metadataImportQuietTask?.cancel()
+        metadataImportQuietTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            guard let self else { return }
+            if case .syncing(.import) = self.syncState {
+                return
+            }
+            self.isMetadataImportActive = false
         }
     }
 

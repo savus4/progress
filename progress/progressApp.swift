@@ -18,6 +18,9 @@ struct progressApp: App {
     let persistenceController = PersistenceController.shared
 
     init() {
+        Task { @MainActor in
+            _ = CloudSyncMonitor.shared
+        }
         loadRocketSimConnect()
     }
 

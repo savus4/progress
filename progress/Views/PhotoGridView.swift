@@ -24,6 +24,7 @@ struct PhotoGridView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
     @StateObject private var dataController = PhotoGridDataController()
+    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
 
     @State private var showingCamera = false
     @State private var showingNotificationSettings = false
@@ -38,6 +39,7 @@ struct PhotoGridView: View {
     @State private var isSelectionMode = false
     @State private var selectedPhotoIDs: Set<NSManagedObjectID> = []
     @State private var isExporting = false
+    @State private var isSavingToPhotoLibrary = false
     @State private var exportedFileURLs: [URL] = []
     @State private var showingExportPicker = false
     @State private var portraitVideoExportPresentation: PortraitVideoExportPresentation?
@@ -54,17 +56,21 @@ struct PhotoGridView: View {
             ZStack {
                     if !dataController.hasAnyPhotos {
                         VStack(spacing: 20) {
-                            Image(systemName: "camera.fill")
-                                .font(.system(size: 60))
-                                .foregroundStyle(.secondary)
-                            
-                            Text("No Photos Yet")
-                                .font(.title2)
-                                .fontWeight(.semibold)
-                            
-                            Text("Start capturing your daily moments")
-                                .font(.body)
-                                .foregroundStyle(.secondary)
+                            if cloudSyncMonitor.isMetadataImportActive {
+                                photoLibraryDownloadStatus
+                            } else {
+                                Image(systemName: "camera.fill")
+                                    .font(.system(size: 60))
+                                    .foregroundStyle(.secondary)
+
+                                Text("No Photos Yet")
+                                    .font(.title2)
+                                    .fontWeight(.semibold)
+
+                                Text("Start capturing your daily moments")
+                                    .font(.body)
+                                    .foregroundStyle(.secondary)
+                            }
                             
                             Button(action: { showingCamera = true }) {
                                 Label("Take Your First Photo", systemImage: "camera")
@@ -76,6 +82,7 @@ struct PhotoGridView: View {
                             .accessibilityIdentifier("emptyStateCaptureButton")
                             .padding(.top)
                         }
+                        .padding(.horizontal, 28)
                     } else if dataController.isEmpty {
                         filteredEmptyState
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -163,36 +170,55 @@ struct PhotoGridView: View {
                                 .font(.title3)
                         }
                         .foregroundStyle(selectedHeartButtonColor)
-                        .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
+                        .disabled(!isSelectedHeartButtonEnabled)
+
+                        Button(action: toggleFavoriteLivePhotoForSelectedPhotos) {
+                            Image(uiImage: FavoriteLivePhotoFilterSymbol.image(isSelected: isSelectedFavoriteLivePhotoButtonActive))
+                                .renderingMode(.template)
+                                .font(.title3)
+                        }
+                        .foregroundStyle(selectedFavoriteLivePhotoButtonColor)
+                        .disabled(!isSelectedFavoriteLivePhotoButtonEnabled)
+                        .accessibilityLabel(isSelectedFavoriteLivePhotoButtonActive ? "Remove Favorite Live Photo" : "Favorite Live Photo")
 
                         Menu {
                             Button(action: exportSelectedPhotos) {
-                                Label("Export Selected (\(selectedPhotoIDs.count))", systemImage: "square.and.arrow.up")
+                                Label("Share Selected (\(selectedPhotoIDs.count))", systemImage: "square.and.arrow.up")
                             }
-                            .disabled(selectedPhotoIDs.isEmpty || isExporting)
+                            .disabled(selectedPhotoIDs.isEmpty || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
 
                             Button(action: exportAllPhotos) {
-                                Label("Export All (\(dataController.photoCount))", systemImage: "tray.and.arrow.down")
+                                Label("Share All (\(dataController.totalPhotoCount))", systemImage: "tray.and.arrow.down")
                             }
-                            .disabled(dataController.isEmpty || isExporting)
-                        } label: {
-                            if isExporting {
-                                ProgressView()
-                            } else {
-                                Image(systemName: "square.and.arrow.up")
-                                    .font(.title3)
-                            }
-                        }
+                            .disabled(!dataController.hasAnyPhotos || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
 
-                        Button(role: .destructive, action: { showingDeleteConfirmation = true }) {
-                            if isDeletingSelection {
+                            Divider()
+
+                            Button(action: saveSelectedPhotosToLibrary) {
+                                Label("Save Selected to Photos (\(selectedPhotoIDs.count))", systemImage: "square.and.arrow.down")
+                            }
+                            .disabled(selectedPhotoIDs.isEmpty || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
+
+                            Button(action: saveAllPhotosToLibrary) {
+                                Label("Save All to Photos (\(dataController.totalPhotoCount))", systemImage: "photo.stack")
+                            }
+                            .disabled(!dataController.hasAnyPhotos || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
+
+                            Divider()
+
+                            Button(role: .destructive, action: { showingDeleteConfirmation = true }) {
+                                Label("Delete Selected (\(selectedPhotoIDs.count))", systemImage: "trash")
+                            }
+                            .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection || isSavingToPhotoLibrary)
+                        } label: {
+                            if isExporting || isSavingToPhotoLibrary || isDeletingSelection {
                                 ProgressView()
                             } else {
-                                Image(systemName: "trash")
+                                Image(systemName: "ellipsis.circle")
                                     .font(.title3)
                             }
                         }
-                        .disabled(selectedPhotoIDs.isEmpty || isDeletingSelection)
+                        .accessibilityLabel("More Selection Actions")
                         .confirmationDialog(
                             "Delete selected photos?",
                             isPresented: $showingDeleteConfirmation,
@@ -243,7 +269,7 @@ struct PhotoGridView: View {
             }) {
                 ExportDocumentPicker(urls: exportedFileURLs)
             }
-            .alert("Export", isPresented: Binding(
+            .alert("Photos", isPresented: Binding(
                 get: { exportAlertMessage != nil },
                 set: { if !$0 { exportAlertMessage = nil } }
             )) {
@@ -366,6 +392,34 @@ struct PhotoGridView: View {
         }
     }
 
+    private var photoLibraryDownloadStatus: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+                .accessibilityHidden(true)
+
+            VStack(spacing: 4) {
+                Text("Downloading Photo Library")
+                    .font(.headline)
+
+                Text("Photos, metadata, and thumbnails are coming down from iCloud.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 18)
+        .frame(maxWidth: 360)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(.secondary.opacity(0.16))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("photoLibraryDownloadStatus")
+    }
+
     private var emptyStateTitle: String {
         switch gridFilter {
         case .all:
@@ -414,7 +468,7 @@ struct PhotoGridView: View {
     @ViewBuilder
     private func filterMenuSymbol(for filter: PhotoGridFilter) -> some View {
         if filter == .favoriteLivePhotos {
-            Image(uiImage: FavoriteLivePhotoFilterSymbol.image())
+            Image(uiImage: FavoriteLivePhotoFilterSymbol.image(isSelected: true))
                 .renderingMode(.template)
         } else if filter == .all {
             Image(systemName: "photo.stack")
@@ -451,7 +505,7 @@ struct PhotoGridView: View {
     @ViewBuilder
     private var filterButtonSymbol: some View {
         if gridFilter == .favoriteLivePhotos {
-            Image(uiImage: FavoriteLivePhotoFilterSymbol.image())
+            Image(uiImage: FavoriteLivePhotoFilterSymbol.image(isSelected: true))
                 .renderingMode(.template)
                 .foregroundStyle(filterButtonForegroundStyle)
         } else {
@@ -616,8 +670,18 @@ struct PhotoGridView: View {
         dataController.photos(for: selectedPhotoIDs)
     }
 
+    private var selectedLivePhotos: [DailyPhoto] {
+        selectedPhotos.filter { $0.livePhotoImageAssetName != nil && $0.livePhotoVideoAssetName != nil }
+    }
+
     private var shouldHeartSelectedPhotos: Bool {
         dataController.shouldHeartPhotos(for: selectedPhotoIDs)
+    }
+
+    private var shouldFavoriteSelectedLivePhotos: Bool {
+        let photos = selectedLivePhotos
+        guard !photos.isEmpty else { return true }
+        return photos.contains { !$0.isFavoriteLivePhoto }
     }
 
     private var selectedHeartButtonSystemName: String {
@@ -625,7 +689,25 @@ struct PhotoGridView: View {
     }
 
     private var selectedHeartButtonColor: Color {
-        shouldHeartSelectedPhotos ? .primary : .red
+        guard isSelectedHeartButtonEnabled else { return .secondary }
+        return shouldHeartSelectedPhotos ? Color.primary : Color.red
+    }
+
+    private var isSelectedFavoriteLivePhotoButtonActive: Bool {
+        !shouldFavoriteSelectedLivePhotos
+    }
+
+    private var selectedFavoriteLivePhotoButtonColor: Color {
+        guard isSelectedFavoriteLivePhotoButtonEnabled else { return .secondary }
+        return isSelectedFavoriteLivePhotoButtonActive ? Color.blue : Color.primary
+    }
+
+    private var isSelectedHeartButtonEnabled: Bool {
+        !selectedPhotoIDs.isEmpty && !isDeletingSelection && !isSavingToPhotoLibrary
+    }
+
+    private var isSelectedFavoriteLivePhotoButtonEnabled: Bool {
+        !selectedLivePhotos.isEmpty && !isDeletingSelection && !isSavingToPhotoLibrary
     }
 
     private func toggleHeartForSelectedPhotos() {
@@ -652,6 +734,30 @@ struct PhotoGridView: View {
         }
     }
 
+    private func toggleFavoriteLivePhotoForSelectedPhotos() {
+        let photos = selectedLivePhotos
+        guard !photos.isEmpty else {
+            exportAlertMessage = "Please select at least one Live Photo."
+            return
+        }
+
+        let nextValue = shouldFavoriteSelectedLivePhotos
+        let now = Date()
+
+        do {
+            for photo in photos {
+                photo.isFavoriteLivePhoto = nextValue
+                photo.modifiedAt = now
+            }
+            try viewContext.save()
+            selectedPhotoIDs.removeAll()
+            isSelectionMode = false
+        } catch {
+            viewContext.rollback()
+            exportAlertMessage = "Unable to update Favorite Live Photos."
+        }
+    }
+
     private func openPortraitVideoExporter() {
         portraitVideoExportPresentation = PortraitVideoExportPresentation(
             photos: dataController.allStoredPhotos().map(PortraitVideoExportItem.init(photo:))
@@ -659,12 +765,30 @@ struct PhotoGridView: View {
     }
 
     private func exportAllPhotos() {
-        let allPhotos = dataController.allPhotos
+        let allPhotos = dataController.allStoredPhotos()
         guard !allPhotos.isEmpty else {
             exportAlertMessage = "No photos available to export."
             return
         }
         startExport(for: allPhotos)
+    }
+
+    private func saveSelectedPhotosToLibrary() {
+        let photos = selectedPhotos
+        guard !photos.isEmpty else {
+            exportAlertMessage = "Please select at least one photo to save."
+            return
+        }
+        startPhotoLibrarySave(for: photos)
+    }
+
+    private func saveAllPhotosToLibrary() {
+        let photos = dataController.allStoredPhotos()
+        guard !photos.isEmpty else {
+            exportAlertMessage = "No photos available to save."
+            return
+        }
+        startPhotoLibrarySave(for: photos)
     }
 
     private func deleteSelectedPhotos() {
@@ -697,8 +821,29 @@ struct PhotoGridView: View {
         }
     }
 
+    private func startPhotoLibrarySave(for photosToSave: [DailyPhoto]) {
+        guard !isSavingToPhotoLibrary, !isExporting, !isDeletingSelection else { return }
+        isSavingToPhotoLibrary = true
+
+        Task { @MainActor in
+            do {
+                let savedCount = try await PhotoLibrarySaveService.shared.save(photosToSave)
+                exportAlertMessage = "Saved \(savedCount) photo\(savedCount == 1 ? "" : "s") to Photos."
+                isSelectionMode = false
+                selectedPhotoIDs.removeAll()
+                isSavingToPhotoLibrary = false
+            } catch let error as PhotoLibrarySaveError {
+                exportAlertMessage = error.localizedDescription
+                isSavingToPhotoLibrary = false
+            } catch {
+                exportAlertMessage = "Save failed: \(error.localizedDescription)"
+                isSavingToPhotoLibrary = false
+            }
+        }
+    }
+
     private func startExport(for photosToExport: [DailyPhoto]) {
-        guard !isExporting else { return }
+        guard !isExporting, !isSavingToPhotoLibrary else { return }
         isExporting = true
 
         Task { @MainActor in
@@ -722,11 +867,11 @@ struct PhotoGridView: View {
 }
 
 private enum FavoriteLivePhotoFilterSymbol {
-    static func image() -> UIImage {
-        let livePhotoConfiguration = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
-        let heartConfiguration = UIImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+    static func image(isSelected: Bool) -> UIImage {
+        let livePhotoConfiguration = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        let heartConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
         guard let livePhoto = UIImage(systemName: "livephoto", withConfiguration: livePhotoConfiguration),
-              let heart = UIImage(systemName: "heart.fill", withConfiguration: heartConfiguration) else {
+              let heart = UIImage(systemName: isSelected ? "heart.fill" : "heart", withConfiguration: heartConfiguration) else {
             return UIImage(systemName: "livephoto") ?? UIImage()
         }
 
@@ -734,7 +879,7 @@ private enum FavoriteLivePhotoFilterSymbol {
         let image = renderer.image { _ in
             UIColor.white.set()
             livePhoto.draw(in: CGRect(x: 1, y: 1, width: 19, height: 19))
-            heart.draw(in: CGRect(x: 13, y: 12, width: 10, height: 10))
+            heart.draw(in: CGRect(x: 12, y: 11, width: 11, height: 11))
         }
         return image.withRenderingMode(.alwaysTemplate)
     }
