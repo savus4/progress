@@ -162,9 +162,7 @@ struct NotificationSettingsView: View {
                     }
                     .disabled(isImportingPhotos)
 
-                    Text("Import Photos and Import Album preserve Live Photos, which is great for video creation! Import Privately imports still images only, but you dont't have to grant the App access to you Photos library. No matter what, we do not collect any data of you.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    importGuidanceCard
 
                     if isImportingPhotos {
                         VStack(alignment: .leading, spacing: 8) {
@@ -290,6 +288,63 @@ struct NotificationSettingsView: View {
             return "Notifications are turned off for this app. Enable them in Settings."
         @unknown default:
             return "Notification permission status is unavailable."
+        }
+    }
+
+    private var importGuidanceCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            importGuidanceRow(
+                systemImage: "livephoto",
+                title: "Live Photos",
+                detail: "\"Import Photos\" and \"Import Album\" keep Live Photos, great for video creation.",
+                tint: .blue
+            )
+
+            Divider()
+
+            importGuidanceRow(
+                systemImage: "photo",
+                title: "Private Import",
+                detail: "\"Import Privately\" saves still images only, and you can import without full Photos library access.",
+                tint: .orange
+            )
+
+            Divider()
+
+            importGuidanceRow(
+                systemImage: "lock.shield",
+                title: "Your Data",
+                detail: "Photos stay on this device and, when enabled, in your iCloud.",
+                tint: .green
+            )
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.secondary.opacity(0.08))
+        )
+    }
+
+    @ViewBuilder
+    private func importGuidanceRow(
+        systemImage: String,
+        title: String,
+        detail: String,
+        tint: Color
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.footnote.weight(.semibold))
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

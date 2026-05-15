@@ -1,6 +1,7 @@
 import AVKit
 import Photos
 import SwiftUI
+import UIKit
 
 struct PortraitVideoExportSheet: View {
     let photos: [PortraitVideoExportItem]
@@ -10,7 +11,8 @@ struct PortraitVideoExportSheet: View {
     @AppStorage("portraitVideoQuality") private var selectedQualityRawValue = PortraitVideoExportQuality.best.rawValue
     @AppStorage("portraitVideoIncludesDateBanner") private var includesDateBanner = false
     @AppStorage("portraitVideoIncludesLocationBanner") private var includesLocationBanner = false
-    @AppStorage("portraitVideoIncludesHeartedLivePhotoVideos") private var includesHeartedLivePhotoVideos = false
+    @AppStorage("portraitVideoIncludesFavoriteLivePhotoVideos") private var includesFavoriteLivePhotoVideos = false
+    @AppStorage("portraitVideoHoldsHeartedPhotos") private var holdsHeartedPhotos = false
     @AppStorage(PortraitVideoExportStorageKeys.usesAllPhotos) private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
@@ -202,12 +204,34 @@ struct PortraitVideoExportSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Toggle(isOn: includesHeartedLivePhotoVideosBinding) {
-                    Label("Use Live Photos of Favorites", systemImage: "heart.fill")
+                Toggle(isOn: includesFavoriteLivePhotoVideosBinding) {
+                    Label {
+                        Text("Use Favorite Live Photos")
+                    } icon: {
+                        Image(uiImage: FavoriteLivePhotoToggleSymbol.image())
+                            .renderingMode(.template)
+                    }
+                }
+                .disabled(!hasFavoriteLivePhotos)
+
+                Text("Video clips from Favorite Live Photos are inserted into the video.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if !hasFavoriteLivePhotos {
+                    Text("No Live Photos have been marked as favorites yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: includesHeartedHoldBinding) {
+                    Label("Hold Hearted Photos", systemImage: "heart.fill")
                 }
                 .disabled(!hasHeartedPhotos)
 
-                Text("Video part of your favorited photos is inserted into the video.")
+                Text("Hearted still photos stay on screen for 1 second.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
@@ -303,22 +327,41 @@ struct PortraitVideoExportSheet: View {
         photos.contains(where: \.isHearted)
     }
 
-    private var effectiveIncludesHeartedLivePhotoVideos: Bool {
-        hasHeartedPhotos && includesHeartedLivePhotoVideos
+    private var hasFavoriteLivePhotos: Bool {
+        photos.contains(where: \.hasFavoriteLivePhotoVideo)
     }
 
-    private var heartedLivePhotoVideoCount: Int {
-        guard effectiveIncludesHeartedLivePhotoVideos else { return 0 }
-        return matchingPhotos.filter(\.hasHeartedLivePhotoVideo).count
+    private var effectiveIncludesFavoriteLivePhotoVideos: Bool {
+        hasFavoriteLivePhotos && includesFavoriteLivePhotoVideos
+    }
+
+    private var effectiveHoldsHeartedPhotos: Bool {
+        hasHeartedPhotos && holdsHeartedPhotos
+    }
+
+    private var favoriteLivePhotoVideoCount: Int {
+        guard effectiveIncludesFavoriteLivePhotoVideos else { return 0 }
+        return matchingPhotos.filter(\.hasFavoriteLivePhotoVideo).count
+    }
+
+    private var heartedStillHoldCount: Int {
+        guard effectiveHoldsHeartedPhotos else { return 0 }
+        return matchingPhotos.filter { photo in
+            photo.isHearted &&
+                !(effectiveIncludesFavoriteLivePhotoVideos && photo.hasFavoriteLivePhotoVideo)
+        }.count
     }
 
     private var estimatedVideoDuration: TimeInterval {
-        let stillPhotoCount = matchingPhotos.count - heartedLivePhotoVideoCount
-        return Double(stillPhotoCount) / Double(clampedPicturesPerSecond) +
-            Double(heartedLivePhotoVideoCount) * Self.estimatedLivePhotoVideoDuration
+        let livePhotoVideoCount = favoriteLivePhotoVideoCount
+        let normalStillPhotoCount = matchingPhotos.count - livePhotoVideoCount - heartedStillHoldCount
+        return Double(normalStillPhotoCount) / Double(clampedPicturesPerSecond) +
+            Double(heartedStillHoldCount) * Self.heartedStillHoldDuration +
+            Double(livePhotoVideoCount) * Self.estimatedLivePhotoVideoDuration
     }
 
     private static let estimatedLivePhotoVideoDuration: TimeInterval = 1.5
+    private static let heartedStillHoldDuration: TimeInterval = 1.0
 
     private var selectedQuality: PortraitVideoExportQuality {
         get {
@@ -336,10 +379,17 @@ struct PortraitVideoExportSheet: View {
         )
     }
 
-    private var includesHeartedLivePhotoVideosBinding: Binding<Bool> {
+    private var includesFavoriteLivePhotoVideosBinding: Binding<Bool> {
         Binding(
-            get: { effectiveIncludesHeartedLivePhotoVideos },
-            set: { includesHeartedLivePhotoVideos = $0 }
+            get: { effectiveIncludesFavoriteLivePhotoVideos },
+            set: { includesFavoriteLivePhotoVideos = $0 }
+        )
+    }
+
+    private var includesHeartedHoldBinding: Binding<Bool> {
+        Binding(
+            get: { effectiveHoldsHeartedPhotos },
+            set: { holdsHeartedPhotos = $0 }
         )
     }
 
@@ -652,7 +702,8 @@ struct PortraitVideoExportSheet: View {
                     quality: selectedQuality,
                     includesDateBanner: includesDateBanner,
                     includesLocationBanner: includesLocationBanner,
-                    includesHeartedLivePhotoVideo: effectiveIncludesHeartedLivePhotoVideos
+                    includesFavoriteLivePhotoVideo: effectiveIncludesFavoriteLivePhotoVideos,
+                    holdsHeartedPhotos: effectiveHoldsHeartedPhotos
                 ) { newProgress in
                     updateProgress(newProgress)
                 }
@@ -1112,5 +1163,24 @@ private enum PortraitVideoSaveError: LocalizedError {
         case .saveFailed:
             return "The video could not be saved to Photos."
         }
+    }
+}
+
+private enum FavoriteLivePhotoToggleSymbol {
+    static func image() -> UIImage {
+        let livePhotoConfiguration = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let heartConfiguration = UIImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        guard let livePhoto = UIImage(systemName: "livephoto", withConfiguration: livePhotoConfiguration),
+              let heart = UIImage(systemName: "heart.fill", withConfiguration: heartConfiguration) else {
+            return UIImage(systemName: "livephoto") ?? UIImage()
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24))
+        let image = renderer.image { _ in
+            UIColor.white.set()
+            livePhoto.draw(in: CGRect(x: 1, y: 1, width: 19, height: 19))
+            heart.draw(in: CGRect(x: 13, y: 12, width: 10, height: 10))
+        }
+        return image.withRenderingMode(.alwaysTemplate)
     }
 }

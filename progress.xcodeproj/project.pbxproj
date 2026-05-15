@@ -24,9 +24,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		9A2471C32F47BB3C0021B434 /* progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; name = progress.app; path = "/Users/simonriepl/Developer/progress/build/Debug-iphoneos/progress.app"; sourceTree = "<absolute>"; };
-		9A2471D72F47BB3D0021B434 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; name = progressTests.xctest; path = "/Users/simonriepl/Developer/progress/build/Debug-iphoneos/progress.app/PlugIns/progressTests.xctest"; sourceTree = "<absolute>"; };
-		9A2471E12F47BB3D0021B434 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; name = progressUITests.xctest; path = "/Users/simonriepl/Developer/progress/build/Debug-iphoneos/progressUITests-Runner.app/PlugIns/progressUITests.xctest"; sourceTree = "<absolute>"; };
+		9A5C9C9A2FB5E11400F1B052 /* progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = progress.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A5C9C9B2FB5E11400F1B052 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9A5C9C9C2FB5E11400F1B052 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -91,6 +91,9 @@
 				9A2471C52F47BB3C0021B434 /* progress */,
 				9A2471DA2F47BB3D0021B434 /* progressTests */,
 				9A2471E42F47BB3D0021B434 /* progressUITests */,
+				9A5C9C9A2FB5E11400F1B052 /* progress.app */,
+				9A5C9C9B2FB5E11400F1B052 /* progressTests.xctest */,
+				9A5C9C9C2FB5E11400F1B052 /* progressUITests.xctest */,
 			);
 			sourceTree = "<group>";
 		};
@@ -116,7 +119,7 @@
 			packageProductDependencies = (
 			);
 			productName = progress;
-			productReference = 9A2471C32F47BB3C0021B434 /* progress.app */;
+			productReference = 9A5C9C9A2FB5E11400F1B052 /* progress.app */;
 			productType = "com.apple.product-type.application";
 		};
 		9A2471D62F47BB3D0021B434 /* progressTests */ = {
@@ -139,7 +142,7 @@
 			packageProductDependencies = (
 			);
 			productName = progressTests;
-			productReference = 9A2471D72F47BB3D0021B434 /* progressTests.xctest */;
+			productReference = 9A5C9C9B2FB5E11400F1B052 /* progressTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 		9A2471E02F47BB3D0021B434 /* progressUITests */ = {
@@ -162,7 +165,7 @@
 			packageProductDependencies = (
 			);
 			productName = progressUITests;
-			productReference = 9A2471E12F47BB3D0021B434 /* progressUITests.xctest */;
+			productReference = 9A5C9C9C2FB5E11400F1B052 /* progressUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -278,7 +281,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = progress/progress.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = PRMMZ6KL9P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -298,7 +301,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
 				PRODUCT_NAME = progress;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -318,7 +321,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = progress/progress.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = PRMMZ6KL9P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -338,7 +341,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.5.3;
+				MARKETING_VERSION = 0.6;
 				PRODUCT_BUNDLE_IDENTIFIER = me.riepl.progress;
 				PRODUCT_NAME = progress;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

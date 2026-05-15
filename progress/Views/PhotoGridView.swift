@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreData
 import Combine
+import UIKit
 
 private struct PhotoDetailPresentation: Identifiable {
     let items: [PhotoDetailItem]
@@ -44,7 +45,7 @@ struct PhotoGridView: View {
     @State private var showingDeleteConfirmation = false
     @State private var isDeletingSelection = false
     @State private var didSyncExifMetadata = false
-    @State private var showsHeartedOnly = false
+    @State private var gridFilter: PhotoGridFilter = .all
     @State private var metadataSyncTask: Task<Void, Never>?
     private let enableScrollDateDebugLogs = false
 
@@ -76,7 +77,7 @@ struct PhotoGridView: View {
                             .padding(.top)
                         }
                     } else if dataController.isEmpty {
-                        favoriteEmptyState
+                        filteredEmptyState
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .ignoresSafeArea(.container, edges: [.top, .bottom])
                     } else {
@@ -135,7 +136,7 @@ struct PhotoGridView: View {
             }
             .overlay(alignment: .bottomLeading) {
                 if dataController.hasAnyPhotos, !isSelectionMode {
-                    floatingHeartFilterButton
+                    floatingFilterButton
                         .padding(.leading, 18)
                         .padding(.bottom, 24)
                 }
@@ -254,16 +255,16 @@ struct PhotoGridView: View {
         .onAppear {
             dataController.configureIfNeeded(
                 context: viewContext,
-                showsHeartedOnly: showsHeartedOnly
+                filter: gridFilter
             )
             openCameraIfNeededFromNotification()
             scheduleMetadataSyncIfNeeded()
         }
-        .onChange(of: showsHeartedOnly) { _, newValue in
+        .onChange(of: gridFilter) { _, newValue in
             selectedPhotoIDs.removeAll()
             pendingDetailDismissObjectID = nil
             gridCenteringRequest = nil
-            dataController.setShowsHeartedOnly(newValue)
+            dataController.setFilter(newValue)
         }
         .onChange(of: dataController.changeToken) { _, _ in
             scheduleMetadataSyncIfNeeded()
@@ -348,16 +349,16 @@ struct PhotoGridView: View {
         photoDetailPresentation = nil
     }
 
-    private var favoriteEmptyState: some View {
+    private var filteredEmptyState: some View {
         VStack(spacing: 18) {
-            Image(systemName: "heart")
+            Image(systemName: gridFilter.systemImage)
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
 
-            Text("No Favorites Yet")
+            Text(emptyStateTitle)
                 .font(.title2.weight(.semibold))
 
-            Text("Heart photos from the detail view to focus this grid.")
+            Text(emptyStateMessage)
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -365,29 +366,67 @@ struct PhotoGridView: View {
         }
     }
 
-    private var floatingHeartFilterButton: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showsHeartedOnly.toggle()
+    private var emptyStateTitle: String {
+        switch gridFilter {
+        case .all:
+            return "No Photos Yet"
+        case .hearted:
+            return "No Hearted Photos"
+        case .favoriteLivePhotos:
+            return "No Favorite Live Photos"
+        }
+    }
+
+    private var emptyStateMessage: String {
+        switch gridFilter {
+        case .all:
+            return "Start capturing your daily moments."
+        case .hearted:
+            return "Heart photos from the detail view to focus this grid."
+        case .favoriteLivePhotos:
+            return "Mark Live Photos from the detail view to use their video clips."
+        }
+    }
+
+    private var floatingFilterButton: some View {
+        Menu {
+            ForEach(PhotoGridFilter.allCases) { filter in
+                Button {
+                    gridFilter = filter
+                } label: {
+                    Label {
+                        Text(filter.title)
+                    } icon: {
+                        filterMenuSymbol(for: filter)
+                    }
+                }
             }
         } label: {
-            heartFilterButtonLabel
+            filterButtonLabel
         }
         .contentShape(.circle)
         .buttonStyle(floatingCaptureButtonStyle)
-        .accessibilityLabel(showsHeartedOnly ? "Show All Photos" : "Show Favorites Only")
-        .accessibilityIdentifier("gridHeartFilterButton")
+        .accessibilityLabel("Filter Photos")
+        .accessibilityValue(gridFilter.title)
+        .accessibilityIdentifier("gridFilterButton")
     }
 
     @ViewBuilder
-    private var heartFilterButtonLabel: some View {
-        let systemName = showsHeartedOnly ? "heart.fill" : "heart"
-        let foregroundStyle: Color = showsHeartedOnly ? .red : .primary
+    private func filterMenuSymbol(for filter: PhotoGridFilter) -> some View {
+        if filter == .favoriteLivePhotos {
+            Image(uiImage: FavoriteLivePhotoFilterSymbol.image())
+                .renderingMode(.template)
+        } else if filter == .all {
+            Image(systemName: "photo.stack")
+        } else {
+            Image(systemName: filter.systemImage)
+        }
+    }
 
+    @ViewBuilder
+    private var filterButtonLabel: some View {
         if #available(iOS 26.0, *) {
-            Image(systemName: systemName)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(foregroundStyle)
+            filterButtonSymbol
                 .frame(width: 42, height: 42)
                 .background(
                     Circle()
@@ -402,12 +441,34 @@ struct PhotoGridView: View {
                 Circle()
                     .stroke(Color.white.opacity(0.5), lineWidth: 1)
 
-                Image(systemName: systemName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(foregroundStyle)
+                filterButtonSymbol
             }
             .frame(width: 42, height: 42)
             .shadow(color: .black.opacity(0.12), radius: 12, y: 7)
+        }
+    }
+
+    @ViewBuilder
+    private var filterButtonSymbol: some View {
+        if gridFilter == .favoriteLivePhotos {
+            Image(uiImage: FavoriteLivePhotoFilterSymbol.image())
+                .renderingMode(.template)
+                .foregroundStyle(filterButtonForegroundStyle)
+        } else {
+            Image(systemName: gridFilter.systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(filterButtonForegroundStyle)
+        }
+    }
+
+    private var filterButtonForegroundStyle: Color {
+        switch gridFilter {
+        case .all:
+            return .primary
+        case .hearted:
+            return .red
+        case .favoriteLivePhotos:
+            return .blue
         }
     }
 
@@ -657,6 +718,25 @@ struct PhotoGridView: View {
                 isExporting = false
             }
         }
+    }
+}
+
+private enum FavoriteLivePhotoFilterSymbol {
+    static func image() -> UIImage {
+        let livePhotoConfiguration = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let heartConfiguration = UIImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        guard let livePhoto = UIImage(systemName: "livephoto", withConfiguration: livePhotoConfiguration),
+              let heart = UIImage(systemName: "heart.fill", withConfiguration: heartConfiguration) else {
+            return UIImage(systemName: "livephoto") ?? UIImage()
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24))
+        let image = renderer.image { _ in
+            UIColor.white.set()
+            livePhoto.draw(in: CGRect(x: 1, y: 1, width: 19, height: 19))
+            heart.draw(in: CGRect(x: 13, y: 12, width: 10, height: 10))
+        }
+        return image.withRenderingMode(.alwaysTemplate)
     }
 }
 

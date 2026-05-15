@@ -17,12 +17,13 @@
         <attribute name="modifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="importFingerprint" optional="YES" attributeType="String"/>
         <attribute name="isHearted" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="isFavoriteLivePhoto" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="uploadAttemptCount" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES" syncable="NO"/>
         <attribute name="uploadErrorMessage" optional="YES" attributeType="String" syncable="NO"/>
         <attribute name="uploadRetryAfter" optional="YES" attributeType="Date" usesScalarValueType="NO" syncable="NO"/>
         <attribute name="uploadStateRaw" optional="YES" attributeType="String" syncable="NO"/>
     </entity>
     <elements>
-        <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="254"/>
+        <element name="DailyPhoto" positionX="-63" positionY="-18" width="128" height="269"/>
     </elements>
 </model>

@@ -260,7 +260,8 @@ final class PortraitVideoExportService {
         quality: PortraitVideoExportQuality,
         includesDateBanner: Bool,
         includesLocationBanner: Bool,
-        includesHeartedLivePhotoVideo: Bool,
+        includesFavoriteLivePhotoVideo: Bool,
+        holdsHeartedPhotos: Bool,
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
     ) async throws -> PortraitVideoExportResult {
         guard !photos.isEmpty else { throw PortraitVideoExportError.noPhotos }
@@ -273,7 +274,7 @@ final class PortraitVideoExportService {
         }
         var workEstimate = makeWorkEstimate(
             for: sortedPhotos,
-            includesHeartedLivePhotoVideo: includesHeartedLivePhotoVideo
+            includesFavoriteLivePhotoVideo: includesFavoriteLivePhotoVideo
         )
 
         let outputURL = try makeOutputURL()
@@ -330,6 +331,7 @@ final class PortraitVideoExportService {
             var writtenFrameCount = 0
             let outputFrameRate = max(clampedPicturesPerSecond(picturesPerSecond), 30)
             let stillFrameCount = max(1, Int((Double(outputFrameRate) / Double(clampedPicturesPerSecond(picturesPerSecond))).rounded()))
+            let heartedStillFrameCount = outputFrameRate
 
             for (index, photo) in sortedPhotos.enumerated() {
                 try Task.checkCancellation()
@@ -352,8 +354,8 @@ final class PortraitVideoExportService {
                         includesLocation: includesLocationBanner
                     )
 
-                    if includesHeartedLivePhotoVideo,
-                       photo.hasHeartedLivePhotoVideo,
+                    if includesFavoriteLivePhotoVideo,
+                       photo.hasFavoriteLivePhotoVideo,
                        let livePhotoVideoAssetName = photo.livePhotoVideoAssetName {
                         let appendedFrameCount = try await appendLivePhotoVideoWithRetries(
                             named: livePhotoVideoAssetName,
@@ -370,18 +372,21 @@ final class PortraitVideoExportService {
                         }
 
                         let image = try await loadImageWithRetries(named: assetName)
+                        let frameCount = holdsHeartedPhotos && photo.isHearted
+                            ? heartedStillFrameCount
+                            : stillFrameCount
                         try await retryPhotoOperation {
                             try await appendStillPhoto(
                                 image,
                                 bannerText: bannerText,
                                 atFrameIndex: writtenFrameCount,
-                                frameCount: stillFrameCount,
+                                frameCount: frameCount,
                                 outputFrameRate: outputFrameRate,
                                 input: input,
                                 adaptor: adaptor
                             )
                         }
-                        writtenFrameCount += stillFrameCount
+                        writtenFrameCount += frameCount
                     }
                 } catch is CancellationError {
                     throw CancellationError()
@@ -445,11 +450,11 @@ final class PortraitVideoExportService {
 
     nonisolated private func makeWorkEstimate(
         for photos: [PortraitVideoExportItem],
-        includesHeartedLivePhotoVideo: Bool
+        includesFavoriteLivePhotoVideo: Bool
     ) -> PortraitVideoExportWorkEstimate {
         PortraitVideoExportWorkEstimate(
             photoReadKinds: photos.map { photo in
-                let exportAssetName = if includesHeartedLivePhotoVideo, photo.hasHeartedLivePhotoVideo {
+                let exportAssetName = if includesFavoriteLivePhotoVideo, photo.hasFavoriteLivePhotoVideo {
                     photo.livePhotoVideoAssetName
                 } else {
                     photo.fullImageAssetName

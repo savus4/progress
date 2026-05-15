@@ -67,6 +67,17 @@ struct ProgressCoreFunctionalityTests {
         #expect(CameraService.preferredCodec(from: [.jpeg]) == nil)
     }
 
+    @Test("CameraService uses portrait photo aspect from dimensions")
+    func cameraServiceUsesPortraitPhotoAspectFromDimensions() {
+        #expect(CameraService.portraitPhotoAspectRatio(for: CMVideoDimensions(width: 4032, height: 3024)) == 0.75)
+        #expect(CameraService.portraitPhotoAspectRatio(for: CMVideoDimensions(width: 3024, height: 4032)) == 0.75)
+    }
+
+    @Test("CameraService falls back to stable portrait photo aspect for invalid dimensions")
+    func cameraServiceAspectFallsBackForInvalidDimensions() {
+        #expect(CameraService.portraitPhotoAspectRatio(for: CMVideoDimensions(width: 0, height: 0)) == CameraService.defaultPortraitPhotoAspectRatio)
+    }
+
     @Test("Reminder times are clamped, sorted, deduplicated, and capped")
     func dailyReminderLoadSanitizesPersistedData() throws {
         let key = "dailyPhotoReminderTimes"

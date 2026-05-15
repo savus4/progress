@@ -23,9 +23,10 @@ class CameraService: NSObject, ObservableObject {
     private var capturedPhotoData: Data?
     private var capturedStillImage: UIImage?
     private let processInfo = ProcessInfo.processInfo
+    static let defaultPortraitPhotoAspectRatio: CGFloat = 3.0 / 4.0
     
     override init() {
-        self.sensorAspectRatio = Self.frontCameraPortraitAspectRatio()
+        self.sensorAspectRatio = Self.defaultPortraitPhotoAspectRatio
         super.init()
     }
 
@@ -73,24 +74,12 @@ class CameraService: NSObject, ObservableObject {
             return
         }
         
-        // Determine sensor aspect ratio from videoDevice active format
-        let formatDesc = videoDevice.activeFormat.formatDescription
-        let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
-        let width = CGFloat(dims.width)
-        let height = CGFloat(dims.height)
-
-        // The camera format dimensions are reported in landscape orientation.
-        // Normalize to a portrait aspect ratio so SwiftUI can size the preview
-        // as large as possible without cropping on the camera screen.
-        let longEdge = max(width, height)
-        let shortEdge = min(width, height)
-        self.sensorAspectRatio = shortEdge / longEdge
-        
         session.addInput(videoInput)
         
         // Add photo output
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
+            sensorAspectRatio = Self.portraitPhotoAspectRatio(for: photoOutput.maxPhotoDimensions)
 
             // Enable Live Photo capture
             photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
@@ -101,18 +90,16 @@ class CameraService: NSObject, ObservableObject {
         session.commitConfiguration()
     }
 
-    private static func frontCameraPortraitAspectRatio() -> CGFloat {
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) else {
-            return 3.0 / 4.0
+    static func portraitPhotoAspectRatio(for dimensions: CMVideoDimensions) -> CGFloat {
+        let width = CGFloat(dimensions.width)
+        let height = CGFloat(dimensions.height)
+        guard width > 0, height > 0 else {
+            return defaultPortraitPhotoAspectRatio
         }
 
-        let formatDesc = videoDevice.activeFormat.formatDescription
-        let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
-        let width = CGFloat(dims.width)
-        let height = CGFloat(dims.height)
         let longEdge = max(width, height)
         let shortEdge = min(width, height)
-        return shortEdge / max(longEdge, 1)
+        return shortEdge / longEdge
     }
     
     func startSession() {

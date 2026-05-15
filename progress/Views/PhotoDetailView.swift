@@ -230,6 +230,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
     let latitude: Double
     let longitude: Double
     var isHearted: Bool
+    var isFavoriteLivePhoto: Bool
 
     var id: NSManagedObjectID { objectID }
 
@@ -244,6 +245,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
         latitude = photo.latitude
         longitude = photo.longitude
         isHearted = photo.isHearted
+        isFavoriteLivePhoto = photo.isFavoriteLivePhoto
     }
 
     init(gridItem: UIKitPhotoGridItem) {
@@ -256,6 +258,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
         latitude = gridItem.latitude
         longitude = gridItem.longitude
         isHearted = gridItem.isHearted
+        isFavoriteLivePhoto = gridItem.isFavoriteLivePhoto
     }
 }
 
@@ -313,11 +316,14 @@ struct PhotoDetailView: View {
                 isDeleteEnabled: !isPerformingAction && currentItem != nil,
                 isHeartEnabled: !isPerformingAction && currentItem != nil,
                 isHearted: currentItem?.isHearted ?? false,
+                isFavoriteLivePhotoEnabled: !isPerformingAction && supportsLivePhoto,
+                isFavoriteLivePhoto: currentItem?.isFavoriteLivePhoto ?? false,
                 saveImageSystemName: saveToLibraryButtonSystemImage,
                 onClose: closeCurrentPhoto,
                 onShare: shareStillPhoto,
                 onSave: saveCurrentAssetToPhotoLibrary,
                 onHeart: toggleCurrentPhotoHeart,
+                onFavoriteLivePhoto: toggleCurrentPhotoFavoriteLivePhoto,
                 onDelete: deleteCurrentPhoto
             )
         }
@@ -531,6 +537,29 @@ struct PhotoDetailView: View {
         }
     }
 
+    private func toggleCurrentPhotoFavoriteLivePhoto() {
+        guard !isPerformingAction, let currentItem, supportsLivePhoto else { return }
+
+        do {
+            guard let photo = try viewContext.existingObject(with: currentItem.objectID) as? DailyPhoto else {
+                throw PhotoDetailHeartError.photoMissing
+            }
+
+            let nextValue = !photo.isFavoriteLivePhoto
+            photo.isFavoriteLivePhoto = nextValue
+            photo.modifiedAt = Date()
+            try viewContext.save()
+
+            if detailItems.indices.contains(selectedIndex),
+               detailItems[selectedIndex].objectID == currentItem.objectID {
+                detailItems[selectedIndex].isFavoriteLivePhoto = nextValue
+            }
+        } catch {
+            viewContext.rollback()
+            actionError = PhotoDetailActionError(message: "Unable to update this Live Photo favorite.")
+        }
+    }
+
     private func deleteCurrentPhoto() {
         guard !isPerformingAction, let currentItem else { return }
 
@@ -729,11 +758,14 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
     let isDeleteEnabled: Bool
     let isHeartEnabled: Bool
     let isHearted: Bool
+    let isFavoriteLivePhotoEnabled: Bool
+    let isFavoriteLivePhoto: Bool
     let saveImageSystemName: String
     let onClose: () -> Void
     let onShare: () -> Void
     let onSave: () -> Void
     let onHeart: () -> Void
+    let onFavoriteLivePhoto: () -> Void
     let onDelete: () -> Void
 
     func makeUIViewController(context: Context) -> ToolbarConfigViewController {
@@ -750,11 +782,14 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
             isDeleteEnabled: isDeleteEnabled,
             isHeartEnabled: isHeartEnabled,
             isHearted: isHearted,
+            isFavoriteLivePhotoEnabled: isFavoriteLivePhotoEnabled,
+            isFavoriteLivePhoto: isFavoriteLivePhoto,
             saveImageSystemName: saveImageSystemName,
             onClose: onClose,
             onShare: onShare,
             onSave: onSave,
             onHeart: onHeart,
+            onFavoriteLivePhoto: onFavoriteLivePhoto,
             onDelete: onDelete
         )
         controller.applyConfigurationIfPossible()
@@ -776,11 +811,14 @@ private final class ToolbarConfigViewController: UIViewController {
         let isDeleteEnabled: Bool
         let isHeartEnabled: Bool
         let isHearted: Bool
+        let isFavoriteLivePhotoEnabled: Bool
+        let isFavoriteLivePhoto: Bool
         let saveImageSystemName: String
         var onClose: () -> Void
         var onShare: () -> Void
         var onSave: () -> Void
         var onHeart: () -> Void
+        var onFavoriteLivePhoto: () -> Void
         var onDelete: () -> Void
 
         static func == (lhs: Configuration, rhs: Configuration) -> Bool {
@@ -792,6 +830,8 @@ private final class ToolbarConfigViewController: UIViewController {
             lhs.isDeleteEnabled == rhs.isDeleteEnabled &&
             lhs.isHeartEnabled == rhs.isHeartEnabled &&
             lhs.isHearted == rhs.isHearted &&
+            lhs.isFavoriteLivePhotoEnabled == rhs.isFavoriteLivePhotoEnabled &&
+            lhs.isFavoriteLivePhoto == rhs.isFavoriteLivePhoto &&
             lhs.saveImageSystemName == rhs.saveImageSystemName
         }
     }
@@ -865,12 +905,21 @@ private final class ToolbarConfigViewController: UIViewController {
         heart.tintColor = configuration.isHearted ? .systemRed : .white
         heart.isEnabled = configuration.isHeartEnabled
 
+        let livePhotoFavorite = Self.compactBarButtonItem(
+            image: Self.favoriteLivePhotoImage(isSelected: configuration.isFavoriteLivePhoto),
+            accessibilityLabel: configuration.isFavoriteLivePhoto ? "Remove Favorite Live Photo" : "Favorite Live Photo",
+            target: self,
+            action: #selector(favoriteLivePhotoTapped)
+        )
+        livePhotoFavorite.tintColor = configuration.isFavoriteLivePhoto ? .systemBlue : .white
+        livePhotoFavorite.isEnabled = configuration.isFavoriteLivePhotoEnabled
+
         let items: [UIBarButtonItem] = [
             share,
             save,
             Self.flexibleSpaceItem(),
             heart,
-            Self.fixedSpaceItem(width: 44),
+            livePhotoFavorite,
             Self.flexibleSpaceItem(),
             delete
         ]
@@ -965,6 +1014,39 @@ private final class ToolbarConfigViewController: UIViewController {
         return item
     }
 
+    private static func compactBarButtonItem(
+        image: UIImage?,
+        accessibilityLabel: String,
+        target: Any?,
+        action: Selector
+    ) -> UIBarButtonItem {
+        let item = UIBarButtonItem(
+            image: image,
+            style: .plain,
+            target: target,
+            action: action
+        )
+        item.accessibilityLabel = accessibilityLabel
+        return item
+    }
+
+    private static func favoriteLivePhotoImage(isSelected: Bool) -> UIImage? {
+        let livePhotoConfiguration = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        let heartConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        guard let livePhoto = UIImage(systemName: "livephoto", withConfiguration: livePhotoConfiguration),
+              let heart = UIImage(systemName: isSelected ? "heart.fill" : "heart", withConfiguration: heartConfiguration) else {
+            return UIImage(systemName: "livephoto")
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24))
+        let image = renderer.image { _ in
+            UIColor.white.set()
+            livePhoto.draw(in: CGRect(x: 1, y: 1, width: 19, height: 19))
+            heart.draw(in: CGRect(x: 12, y: 11, width: 11, height: 11))
+        }
+        return image.withRenderingMode(.alwaysTemplate)
+    }
+
     private func deleteBarButtonItem() -> UIBarButtonItem {
         let image = UIImage(systemName: "trash")?.applyingSymbolConfiguration(
             UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
@@ -1001,6 +1083,10 @@ private final class ToolbarConfigViewController: UIViewController {
 
     @objc private func heartTapped() {
         configuration?.onHeart()
+    }
+
+    @objc private func favoriteLivePhotoTapped() {
+        configuration?.onFavoriteLivePhoto()
     }
 
     private func setChromeVisible(_ isVisible: Bool, in navigationController: UINavigationController) {

@@ -3,17 +3,48 @@ import UIKit
 @preconcurrency import CoreData
 import Combine
 
+enum PhotoGridFilter: String, CaseIterable, Identifiable {
+    case all
+    case hearted
+    case favoriteLivePhotos
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all:
+            return "All Photos"
+        case .hearted:
+            return "Hearted"
+        case .favoriteLivePhotos:
+            return "Favorite Live Photos"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all:
+            return "line.3.horizontal.decrease.circle"
+        case .hearted:
+            return "heart.fill"
+        case .favoriteLivePhotos:
+            return "livephoto"
+        }
+    }
+}
+
 @MainActor
 final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResultsControllerDelegate {
     @Published private(set) var photoCount = 0
     @Published private(set) var totalPhotoCount = 0
     @Published private(set) var heartedPhotoCount = 0
+    @Published private(set) var favoriteLivePhotoCount = 0
     @Published private(set) var isEmpty = true
     @Published private(set) var changeToken = 0
 
     private var fetchedResultsController: NSFetchedResultsController<DailyPhoto>?
     private weak var context: NSManagedObjectContext?
-    private var showsHeartedOnly = false
+    private var filter: PhotoGridFilter = .all
     private var photosByID: [NSManagedObjectID: DailyPhoto] = [:]
     private(set) var itemsSnapshot: [UIKitPhotoGridItem] = []
 
@@ -21,11 +52,11 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         totalPhotoCount > 0
     }
 
-    func configureIfNeeded(context: NSManagedObjectContext, showsHeartedOnly: Bool) {
+    func configureIfNeeded(context: NSManagedObjectContext, filter: PhotoGridFilter) {
         self.context = context
-        self.showsHeartedOnly = showsHeartedOnly
+        self.filter = filter
         guard fetchedResultsController == nil else {
-            setShowsHeartedOnly(showsHeartedOnly)
+            setFilter(filter)
             return
         }
 
@@ -55,9 +86,9 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         }
     }
 
-    func setShowsHeartedOnly(_ showsHeartedOnly: Bool) {
-        guard self.showsHeartedOnly != showsHeartedOnly else { return }
-        self.showsHeartedOnly = showsHeartedOnly
+    func setFilter(_ filter: PhotoGridFilter) {
+        guard self.filter != filter else { return }
+        self.filter = filter
         fetchedResultsController?.fetchRequest.predicate = fetchPredicate
 
         do {
@@ -124,13 +155,21 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     private var fetchPredicate: NSPredicate? {
-        showsHeartedOnly ? NSPredicate(format: "isHearted == YES") : nil
+        switch filter {
+        case .all:
+            return nil
+        case .hearted:
+            return NSPredicate(format: "isHearted == YES")
+        case .favoriteLivePhotos:
+            return NSPredicate(format: "isFavoriteLivePhoto == YES")
+        }
     }
 
     private func refreshCounts() {
         guard let context else {
             totalPhotoCount = photoCount
-            heartedPhotoCount = showsHeartedOnly ? photoCount : 0
+            heartedPhotoCount = filter == .hearted ? photoCount : 0
+            favoriteLivePhotoCount = filter == .favoriteLivePhotos ? photoCount : 0
             return
         }
 
@@ -138,6 +177,10 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         heartedPhotoCount = countPhotos(
             in: context,
             predicate: NSPredicate(format: "isHearted == YES")
+        )
+        favoriteLivePhotoCount = countPhotos(
+            in: context,
+            predicate: NSPredicate(format: "isFavoriteLivePhoto == YES")
         )
     }
 
@@ -165,6 +208,7 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
     let latitude: Double
     let longitude: Double
     let isHearted: Bool
+    let isFavoriteLivePhoto: Bool
     let uploadState: PhotoUploadState
     let assetNames: [String]
 
@@ -180,6 +224,7 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
         latitude = photo.latitude
         longitude = photo.longitude
         isHearted = photo.isHearted
+        isFavoriteLivePhoto = photo.isFavoriteLivePhoto
         uploadState = photo.uploadState
         assetNames = [
             fullImageAssetName,
@@ -1056,6 +1101,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     private let placeholderView = UIView()
     private let selectionBadgeImageView = UIImageView()
     private let heartBadgeImageView = UIImageView()
+    private let livePhotoFavoriteBadgeImageView = UIImageView()
     private let statusLabel = PaddingLabel()
 
     override init(frame: CGRect) {
@@ -1075,6 +1121,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         statusLabel.isHidden = true
         selectionBadgeImageView.isHidden = true
         heartBadgeImageView.isHidden = true
+        livePhotoFavoriteBadgeImageView.isHidden = true
     }
 
     func configure(
@@ -1084,7 +1131,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     ) {
         isAccessibilityElement = true
         accessibilityIdentifier = "photoGridItem"
-        accessibilityValue = item.isHearted ? "Favorite" : nil
+        accessibilityValue = accessibilityValue(for: item)
 
         selectionBadgeImageView.isHidden = !isSelectionMode
         if isSelectionMode {
@@ -1093,6 +1140,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         }
 
         heartBadgeImageView.isHidden = !item.isHearted
+        livePhotoFavoriteBadgeImageView.isHidden = !item.isFavoriteLivePhoto
 
         let badge: (text: String, systemName: String, backgroundColor: UIColor, foregroundColor: UIColor)?
         switch item.uploadState {
@@ -1148,6 +1196,13 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         heartBadgeImageView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(heartBadgeImageView)
 
+        livePhotoFavoriteBadgeImageView.image = Self.favoriteLivePhotoBadgeImage()
+        livePhotoFavoriteBadgeImageView.tintColor = .white
+        livePhotoFavoriteBadgeImageView.contentMode = .center
+        livePhotoFavoriteBadgeImageView.isHidden = true
+        livePhotoFavoriteBadgeImageView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(livePhotoFavoriteBadgeImageView)
+
         statusLabel.font = .preferredFont(forTextStyle: .caption2).bold()
         statusLabel.accessibilityIdentifier = "photoGridUploadBadge"
         statusLabel.layer.cornerRadius = 12
@@ -1175,9 +1230,42 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
             heartBadgeImageView.widthAnchor.constraint(equalToConstant: 22),
             heartBadgeImageView.heightAnchor.constraint(equalToConstant: 22),
 
+            livePhotoFavoriteBadgeImageView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -7),
+            livePhotoFavoriteBadgeImageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -7),
+            livePhotoFavoriteBadgeImageView.widthAnchor.constraint(equalToConstant: 22),
+            livePhotoFavoriteBadgeImageView.heightAnchor.constraint(equalToConstant: 22),
+
             statusLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
             statusLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8)
         ])
+    }
+
+    private func accessibilityValue(for item: UIKitPhotoGridItem) -> String? {
+        var values: [String] = []
+        if item.isHearted {
+            values.append("Favorite")
+        }
+        if item.isFavoriteLivePhoto {
+            values.append("Favorite Live Photo")
+        }
+        return values.isEmpty ? nil : values.joined(separator: ", ")
+    }
+
+    private static func favoriteLivePhotoBadgeImage() -> UIImage? {
+        let livePhotoConfiguration = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        let heartConfiguration = UIImage.SymbolConfiguration(pointSize: 8, weight: .bold)
+        guard let livePhoto = UIImage(systemName: "livephoto", withConfiguration: livePhotoConfiguration),
+              let heart = UIImage(systemName: "heart.fill", withConfiguration: heartConfiguration) else {
+            return UIImage(systemName: "livephoto")
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 22, height: 22))
+        let image = renderer.image { _ in
+            UIColor.white.set()
+            livePhoto.draw(in: CGRect(x: 1, y: 1, width: 17, height: 17))
+            heart.draw(in: CGRect(x: 12, y: 11, width: 9, height: 9))
+        }
+        return image.withRenderingMode(.alwaysTemplate)
     }
 }
 
