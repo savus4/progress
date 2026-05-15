@@ -42,6 +42,7 @@ struct PhotoGridView: View {
     @State private var isSavingToPhotoLibrary = false
     @State private var exportedFileURLs: [URL] = []
     @State private var showingExportPicker = false
+    @State private var contextMenuSharePresentation: ActivityPresentation?
     @State private var portraitVideoExportPresentation: PortraitVideoExportPresentation?
     @State private var exportAlertMessage: String?
     @State private var showingDeleteConfirmation = false
@@ -50,6 +51,19 @@ struct PhotoGridView: View {
     @State private var gridFilter: PhotoGridFilter = .all
     @State private var metadataSyncTask: Task<Void, Never>?
     private let enableScrollDateDebugLogs = false
+
+    private static let shareTitleDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let shareFileDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm"
+        return formatter
+    }()
 
     var body: some View {
         NavigationStack {
@@ -121,6 +135,9 @@ struct PhotoGridView: View {
                                         isScrollDateVisible = false
                                     }
                                 }
+                            },
+                            onContextMenuAction: { action, objectID in
+                                handlePhotoContextMenuAction(action, objectID: objectID)
                             }
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -183,12 +200,12 @@ struct PhotoGridView: View {
 
                         Menu {
                             Button(action: exportSelectedPhotos) {
-                                Label("Share Selected (\(selectedPhotoIDs.count))", systemImage: "square.and.arrow.up")
+                                Label("Save Selected to Files (\(selectedPhotoIDs.count))", systemImage: "folder")
                             }
                             .disabled(selectedPhotoIDs.isEmpty || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
 
                             Button(action: exportAllPhotos) {
-                                Label("Share All (\(dataController.totalPhotoCount))", systemImage: "tray.and.arrow.down")
+                                Label("Save All to Files (\(dataController.totalPhotoCount))", systemImage: "folder")
                             }
                             .disabled(!dataController.hasAnyPhotos || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
 
@@ -268,6 +285,9 @@ struct PhotoGridView: View {
                 exportedFileURLs = []
             }) {
                 ExportDocumentPicker(urls: exportedFileURLs)
+            }
+            .sheet(item: $contextMenuSharePresentation) { presentation in
+                ActivityView(activityItems: presentation.activityItems)
             }
             .alert("Photos", isPresented: Binding(
                 get: { exportAlertMessage != nil },
@@ -773,6 +793,92 @@ struct PhotoGridView: View {
         startExport(for: allPhotos)
     }
 
+    private func handlePhotoContextMenuAction(_ action: PhotoGridContextAction, objectID: NSManagedObjectID) {
+        switch action {
+        case .share:
+            shareContextMenuPhoto(objectID)
+        case .save:
+            saveContextMenuPhoto(objectID)
+        case .copy:
+            copyContextMenuPhoto(objectID)
+        case .delete:
+            deleteContextMenuPhoto(objectID)
+        }
+    }
+
+    private func shareContextMenuPhoto(_ objectID: NSManagedObjectID) {
+        guard !isExporting else { return }
+        guard let photo = photo(for: objectID) else {
+            exportAlertMessage = "Unable to find this photo."
+            return
+        }
+
+        isExporting = true
+        Task { @MainActor in
+            do {
+                let url = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
+                    fullImageAssetName: photo.fullImageAssetName ?? photo.livePhotoImageAssetName
+                )
+                let shareItems = [
+                    try StillPhotoShareItemFactory.makeItem(
+                        sourceURL: url,
+                        title: shareTitle(for: photo),
+                        subject: shareSubject(for: photo),
+                        fileTitle: shareFileTitle(for: photo)
+                    )
+                ]
+                contextMenuSharePresentation = ActivityPresentation(activityItems: shareItems)
+                isExporting = false
+            } catch {
+                exportAlertMessage = "Share failed: \(error.localizedDescription)"
+                isExporting = false
+            }
+        }
+    }
+
+    private func shareTitle(for photo: DailyPhoto) -> String {
+        guard let captureDate = photo.captureDate else { return "Progress Photo" }
+        return "Progress Photo - \(Self.shareTitleDateFormatter.string(from: captureDate))"
+    }
+
+    private func shareSubject(for photo: DailyPhoto) -> String {
+        if let locationName = photo.locationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !locationName.isEmpty {
+            return "\(shareTitle(for: photo)) at \(locationName)"
+        }
+        return shareTitle(for: photo)
+    }
+
+    private func shareFileTitle(for photo: DailyPhoto) -> String {
+        guard let captureDate = photo.captureDate else { return "Progress Photo" }
+        return "Progress Photo \(Self.shareFileDateFormatter.string(from: captureDate))"
+    }
+
+    private func saveContextMenuPhoto(_ objectID: NSManagedObjectID) {
+        guard let photo = photo(for: objectID) else {
+            exportAlertMessage = "Unable to find this photo."
+            return
+        }
+        startPhotoLibrarySave(for: [photo], exitsSelectionMode: false)
+    }
+
+    private func copyContextMenuPhoto(_ objectID: NSManagedObjectID) {
+        guard let photo = photo(for: objectID) else {
+            exportAlertMessage = "Unable to find this photo."
+            return
+        }
+
+        let assetName = photo.fullImageAssetName ?? photo.livePhotoImageAssetName
+        Task { @MainActor in
+            do {
+                let image = try await PhotoStorageService.shared.loadFullImage(named: assetName)
+                UIPasteboard.general.image = image
+            } catch {
+                exportAlertMessage = "Copy failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     private func saveSelectedPhotosToLibrary() {
         let photos = selectedPhotos
         guard !photos.isEmpty else {
@@ -789,6 +895,21 @@ struct PhotoGridView: View {
             return
         }
         startPhotoLibrarySave(for: photos)
+    }
+
+    private func deleteContextMenuPhoto(_ objectID: NSManagedObjectID) {
+        Task { @MainActor in
+            do {
+                try await PhotoStorageService.shared.deletePhoto(objectID, context: viewContext)
+                selectedPhotoIDs.remove(objectID)
+            } catch {
+                exportAlertMessage = "Delete failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func photo(for objectID: NSManagedObjectID) -> DailyPhoto? {
+        (try? viewContext.existingObject(with: objectID)) as? DailyPhoto
     }
 
     private func deleteSelectedPhotos() {
@@ -821,7 +942,10 @@ struct PhotoGridView: View {
         }
     }
 
-    private func startPhotoLibrarySave(for photosToSave: [DailyPhoto]) {
+    private func startPhotoLibrarySave(
+        for photosToSave: [DailyPhoto],
+        exitsSelectionMode: Bool = true
+    ) {
         guard !isSavingToPhotoLibrary, !isExporting, !isDeletingSelection else { return }
         isSavingToPhotoLibrary = true
 
@@ -829,8 +953,10 @@ struct PhotoGridView: View {
             do {
                 let savedCount = try await PhotoLibrarySaveService.shared.save(photosToSave)
                 exportAlertMessage = "Saved \(savedCount) photo\(savedCount == 1 ? "" : "s") to Photos."
-                isSelectionMode = false
-                selectedPhotoIDs.removeAll()
+                if exitsSelectionMode {
+                    isSelectionMode = false
+                    selectedPhotoIDs.removeAll()
+                }
                 isSavingToPhotoLibrary = false
             } catch let error as PhotoLibrarySaveError {
                 exportAlertMessage = error.localizedDescription

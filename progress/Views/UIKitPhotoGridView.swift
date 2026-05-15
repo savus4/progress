@@ -251,6 +251,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let onFirstItemFrameChanged: (CGRect) -> Void
     let onTopVisibleDateChanged: (Date?) -> Void
     let onScrollActivityChanged: (Bool) -> Void
+    let onContextMenuAction: (PhotoGridContextAction, NSManagedObjectID) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -307,11 +308,22 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
         func photoGridController(_ controller: PhotoGridCollectionViewController, didChangeScrollActivity isActive: Bool) {
             parent.onScrollActivityChanged(isActive)
         }
+
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didRequestContextAction action: PhotoGridContextAction, for objectID: NSManagedObjectID) {
+            parent.onContextMenuAction(action, objectID)
+        }
     }
 }
 
 private enum UIKitPhotoGridSection: Int, Hashable, Sendable {
     case main
+}
+
+enum PhotoGridContextAction {
+    case share
+    case save
+    case copy
+    case delete
 }
 
 final class PhotoThumbnailDataProvider {
@@ -366,6 +378,7 @@ protocol PhotoGridCollectionViewControllerDelegate: AnyObject {
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateTopVisibleDate date: Date?)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateFirstItemFrame frame: CGRect)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didChangeScrollActivity isActive: Bool)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didRequestContextAction action: PhotoGridContextAction, for objectID: NSManagedObjectID)
 }
 
 @MainActor
@@ -380,9 +393,12 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var selectedPhotoIDs: Set<NSManagedObjectID> = []
     private var lastAppliedSelectedPhotoIDs: Set<NSManagedObjectID> = []
     private var selectionPanRecognizer: UIPanGestureRecognizer!
+    private var gridPinchRecognizer: UIPinchGestureRecognizer!
     private var selectionPanAnchorIndexPath: IndexPath?
     private var selectionPanBaseSelection: Set<NSManagedObjectID> = []
     private var selectionPanOperation: SelectionPanOperation = .select
+    private var pinchStartColumnCount = 0
+    private var pinchAnchor: GridPinchAnchor?
     private var thumbnailTasks: [NSManagedObjectID: ThumbnailTaskRecord] = [:]
     private var currentItemIDs: [NSManagedObjectID] = []
     private var itemIndexByID: [NSManagedObjectID: Int] = [:]
@@ -402,6 +418,14 @@ final class PhotoGridCollectionViewController: UIViewController {
     private let nearVisiblePreheatWindowMultiplier: CGFloat = 2.0
     private let topVisibleReportInterval: TimeInterval = 0.08
     private let visibleThumbnailKickInterval: TimeInterval = 0.04
+    private let minGridColumnCount = 2
+    private let maxGridColumnCount = 5
+    private let gridSpacing: CGFloat = 2
+    private var gridColumnCount: Int = {
+        let storedValue = UserDefaults.standard.integer(forKey: GridPreferences.columnCountKey)
+        guard storedValue > 0 else { return GridPreferences.defaultColumnCount }
+        return min(max(storedValue, GridPreferences.minColumnCount), GridPreferences.maxColumnCount)
+    }()
 
     private enum SelectionPanOperation {
         case select
@@ -412,6 +436,13 @@ final class PhotoGridCollectionViewController: UIViewController {
         case up
         case down
         case none
+    }
+
+    private enum GridPreferences {
+        static let columnCountKey = "photo-grid-column-count"
+        static let minColumnCount = 2
+        static let maxColumnCount = 5
+        static let defaultColumnCount = 3
     }
 
     private enum ThumbnailLoadRole: Hashable {
@@ -432,6 +463,13 @@ final class PhotoGridCollectionViewController: UIViewController {
         let role: ThumbnailLoadRole
         let token: UUID
         let task: Task<Void, Never>
+    }
+
+    private struct GridPinchAnchor {
+        let indexPath: IndexPath
+        let xRatio: CGFloat
+        let yRatio: CGFloat
+        let locationInBounds: CGPoint
     }
 
     init() {
@@ -480,6 +518,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         selectionPanRecognizer.cancelsTouchesInView = false
         selectionPanRecognizer.delegate = self
         collectionView.addGestureRecognizer(selectionPanRecognizer)
+
+        gridPinchRecognizer = UIPinchGestureRecognizer(target: self, action: #selector(handleGridPinch(_:)))
+        gridPinchRecognizer.cancelsTouchesInView = false
+        gridPinchRecognizer.delegate = self
+        collectionView.addGestureRecognizer(gridPinchRecognizer)
 
         NotificationCenter.default.addObserver(
             self,
@@ -622,23 +665,106 @@ final class PhotoGridCollectionViewController: UIViewController {
         let availableWidth = collectionView.bounds.width
         guard availableWidth > 0 else { return }
 
-        let spacing: CGFloat = 2
-        let minWidth: CGFloat = 100
-        let maxWidth: CGFloat = 150
-
-        var columns = max(Int((availableWidth + spacing) / (minWidth + spacing)), 1)
-        var itemWidth = floor((availableWidth - CGFloat(columns - 1) * spacing) / CGFloat(columns))
-
-        while itemWidth > maxWidth {
-            columns += 1
-            itemWidth = floor((availableWidth - CGFloat(columns - 1) * spacing) / CGFloat(columns))
-        }
+        let columnCount = min(max(gridColumnCount, minGridColumnCount), maxGridColumnCount)
+        let itemWidth = floor((availableWidth - CGFloat(columnCount - 1) * gridSpacing) / CGFloat(columnCount))
 
         let itemSize = CGSize(width: itemWidth, height: itemWidth)
         if layout.itemSize != itemSize {
             layout.itemSize = itemSize
             layout.invalidateLayout()
         }
+    }
+
+    @objc
+    private func handleGridPinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            pinchStartColumnCount = gridColumnCount
+            pinchAnchor = makePinchAnchor(at: gesture.location(in: collectionView))
+        case .changed:
+            guard pinchStartColumnCount > 0 else { return }
+            let scaledColumnCount = CGFloat(pinchStartColumnCount) / max(gesture.scale, 0.1)
+            let nextColumnCount = min(
+                max(Int(round(scaledColumnCount)), minGridColumnCount),
+                maxGridColumnCount
+            )
+            applyGridColumnCount(nextColumnCount, anchoredBy: pinchAnchor, animated: true)
+        case .ended, .cancelled, .failed:
+            UserDefaults.standard.set(gridColumnCount, forKey: GridPreferences.columnCountKey)
+            pinchStartColumnCount = 0
+            pinchAnchor = nil
+            loadVisibleThumbnails()
+            prefetchNearVisibleThumbnails()
+        default:
+            break
+        }
+    }
+
+    private func applyGridColumnCount(
+        _ columnCount: Int,
+        anchoredBy anchor: GridPinchAnchor?,
+        animated: Bool
+    ) {
+        guard columnCount != gridColumnCount else { return }
+        gridColumnCount = columnCount
+
+        let updates = { [self] in
+            updateLayoutItemSize()
+            collectionView.collectionViewLayout.invalidateLayout()
+            collectionView.layoutIfNeeded()
+
+            if let anchor {
+                restorePinchAnchor(anchor)
+            }
+        }
+
+        if animated {
+            UIView.animate(
+                withDuration: 0.18,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseOut, .allowUserInteraction],
+                animations: updates
+            )
+        } else {
+            UIView.performWithoutAnimation(updates)
+        }
+
+        reportTopVisibleDate()
+        reportFirstItemFrameIfAvailable()
+    }
+
+    private func makePinchAnchor(at location: CGPoint) -> GridPinchAnchor? {
+        guard let indexPath = collectionView.indexPathForItem(at: location),
+              items.indices.contains(indexPath.item),
+              let attributes = collectionView.layoutAttributesForItem(at: indexPath),
+              attributes.frame.width > 0,
+              attributes.frame.height > 0 else {
+            return nil
+        }
+
+        return GridPinchAnchor(
+            indexPath: indexPath,
+            xRatio: (location.x - attributes.frame.minX) / attributes.frame.width,
+            yRatio: (location.y - attributes.frame.minY) / attributes.frame.height,
+            locationInBounds: location
+        )
+    }
+
+    private func restorePinchAnchor(_ anchor: GridPinchAnchor) {
+        guard let attributes = collectionView.layoutAttributesForItem(at: anchor.indexPath) else { return }
+
+        let anchoredY = attributes.frame.minY + attributes.frame.height * anchor.yRatio
+        let targetOffset = CGPoint(
+            x: collectionView.contentOffset.x,
+            y: anchoredY - anchor.locationInBounds.y
+        )
+        let maxOffsetY = max(
+            -collectionView.adjustedContentInset.top,
+            collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom
+        )
+        let minOffsetY = -collectionView.adjustedContentInset.top
+        let clampedOffsetY = min(max(targetOffset.y, minOffsetY), maxOffsetY)
+        collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: clampedOffsetY)
     }
 
     private func prepareThumbnail(for item: UIKitPhotoGridItem, in cell: PhotoGridCollectionViewCell) {
@@ -957,6 +1083,10 @@ final class PhotoGridCollectionViewController: UIViewController {
         synchronizeSelection(animated: false)
         delegate?.photoGridController(self, didUpdateSelection: updated)
     }
+
+    private func requestContextAction(_ action: PhotoGridContextAction, for objectID: NSManagedObjectID) {
+        delegate?.photoGridController(self, didRequestContextAction: action, for: objectID)
+    }
 }
 
 extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollectionViewDataSourcePrefetching {
@@ -994,6 +1124,93 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                 isSelected: false
             )
         }
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        contextMenuConfigurationForItemAt indexPath: IndexPath,
+        point: CGPoint
+    ) -> UIContextMenuConfiguration? {
+        guard items.indices.contains(indexPath.item) else { return nil }
+        let objectID = items[indexPath.item].objectID
+
+        return UIContextMenuConfiguration(identifier: objectID.uriRepresentation() as NSURL) { nil } actionProvider: { [weak self] _ in
+            guard let self else { return nil }
+
+            let shareAction = UIAction(
+                title: "Share",
+                image: UIImage(systemName: "square.and.arrow.up")
+            ) { [weak self] _ in
+                self?.requestContextAction(.share, for: objectID)
+            }
+
+            let saveAction = UIAction(
+                title: "Save to Photos",
+                image: UIImage(systemName: "square.and.arrow.down")
+            ) { [weak self] _ in
+                self?.requestContextAction(.save, for: objectID)
+            }
+
+            let copyAction = UIAction(
+                title: "Copy",
+                image: UIImage(systemName: "doc.on.doc")
+            ) { [weak self] _ in
+                self?.requestContextAction(.copy, for: objectID)
+            }
+
+            let deleteAction = UIAction(
+                title: "Delete",
+                image: UIImage(systemName: "trash"),
+                attributes: .destructive
+            ) { [weak self] _ in
+                self?.presentContextDeleteConfirmation(for: objectID)
+            }
+
+            return UIMenu(children: [shareAction, saveAction, copyAction, deleteAction])
+        }
+    }
+
+    private func presentContextDeleteConfirmation(for objectID: NSManagedObjectID) {
+        guard presentedViewController == nil else { return }
+
+        let alert = UIAlertController(
+            title: "Delete photo?",
+            message: "This action cannot be undone.",
+            preferredStyle: .actionSheet
+        )
+        alert.addAction(UIAlertAction(title: "Delete Photo", style: .destructive) { [weak self] _ in
+            self?.requestContextAction(.delete, for: objectID)
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = collectionView
+            popover.sourceRect = contextMenuSourceRect(for: objectID)
+        }
+
+        present(alert, animated: true)
+    }
+
+    private func contextMenuSourceRect(for objectID: NSManagedObjectID) -> CGRect {
+        guard let itemIndex = items.firstIndex(where: { $0.objectID == objectID }) else {
+            return CGRect(
+                x: collectionView.bounds.midX,
+                y: collectionView.bounds.midY,
+                width: 1,
+                height: 1
+            )
+        }
+
+        let indexPath = IndexPath(item: itemIndex, section: 0)
+        if let cell = collectionView.cellForItem(at: indexPath) {
+            return cell.frame
+        }
+
+        return collectionView.layoutAttributesForItem(at: indexPath)?.frame ?? CGRect(
+            x: collectionView.bounds.midX,
+            y: collectionView.bounds.midY,
+            width: 1,
+            height: 1
+        )
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
@@ -1092,6 +1309,13 @@ extension PhotoGridCollectionViewController: UIGestureRecognizerDelegate {
 
         let velocity = panGesture.velocity(in: collectionView)
         return isSelectionMode && abs(velocity.x) > abs(velocity.y)
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        gestureRecognizer === gridPinchRecognizer || otherGestureRecognizer === gridPinchRecognizer
     }
 }
 

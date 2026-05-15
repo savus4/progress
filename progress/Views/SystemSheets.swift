@@ -2,6 +2,12 @@ import SwiftUI
 import UIKit
 import LinkPresentation
 import UniformTypeIdentifiers
+import ImageIO
+
+struct ActivityPresentation: Identifiable {
+    let id = UUID()
+    let activityItems: [Any]
+}
 
 struct ActivityView: UIViewControllerRepresentable {
     let activityItems: [Any]
@@ -83,11 +89,13 @@ final class ImageActivityItemSource: NSObject, UIActivityItemSource {
 final class URLActivityItemSource: NSObject, UIActivityItemSource {
     private let url: URL
     private let title: String
+    private let subject: String?
     private let previewImage: UIImage?
 
-    init(url: URL, title: String, previewImage: UIImage?) {
+    init(url: URL, title: String, subject: String? = nil, previewImage: UIImage?) {
         self.url = url
         self.title = title
+        self.subject = subject
         self.previewImage = previewImage
         super.init()
     }
@@ -103,6 +111,13 @@ final class URLActivityItemSource: NSObject, UIActivityItemSource {
         url
     }
 
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        subjectForActivityType activityType: UIActivity.ActivityType?
+    ) -> String {
+        subject ?? title
+    }
+
     func activityViewControllerLinkMetadata(_ activityViewController: UIActivityViewController) -> LPLinkMetadata? {
         let metadata = LPLinkMetadata()
         metadata.title = title
@@ -113,6 +128,72 @@ final class URLActivityItemSource: NSObject, UIActivityItemSource {
             metadata.iconProvider = NSItemProvider(object: previewImage)
         }
         return metadata
+    }
+}
+
+enum StillPhotoShareItemFactory {
+    static func makeItem(
+        sourceURL: URL,
+        title: String,
+        subject: String?,
+        fileTitle: String
+    ) throws -> Any {
+        let titledURL = try copyShareURL(sourceURL, title: fileTitle)
+        return URLActivityItemSource(
+            url: titledURL,
+            title: title,
+            subject: subject,
+            previewImage: previewImage(from: titledURL)
+        )
+    }
+
+    private static func copyShareURL(_ sourceURL: URL, title: String) throws -> URL {
+        let fileExtension = sourceURL.pathExtension.isEmpty ? "heic" : sourceURL.pathExtension
+        let fileName = "\(sanitizedShareFileName(title)).\(fileExtension)"
+        let directoryURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ProgressShareItems",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+        let destinationURL = directoryURL.appendingPathComponent(fileName, isDirectory: false)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        return destinationURL
+    }
+
+    private static func sanitizedShareFileName(_ name: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+            .union(.newlines)
+            .union(.controlCharacters)
+        let components = name.components(separatedBy: invalidCharacters)
+        let cleanedName = components
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanedName.isEmpty ? "Progress Photo" : cleanedName
+    }
+
+    private static func previewImage(from url: URL) -> UIImage? {
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions as CFDictionary) else {
+            return nil
+        }
+
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: false,
+            kCGImageSourceThumbnailMaxPixelSize: 600
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else {
+            return nil
+        }
+
+        return UIImage(cgImage: thumbnail)
     }
 }
 

@@ -273,8 +273,7 @@ struct PhotoDetailView: View {
     @State private var resolvedLocationName = "Unknown location"
     @State private var verticalDismissOffset: CGFloat = 0
     @State private var areControlsVisible = true
-    @State private var isShowingShareSheet = false
-    @State private var shareSheetURLs: [URL] = []
+    @State private var sharePresentation: ActivityPresentation?
     @State private var actionError: PhotoDetailActionError?
     @State private var isPerformingAction = false
     @State private var hasSavedCurrentItemToLibrary = false
@@ -341,8 +340,8 @@ struct PhotoDetailView: View {
         .task(id: currentItem?.objectID) {
             await updateLocationName()
         }
-        .sheet(isPresented: $isShowingShareSheet) {
-            ActivityView(activityItems: shareSheetURLs.map { $0 as Any })
+        .sheet(item: $sharePresentation) { presentation in
+            ActivityView(activityItems: presentation.activityItems)
         }
         .alert("Action Failed", isPresented: actionErrorBinding) {
             Button("OK", role: .cancel) {
@@ -412,7 +411,7 @@ struct PhotoDetailView: View {
     }
 
     private func toggleControlsVisibility() {
-        guard !isShowingShareSheet else { return }
+        guard sharePresentation == nil else { return }
         areControlsVisible.toggle()
     }
 
@@ -466,12 +465,35 @@ struct PhotoDetailView: View {
                 let shareURL = try await PhotoStorageService.shared.prepareStillPhotoShareURL(
                     fullImageAssetName: currentItem.fullImageAssetName ?? currentItem.livePhotoImageAssetName
                 )
-                shareSheetURLs = [shareURL]
-                isShowingShareSheet = true
+                let shareItem = try StillPhotoShareItemFactory.makeItem(
+                    sourceURL: shareURL,
+                    title: shareTitle(for: currentItem),
+                    subject: shareSubject(for: currentItem),
+                    fileTitle: shareFileTitle(for: currentItem)
+                )
+                sharePresentation = ActivityPresentation(activityItems: [shareItem])
             } catch {
                 actionError = PhotoDetailActionError(message: "Unable to prepare the still photo for sharing.")
             }
         }
+    }
+
+    private func shareTitle(for item: PhotoDetailItem) -> String {
+        guard let captureDate = item.captureDate else { return "Progress Photo" }
+        return "Progress Photo - \(Self.dateTimeFormatter.string(from: captureDate))"
+    }
+
+    private func shareSubject(for item: PhotoDetailItem) -> String {
+        if let locationName = item.locationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !locationName.isEmpty {
+            return "\(shareTitle(for: item)) at \(locationName)"
+        }
+        return shareTitle(for: item)
+    }
+
+    private func shareFileTitle(for item: PhotoDetailItem) -> String {
+        guard let captureDate = item.captureDate else { return "Progress Photo" }
+        return "Progress Photo \(Self.shareFileDateFormatter.string(from: captureDate))"
     }
 
     private func saveCurrentAssetToPhotoLibrary() {
@@ -683,6 +705,12 @@ struct PhotoDetailView: View {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let shareFileDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm"
         return formatter
     }()
 }
