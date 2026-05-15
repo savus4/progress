@@ -1327,11 +1327,26 @@ private final class PhotoDetailPagingViewController: UIViewController {
     func updateItems(_ nextItems: [PhotoDetailItem], currentIndex nextIndex: Int) {
         guard activeDeleteTransition == nil else { return }
 
-        items = nextItems
-        currentIndex = items.indices.contains(nextIndex) ? nextIndex : min(currentIndex, max(items.count - 1, 0))
+        let resolvedIndex = nextItems.indices.contains(nextIndex)
+            ? nextIndex
+            : min(currentIndex, max(nextItems.count - 1, 0))
 
+        guard items != nextItems || currentIndex != resolvedIndex else {
+            return
+        }
+
+        if hasSameObjectIDs(as: nextItems) {
+            items = nextItems
+            currentIndex = resolvedIndex
+            schedulePrefetch(around: currentIndex)
+            refreshVisibleCells()
+            return
+        }
+
+        items = nextItems
+        currentIndex = resolvedIndex
         collectionView.reloadData()
-        if didSetInitialOffset {
+        if didSetInitialOffset, !isUserInteractingWithPager {
             scrollToIndex(currentIndex, animated: false)
         }
         schedulePrefetch(around: currentIndex)
@@ -1433,6 +1448,15 @@ private final class PhotoDetailPagingViewController: UIViewController {
             CGPoint(x: CGFloat(index) * collectionView.bounds.width, y: 0),
             animated: animated
         )
+    }
+
+    private var isUserInteractingWithPager: Bool {
+        collectionView.isTracking || collectionView.isDragging || collectionView.isDecelerating
+    }
+
+    private func hasSameObjectIDs(as nextItems: [PhotoDetailItem]) -> Bool {
+        guard items.count == nextItems.count else { return false }
+        return zip(items, nextItems).allSatisfy { $0.objectID == $1.objectID }
     }
 
     private func settleToNearestPage(animated: Bool) {
