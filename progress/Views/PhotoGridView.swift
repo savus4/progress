@@ -25,6 +25,7 @@ struct PhotoGridView: View {
     @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
     @StateObject private var dataController = PhotoGridDataController()
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
+    @StateObject private var photoImporter = PhotoImportCoordinator.shared
 
     @State private var showingCamera = false
     @State private var showingNotificationSettings = false
@@ -86,13 +87,14 @@ struct PhotoGridView: View {
                                     .foregroundStyle(.secondary)
                             }
                             
-                            Button(action: { showingCamera = true }) {
+                            Button(action: openCamera) {
                                 Label("Take Your First Photo", systemImage: "camera")
                                     .font(.headline)
                                     .padding()
                                     .background(.blue.gradient, in: Capsule())
                                     .foregroundStyle(.white)
                             }
+                            .disabled(photoImporter.isImporting)
                             .accessibilityIdentifier("emptyStateCaptureButton")
                             .padding(.top)
                         }
@@ -163,6 +165,13 @@ struct PhotoGridView: View {
                     floatingFilterButton
                         .padding(.leading, 18)
                         .padding(.bottom, 24)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if photoImporter.shouldShowOverlay {
+                    PhotoImportProgressOverlay(importer: photoImporter)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, dataController.hasAnyPhotos ? 132 : 24)
                 }
             }
             .navigationTitle("Work in Progress")
@@ -255,7 +264,7 @@ struct PhotoGridView: View {
                             Image(systemName: "film.stack")
                                 .font(.title3)
                         }
-                        .disabled(!dataController.hasAnyPhotos)
+                        .disabled(!dataController.hasAnyPhotos || photoImporter.isImporting)
 
                         Button(action: { showingNotificationSettings = true }) {
                             Image(systemName: "gearshape")
@@ -335,6 +344,10 @@ struct PhotoGridView: View {
 
     private func openCameraIfNeededFromNotification() {
         guard notificationNavigation.cameraOpenRequestToken != nil else { return }
+        guard !photoImporter.isImporting else {
+            notificationNavigation.consumeCameraOpenRequest()
+            return
+        }
         showingCamera = true
         notificationNavigation.consumeCameraOpenRequest()
     }
@@ -547,11 +560,12 @@ struct PhotoGridView: View {
     }
 
     private var floatingCaptureButton: some View {
-        Button(action: { showingCamera = true }) {
+        Button(action: openCamera) {
             captureButtonLabel
         }
         .contentShape(.circle)
         .buttonStyle(floatingCaptureButtonStyle)
+        .disabled(photoImporter.isImporting)
         .accessibilityLabel("Capture Photo")
         .accessibilityIdentifier("gridCaptureButton")
     }
@@ -591,6 +605,14 @@ struct PhotoGridView: View {
         } else {
             return .plain
         }
+    }
+
+    private func openCamera() {
+        guard !photoImporter.isImporting else {
+            exportAlertMessage = "Photo import is still running. Wait for it to finish before capturing."
+            return
+        }
+        showingCamera = true
     }
 
     @MainActor
@@ -779,6 +801,10 @@ struct PhotoGridView: View {
     }
 
     private func openPortraitVideoExporter() {
+        guard !photoImporter.isImporting else {
+            exportAlertMessage = "Photo import is still running. Wait for it to finish before creating a video."
+            return
+        }
         portraitVideoExportPresentation = PortraitVideoExportPresentation(
             photos: dataController.allStoredPhotos().map(PortraitVideoExportItem.init(photo:))
         )
