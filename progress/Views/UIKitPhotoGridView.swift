@@ -395,8 +395,12 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var selectionPanRecognizer: UIPanGestureRecognizer!
     private var gridPinchRecognizer: UIPinchGestureRecognizer!
     private var selectionPanAnchorIndexPath: IndexPath?
+    private var selectionPanViewportLocation: CGPoint?
     private var selectionPanBaseSelection: Set<NSManagedObjectID> = []
     private var selectionPanOperation: SelectionPanOperation = .select
+    private var selectionAutoScrollDisplayLink: CADisplayLink?
+    private var selectionAutoScrollLastTimestamp: CFTimeInterval?
+    private var isSelectionAutoScrolling = false
     private var pinchStartColumnCount = 0
     private var pinchAnchor: GridPinchAnchor?
     private var thumbnailTasks: [NSManagedObjectID: ThumbnailTaskRecord] = [:]
@@ -418,6 +422,8 @@ final class PhotoGridCollectionViewController: UIViewController {
     private let nearVisiblePreheatWindowMultiplier: CGFloat = 2.0
     private let topVisibleReportInterval: TimeInterval = 0.08
     private let visibleThumbnailKickInterval: TimeInterval = 0.04
+    private let selectionAutoScrollEdgeDistance: CGFloat = 110
+    private let selectionAutoScrollMaxSpeed: CGFloat = 900
     private let minGridColumnCount = 2
     private let maxGridColumnCount = 5
     private let gridSpacing: CGFloat = 2
@@ -533,6 +539,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     }
 
     deinit {
+        selectionAutoScrollDisplayLink?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -540,6 +547,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         super.viewDidDisappear(animated)
         guard isBeingDismissed || view.window == nil else { return }
 
+        stopSelectionAutoScroll()
         cancelAllThumbnailTasks()
         Task {
             await thumbnailDataProvider.purge()
@@ -564,6 +572,9 @@ final class PhotoGridCollectionViewController: UIViewController {
 
         self.isSelectionMode = isSelectionMode
         self.selectedPhotoIDs = selectedPhotoIDs
+        if didChangeSelectionMode, !isSelectionMode {
+            stopSelectionPan()
+        }
 
         if didChangeItems {
             currentChangeToken = changeToken
@@ -1043,6 +1054,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         guard isSelectionMode else { return }
 
         let location = gesture.location(in: collectionView)
+        selectionPanViewportLocation = gesture.location(in: view)
         switch gesture.state {
         case .began:
             guard let indexPath = nearestIndexPath(to: location), indexPath.item < items.count else { return }
@@ -1051,13 +1063,25 @@ final class PhotoGridCollectionViewController: UIViewController {
             let objectID = items[indexPath.item].objectID
             selectionPanOperation = selectedPhotoIDs.contains(objectID) ? .deselect : .select
             applySelectionPan(to: indexPath)
+            updateSelectionAutoScroll()
         case .changed:
-            guard let currentIndexPath = nearestIndexPath(to: location) else { return }
-            applySelectionPan(to: currentIndexPath)
+            applySelectionPan(at: location)
+            updateSelectionAutoScroll()
         default:
-            selectionPanAnchorIndexPath = nil
-            selectionPanBaseSelection = []
+            stopSelectionPan()
         }
+    }
+
+    private func stopSelectionPan() {
+        selectionPanAnchorIndexPath = nil
+        selectionPanViewportLocation = nil
+        selectionPanBaseSelection = []
+        stopSelectionAutoScroll()
+    }
+
+    private func applySelectionPan(at location: CGPoint) {
+        guard let currentIndexPath = nearestIndexPath(to: location) else { return }
+        applySelectionPan(to: currentIndexPath)
     }
 
     private func applySelectionPan(to currentIndexPath: IndexPath) {
@@ -1082,6 +1106,107 @@ final class PhotoGridCollectionViewController: UIViewController {
         selectedPhotoIDs = updated
         synchronizeSelection(animated: false)
         delegate?.photoGridController(self, didUpdateSelection: updated)
+    }
+
+    private func updateSelectionAutoScroll() {
+        guard selectionAutoScrollVelocity() != 0 else {
+            stopSelectionAutoScroll()
+            return
+        }
+
+        startSelectionAutoScrollIfNeeded()
+    }
+
+    private func startSelectionAutoScrollIfNeeded() {
+        guard selectionAutoScrollDisplayLink == nil else { return }
+
+        selectionAutoScrollLastTimestamp = nil
+        let displayLink = CADisplayLink(target: self, selector: #selector(handleSelectionAutoScroll(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        selectionAutoScrollDisplayLink = displayLink
+
+        if !isSelectionAutoScrolling {
+            isSelectionAutoScrolling = true
+            isScrollMotionActive = true
+            delegate?.photoGridController(self, didChangeScrollActivity: true)
+        }
+    }
+
+    private func stopSelectionAutoScroll() {
+        selectionAutoScrollDisplayLink?.invalidate()
+        selectionAutoScrollDisplayLink = nil
+        selectionAutoScrollLastTimestamp = nil
+
+        if isSelectionAutoScrolling {
+            isSelectionAutoScrolling = false
+            isScrollMotionActive = false
+            preheatDirection = .none
+            loadVisibleThumbnails()
+            prefetchNearVisibleThumbnails()
+            delegate?.photoGridController(self, didChangeScrollActivity: false)
+        }
+    }
+
+    @objc
+    private func handleSelectionAutoScroll(_ displayLink: CADisplayLink) {
+        guard isSelectionMode,
+              selectionPanAnchorIndexPath != nil,
+              let viewportLocation = selectionPanViewportLocation else {
+            stopSelectionPan()
+            return
+        }
+
+        let velocity = selectionAutoScrollVelocity()
+        guard velocity != 0 else {
+            stopSelectionAutoScroll()
+            return
+        }
+
+        let lastTimestamp = selectionAutoScrollLastTimestamp ?? displayLink.timestamp
+        let elapsed = max(0, min(displayLink.timestamp - lastTimestamp, 1.0 / 20.0))
+        selectionAutoScrollLastTimestamp = displayLink.timestamp
+
+        let minimumOffsetY = -collectionView.adjustedContentInset.top
+        let maximumOffsetY = max(
+            minimumOffsetY,
+            collectionView.contentSize.height - collectionView.bounds.height + collectionView.adjustedContentInset.bottom
+        )
+        let nextOffsetY = min(max(collectionView.contentOffset.y + velocity * elapsed, minimumOffsetY), maximumOffsetY)
+        guard abs(nextOffsetY - collectionView.contentOffset.y) > 0.1 else { return }
+
+        collectionView.setContentOffset(CGPoint(x: collectionView.contentOffset.x, y: nextOffsetY), animated: false)
+        let contentLocation = collectionView.convert(viewportLocation, from: view)
+        applySelectionPan(at: contentLocation)
+    }
+
+    private func selectionAutoScrollVelocity() -> CGFloat {
+        guard let viewportLocation = selectionPanViewportLocation,
+              collectionView.bounds.height > 0 else {
+            return 0
+        }
+
+        let topEdge = collectionView.adjustedContentInset.top
+        let bottomEdge = collectionView.bounds.height - collectionView.adjustedContentInset.bottom
+        let y = viewportLocation.y
+        let topDistance = y - topEdge
+        let bottomDistance = bottomEdge - y
+
+        if topDistance < selectionAutoScrollEdgeDistance {
+            let intensity = selectionAutoScrollIntensity(distance: topDistance)
+            return -selectionAutoScrollMaxSpeed * intensity
+        }
+
+        if bottomDistance < selectionAutoScrollEdgeDistance {
+            let intensity = selectionAutoScrollIntensity(distance: bottomDistance)
+            return selectionAutoScrollMaxSpeed * intensity
+        }
+
+        return 0
+    }
+
+    private func selectionAutoScrollIntensity(distance: CGFloat) -> CGFloat {
+        let normalized = 1 - min(max(distance, 0), selectionAutoScrollEdgeDistance) / selectionAutoScrollEdgeDistance
+        return normalized * normalized
     }
 
     private func requestContextAction(_ action: PhotoGridContextAction, for objectID: NSManagedObjectID) {
