@@ -318,7 +318,7 @@ struct PortraitVideoExportSheet: View {
             Double(heartedLivePhotoVideoCount) * Self.estimatedLivePhotoVideoDuration
     }
 
-    private static let estimatedLivePhotoVideoDuration: TimeInterval = 3.0
+    private static let estimatedLivePhotoVideoDuration: TimeInterval = 1.5
 
     private var selectedQuality: PortraitVideoExportQuality {
         get {

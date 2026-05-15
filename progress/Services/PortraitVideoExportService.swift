@@ -229,6 +229,7 @@ nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable,
 
 final class PortraitVideoExportService {
     static let shared = PortraitVideoExportService()
+    nonisolated private static let livePhotoVideoTailDuration: TimeInterval = 1.5
 
     private let cloudKitService = CloudKitService.shared
     private let outputSize = CGSize(width: 1080, height: 1620)
@@ -565,7 +566,9 @@ final class PortraitVideoExportService {
             throw PortraitVideoExportError.cannotReadVideo
         }
 
-        let frameCount = max(1, Int((durationSeconds * Double(outputFrameRate)).rounded(.up)))
+        let trimmedDurationSeconds = min(durationSeconds, Self.livePhotoVideoTailDuration)
+        let trimStartSeconds = max(0, durationSeconds - trimmedDurationSeconds)
+        let frameCount = max(1, Int((trimmedDurationSeconds * Double(outputFrameRate)).rounded(.up)))
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: thumbnailMaxPixelSize, height: thumbnailMaxPixelSize)
@@ -576,7 +579,7 @@ final class PortraitVideoExportService {
             try Task.checkCancellation()
 
             let frameTime = CMTime(
-                seconds: Double(frameOffset) / Double(outputFrameRate),
+                seconds: trimStartSeconds + Double(frameOffset) / Double(outputFrameRate),
                 preferredTimescale: 600
             )
             let image = try await generator.image(at: frameTime).image

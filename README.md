@@ -2,6 +2,9 @@
 
 `Work in Progress` is an iOS app for taking one photo a day, keeping the framing consistent with adjustable face guides, and building a personal visual timeline over time. The repository name is still `progress`, but the current in-app display name is `Work in Progress`.
 
+# Todo
+- Make photos heartable, so app knows to focus on them and can include live photos in the video. so add heart button to photo detail view (bottom middle) (this hearts also have to sync to icloud like the rest) and then in video creator create new toggle which when on, includes for the hearted photos the video part of the photo instead of the photo (video length is influenced by that, so estimate this change)
+
 ## What The App Does Today
 
 - Capture still photos and Live Photos from a custom full-screen camera.
