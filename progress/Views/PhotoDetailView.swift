@@ -1114,7 +1114,7 @@ private struct PhotoDetailPageView: View {
     private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
 
     @State private var displayedImage: UIImage?
-    @State private var hasLoadedFullResolutionImage = false
+    @State private var isLoadingImage = true
     @State private var livePhotoResources: LivePhotoResources?
     @State private var representedObjectID: NSManagedObjectID?
 
@@ -1148,8 +1148,11 @@ private struct PhotoDetailPageView: View {
             }
 
             Group {
-                if isCurrentPage, shouldShowLivePhotoStatusIndicator {
-                    LivePhotoStatusIndicator(isLivePhoto: hasLivePhoto)
+                if shouldShowLivePhotoStatusIndicator {
+                    LivePhotoStatusIndicator(
+                        isLivePhoto: hasLivePhoto,
+                        isLoadingImage: isLoadingImage
+                    )
                 }
             }
             .padding(.top, topChromeClearance)
@@ -1166,9 +1169,9 @@ private struct PhotoDetailPageView: View {
         if representedObjectID != objectID {
             representedObjectID = objectID
             displayedImage = nil
+            isLoadingImage = true
         }
 
-        hasLoadedFullResolutionImage = false
         livePhotoResources = nil
 
         if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: objectID) {
@@ -1187,12 +1190,13 @@ private struct PhotoDetailPageView: View {
         }
 
         guard let fullImage = try? await PhotoStorageService.shared.loadFullImage(named: item.fullImageAssetName) else {
+            isLoadingImage = false
             return
         }
         guard !Task.isCancelled, representedObjectID == objectID else { return }
 
         displayedImage = fullImage
-        hasLoadedFullResolutionImage = true
+        isLoadingImage = false
 
         guard isCurrentPage else {
             return
@@ -1221,7 +1225,7 @@ private struct PhotoDetailPageView: View {
     }
 
     private var shouldShowLivePhotoStatusIndicator: Bool {
-        hasLoadedFullResolutionImage
+        true
     }
 }
 
@@ -1237,19 +1241,36 @@ private struct LivePhotoResources {
 
 private struct LivePhotoStatusIndicator: View {
     let isLivePhoto: Bool
+    let isLoadingImage: Bool
 
     var body: some View {
-        Image(systemName: isLivePhoto ? "livephoto" : "livephoto.slash")
-            .imageScale(.medium)
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(9)
-            .background(.black.opacity(0.45), in: Circle())
-            .overlay(
-                Circle()
-                    .stroke(.white.opacity(0.14), lineWidth: 1)
-            )
-            .accessibilityLabel(isLivePhoto ? "Live Photo" : "Still Photo")
+        ZStack {
+            if isLoadingImage {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            } else {
+                Image(systemName: isLivePhoto ? "livephoto" : "livephoto.slash")
+                    .imageScale(.medium)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: 36, height: 36)
+        .background(.black.opacity(0.45), in: Circle())
+        .overlay(
+            Circle()
+                .stroke(.white.opacity(0.14), lineWidth: 1)
+        )
+        .accessibilityLabel(statusAccessibilityLabel)
+    }
+
+    private var statusAccessibilityLabel: String {
+        if isLoadingImage {
+            return "Loading Photo"
+        }
+
+        return isLivePhoto ? "Live Photo" : "Still Photo"
     }
 }
 
