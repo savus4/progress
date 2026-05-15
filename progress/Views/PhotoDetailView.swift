@@ -28,10 +28,12 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
         scrollView.backgroundColor = .clear
-        scrollView.clipsToBounds = false
+        scrollView.clipsToBounds = true
+        scrollView.contentInsetAdjustmentBehavior = .never
 
         let hostedView = context.coordinator.hostingController.view!
         hostedView.backgroundColor = .clear
+        hostedView.clipsToBounds = true
         hostedView.frame = scrollView.bounds
         hostedView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
@@ -42,9 +44,8 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIScrollView, context: Context) {
         context.coordinator.hostingController.rootView = AnyView(content)
-        context.coordinator.hostingController.view.frame = uiView.bounds
+        context.coordinator.updateHostedViewLayout(in: uiView)
         if uiView.zoomScale < 1.001 {
-            uiView.contentSize = uiView.bounds.size
             context.coordinator.centerContent(in: uiView)
         }
         context.coordinator.updatePanGestureState(for: uiView)
@@ -77,9 +78,18 @@ struct SnapBackZoomContainer<Content: View>: UIViewRepresentable {
                 scrollView.zoomScale = 1
                 scrollView.contentOffset = .zero
             } completion: { _ in
+                self.updateHostedViewLayout(in: scrollView)
                 self.centerContent(in: scrollView)
                 self.updatePanGestureState(for: scrollView)
             }
+        }
+
+        func updateHostedViewLayout(in scrollView: UIScrollView) {
+            guard let contentView = hostingController.view else { return }
+            let size = scrollView.bounds.size
+            contentView.bounds = CGRect(origin: .zero, size: size)
+            contentView.center = CGPoint(x: size.width / 2, y: size.height / 2)
+            scrollView.contentSize = size
         }
 
         func centerContent(in scrollView: UIScrollView) {
@@ -841,10 +851,6 @@ private final class ToolbarConfigViewController: UIViewController {
             action: #selector(saveTapped)
         )
         save.isEnabled = configuration.isSaveEnabled
-        if #available(iOS 26.0, *) {
-            share.sharesBackground = true
-            save.sharesBackground = true
-        }
 
         let delete = deleteBarButtonItem()
         delete.tintColor = .systemRed
@@ -1057,6 +1063,7 @@ private struct PhotoDetailPageView: View {
     let item: PhotoDetailItem
     let isCurrentPage: Bool
 
+    private let topChromeClearance: CGFloat = 116
     private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
 
     @State private var displayedImage: UIImage?
@@ -1104,7 +1111,7 @@ private struct PhotoDetailPageView: View {
                     }
                 }
             }
-            .padding(.top, 20)
+            .padding(.top, topChromeClearance)
             .padding(.trailing, 16)
         }
         .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
@@ -1442,7 +1449,7 @@ private final class PhotoDetailPagingViewController: UIViewController {
         collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.contentInset = .zero
         collectionView.scrollIndicatorInsets = .zero
-        collectionView.clipsToBounds = false
+        collectionView.clipsToBounds = true
         collectionView.register(PhotoDetailPagingCell.self, forCellWithReuseIdentifier: PhotoDetailPagingCell.reuseIdentifier)
         collectionView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(collectionView)
@@ -1640,7 +1647,9 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.backgroundColor = .clear
+        contentView.clipsToBounds = true
         backgroundColor = .clear
+        clipsToBounds = true
         configureDeletionFadeOverlay()
     }
 
@@ -1653,6 +1662,7 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
         super.prepareForReuse()
         representedObjectID = nil
         isCurrentPage = false
+        hostingController?.rootView = AnyView(Color.black)
         deletionFadeOverlay.layer.removeAllAnimations()
         deletionFadeOverlay.alpha = 0
     }
