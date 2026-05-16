@@ -1,4 +1,5 @@
 import AVKit
+import CoreData
 import Photos
 import SwiftUI
 import UIKit
@@ -7,6 +8,7 @@ struct PortraitVideoExportSheet: View {
     let photos: [PortraitVideoExportItem]
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("portraitVideoPicturesPerSecond") private var picturesPerSecond = 6
     @AppStorage("portraitVideoQuality") private var selectedQualityRawValue = PortraitVideoExportQuality.best.rawValue
     @AppStorage("portraitVideoIncludesDateBanner") private var includesDateBanner = false
@@ -31,6 +33,12 @@ struct PortraitVideoExportSheet: View {
     @State private var smoothedRemainingSeconds: TimeInterval?
     @State private var isShowingDiscardUnsavedExportAlert = false
     @State private var isShowingDiscardExportConfirmation = false
+    @State private var pausedSession: PortraitVideoExportPausedSession?
+    @State private var isPauseRequested = false
+    @State private var backgroundPauseTask: UIBackgroundTaskIdentifier = .invalid
+    @State private var backgroundPauseFallbackTask: Task<Void, Never>?
+    @State private var backgroundTimeMonitorTask: Task<Void, Never>?
+    @State private var exportStartedCompletedWorkUnitCount: Double?
 
     private let calendar = Calendar.current
     private let availableDateRange: ClosedRange<Date>
@@ -117,6 +125,19 @@ struct PortraitVideoExportSheet: View {
                     cleanupExportedVideo()
                 }
             }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    stopBackgroundTimeMonitor()
+                case .background:
+                    beginBackgroundPauseTaskIfNeeded()
+                    startBackgroundTimeMonitor()
+                case .inactive:
+                    break
+                @unknown default:
+                    break
+                }
+            }
             .sheet(isPresented: $isShowingFilesExporter, onDismiss: {
                 cleanupExportedVideo()
                 progress = nil
@@ -144,6 +165,7 @@ struct PortraitVideoExportSheet: View {
                 picturesPerSecond = clampedPicturesPerSecond
                 selectedQualityRawValue = selectedQuality.rawValue
                 clampAndStoreSelectedRange()
+                pausedSession = PortraitVideoExportService.shared.pausedSession()
             }
         }
     }
@@ -379,6 +401,20 @@ struct PortraitVideoExportSheet: View {
         )
     }
 
+    private var currentExportConfiguration: PortraitVideoExportConfiguration {
+        PortraitVideoExportConfiguration(
+            picturesPerSecond: clampedPicturesPerSecond,
+            quality: selectedQuality,
+            includesDateBanner: includesDateBanner,
+            includesLocationBanner: includesLocationBanner,
+            includesFavoriteLivePhotoVideo: effectiveIncludesFavoriteLivePhotoVideos,
+            holdsHeartedPhotos: effectiveHoldsHeartedPhotos,
+            usesAllPhotos: usesAllPhotos,
+            startDate: startDate,
+            endDate: endDate
+        )
+    }
+
     private var includesFavoriteLivePhotoVideosBinding: Binding<Bool> {
         Binding(
             get: { effectiveIncludesFavoriteLivePhotoVideos },
@@ -433,8 +469,12 @@ struct PortraitVideoExportSheet: View {
                 }
                 .buttonStyle(floatingOverlayButtonStyle)
                 .foregroundStyle(.red)
+            } else if let pausedSession, exportedVideoURL == nil {
+                pausedExportOfferView(pausedSession)
             } else if exportedVideoURL == nil {
-                Button(action: startExport) {
+                Button {
+                    startExport()
+                } label: {
                     Label("Create Video", systemImage: "film.stack.fill")
                         .font(.headline.weight(.semibold))
                         .padding(.horizontal, 24)
@@ -507,7 +547,50 @@ struct PortraitVideoExportSheet: View {
         .frame(maxWidth: .infinity)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: exportTask != nil)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: exportedVideoURL != nil)
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: pausedSession)
         .animation(.easeInOut(duration: 0.25), value: statusMessage)
+    }
+
+    private func pausedExportOfferView(_ session: PortraitVideoExportPausedSession) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "pause.circle.fill")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.blue)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Paused Export")
+                        .font(.headline.weight(.semibold))
+
+                    Text(pausedExportDescription(for: session))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 10) {
+                Button(action: continuePausedExport) {
+                    centeredActionLabel(title: "Continue", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                }
+                .buttonStyle(floatingOverlayButtonStyle)
+
+                Button(role: .destructive, action: discardPausedExport) {
+                    Image(systemName: "trash.fill")
+                        .font(.headline.weight(.semibold))
+                        .frame(width: 52, height: 48)
+                }
+                .buttonStyle(floatingOverlayButtonStyle)
+                .foregroundStyle(.red)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .floatingOverlayGlass(cornerRadius: 24)
     }
 
     private var unsavedVideoReadyView: some View {
@@ -540,6 +623,12 @@ struct PortraitVideoExportSheet: View {
 
         let photoText = failedPhotos.count == 1 ? "photo was" : "photos were"
         return "Save it before closing. \(failedPhotos.count) \(photoText) skipped."
+    }
+
+    private func pausedExportDescription(for session: PortraitVideoExportPausedSession) -> String {
+        let completedText = "\(session.completedPhotoCount) of \(session.totalPhotoCount)"
+        let updatedText = session.updatedAt.formatted(date: .omitted, time: .shortened)
+        return "\(completedText) photos finished. Paused at \(updatedText)."
     }
 
     @ViewBuilder
@@ -673,46 +762,72 @@ struct PortraitVideoExportSheet: View {
         }
     }
 
-    private func startExport() {
+    private func startExport(resuming session: PortraitVideoExportPausedSession? = nil) {
         guard exportTask == nil else { return }
 
-        let selectedPhotos = matchingPhotos
+        let selectedPhotos = session.map(photosForPausedSession) ?? matchingPhotos
         guard !selectedPhotos.isEmpty else {
             showStatus(PortraitVideoExportError.noPhotos.localizedDescription, success: false)
             return
         }
 
+        if let session, selectedPhotos.count != session.totalPhotoCount {
+            showStatus("Paused export photos changed. Start a new video.", success: false)
+            return
+        }
+
+        let configuration = session?.configuration ?? currentExportConfiguration
+        if let session {
+            applyConfiguration(session.configuration)
+        }
+
         cleanupExportedVideo()
         exportedVideoURL = nil
-        failedPhotos = []
+        failedPhotos = session?.failedPhotos ?? []
+        isPauseRequested = false
+        beginBackgroundPauseTaskIfNeeded()
+        if scenePhase == .background {
+            startBackgroundTimeMonitor()
+        }
         exportStartedAt = Date()
+        exportStartedCompletedWorkUnitCount = nil
         smoothedRemainingSeconds = nil
         clearStatus()
         progress = PortraitVideoExportProgress(
-            completedPhotoCount: 0,
+            completedPhotoCount: session?.completedPhotoCount ?? 0,
             totalPhotoCount: selectedPhotos.count,
             phase: .preparing
         )
 
         exportTask = Task { @MainActor in
+            defer {
+                endBackgroundPauseTask()
+            }
+
             do {
-                let result = try await PortraitVideoExportService.shared.createVideo(
+                let response = try await PortraitVideoExportService.shared.createVideo(
                     from: selectedPhotos,
-                    picturesPerSecond: picturesPerSecond,
-                    quality: selectedQuality,
-                    includesDateBanner: includesDateBanner,
-                    includesLocationBanner: includesLocationBanner,
-                    includesFavoriteLivePhotoVideo: effectiveIncludesFavoriteLivePhotoVideos,
-                    holdsHeartedPhotos: effectiveHoldsHeartedPhotos
+                    configuration: configuration,
+                    resuming: session,
+                    shouldPause: { isPauseRequested }
                 ) { newProgress in
                     updateProgress(newProgress)
                 }
 
-                exportedVideoURL = result.videoURL
-                failedPhotos = result.failedPhotos
-                progress = nil
-                smoothedRemainingSeconds = nil
-                clearStatus()
+                switch response {
+                case .completed(let result):
+                    exportedVideoURL = result.videoURL
+                    failedPhotos = result.failedPhotos
+                    pausedSession = nil
+                    progress = nil
+                    smoothedRemainingSeconds = nil
+                    clearStatus()
+                case .paused(let session):
+                    pausedSession = session
+                    progress = nil
+                    smoothedRemainingSeconds = nil
+                    showStatus("Video export paused.", success: false, autoDismissDelay: nil)
+                }
             } catch is CancellationError {
                 progress = nil
                 smoothedRemainingSeconds = nil
@@ -728,6 +843,8 @@ struct PortraitVideoExportSheet: View {
                 showStatus("Video creation failed: \(error.localizedDescription)", success: false)
             }
 
+            isPauseRequested = false
+            exportStartedCompletedWorkUnitCount = nil
             exportTask = nil
         }
     }
@@ -737,12 +854,51 @@ struct PortraitVideoExportSheet: View {
         updateRemainingTimeEstimate(for: newProgress)
     }
 
+    private func continuePausedExport() {
+        guard let pausedSession else { return }
+        startExport(resuming: pausedSession)
+    }
+
+    private func discardPausedExport() {
+        PortraitVideoExportService.shared.discardPausedSession(pausedSession)
+        pausedSession = nil
+        failedPhotos = []
+        showStatus("Paused export discarded.", success: false)
+    }
+
+    private func photosForPausedSession(_ session: PortraitVideoExportPausedSession) -> [PortraitVideoExportItem] {
+        let photosByID = Dictionary(
+            uniqueKeysWithValues: photos.map { photo in
+                (photo.objectID.uriRepresentation().absoluteString, photo)
+            }
+        )
+        return session.photoIDs.compactMap { photosByID[$0] }
+    }
+
+    private func applyConfiguration(_ configuration: PortraitVideoExportConfiguration) {
+        picturesPerSecond = configuration.picturesPerSecond
+        selectedQualityRawValue = configuration.quality.rawValue
+        includesDateBanner = configuration.includesDateBanner
+        includesLocationBanner = configuration.includesLocationBanner
+        includesFavoriteLivePhotoVideos = configuration.includesFavoriteLivePhotoVideo
+        holdsHeartedPhotos = configuration.holdsHeartedPhotos
+        usesAllPhotos = configuration.usesAllPhotos
+        startDate = Self.clampedSelectedDate(configuration.startDate, in: availableDateRange, calendar: calendar)
+        endDate = Self.clampedSelectedDate(configuration.endDate, in: availableDateRange, calendar: calendar)
+        storeSelectedRange()
+    }
+
     private func updateRemainingTimeEstimate(for progress: PortraitVideoExportProgress) {
         guard progress.phase == .loading || progress.phase == .writing else {
             if progress.phase == .preparing {
                 smoothedRemainingSeconds = nil
+                exportStartedCompletedWorkUnitCount = nil
             }
             return
+        }
+
+        if exportStartedCompletedWorkUnitCount == nil {
+            exportStartedCompletedWorkUnitCount = progress.completedWorkUnitCount
         }
 
         guard progress.completedPhotoCount >= 3,
@@ -758,7 +914,7 @@ struct PortraitVideoExportSheet: View {
             return
         }
 
-        let completedWork = max(progress.completedWorkUnitCount, 0.1)
+        let completedWork = max(progress.completedWorkUnitCount - (exportStartedCompletedWorkUnitCount ?? 0), 0.1)
         let remainingWork = max(progress.totalWorkUnitCount - progress.completedWorkUnitCount, 0)
         let rawRemainingSeconds = elapsedSeconds / completedWork * remainingWork
 
@@ -788,7 +944,76 @@ struct PortraitVideoExportSheet: View {
         requestDismiss()
     }
 
+    private func pauseExportBeforeBackgroundExpiration() {
+        guard exportTask != nil, !isPauseRequested else { return }
+
+        isPauseRequested = true
+        showStatus("Pausing export...", success: false, autoDismissDelay: nil)
+    }
+
+    private func beginBackgroundPauseTaskIfNeeded() {
+        guard backgroundPauseTask == .invalid else { return }
+
+        backgroundPauseTask = UIApplication.shared.beginBackgroundTask(withName: "PortraitVideoExportPause") {
+            Task { @MainActor in
+                requestGracefulBackgroundPause()
+            }
+        }
+    }
+
+    private func endBackgroundPauseTask() {
+        stopBackgroundTimeMonitor()
+        backgroundPauseFallbackTask?.cancel()
+        backgroundPauseFallbackTask = nil
+
+        guard backgroundPauseTask != .invalid else { return }
+
+        UIApplication.shared.endBackgroundTask(backgroundPauseTask)
+        backgroundPauseTask = .invalid
+    }
+
+    private func startBackgroundTimeMonitor() {
+        guard backgroundTimeMonitorTask == nil, exportTask != nil else { return }
+
+        backgroundTimeMonitorTask = Task { @MainActor in
+            while !Task.isCancelled, exportTask != nil, !isPauseRequested {
+                if UIApplication.shared.backgroundTimeRemaining <= 5 {
+                    requestGracefulBackgroundPause()
+                    break
+                }
+
+                try? await Task.sleep(for: .seconds(1))
+            }
+            backgroundTimeMonitorTask = nil
+        }
+    }
+
+    private func stopBackgroundTimeMonitor() {
+        backgroundTimeMonitorTask?.cancel()
+        backgroundTimeMonitorTask = nil
+    }
+
+    private func requestGracefulBackgroundPause() {
+        pauseExportBeforeBackgroundExpiration()
+        scheduleBackgroundPauseFallbackCancellation()
+    }
+
+    private func scheduleBackgroundPauseFallbackCancellation() {
+        backgroundPauseFallbackTask?.cancel()
+        backgroundPauseFallbackTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, isPauseRequested, exportTask != nil else { return }
+            exportTask?.cancel()
+        }
+    }
+
     private func cancelExport() {
+        isPauseRequested = false
+        stopBackgroundTimeMonitor()
+        backgroundPauseFallbackTask?.cancel()
+        backgroundPauseFallbackTask = nil
+        PortraitVideoExportService.shared.discardPausedSession(pausedSession)
+        pausedSession = nil
         exportTask?.cancel()
         if exportTask != nil {
             showStatus("Cancelling...", success: false)

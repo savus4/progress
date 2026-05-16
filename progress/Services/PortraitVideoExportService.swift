@@ -37,7 +37,7 @@ nonisolated struct PortraitVideoExportProgress: Equatable {
     }
 }
 
-nonisolated struct PortraitVideoExportFailedPhoto: Identifiable, Equatable, Sendable {
+nonisolated struct PortraitVideoExportFailedPhoto: Identifiable, Equatable, Codable, Sendable {
     let id: String
     let captureDate: Date
     let assetName: String?
@@ -54,6 +54,46 @@ nonisolated struct PortraitVideoExportFailedPhoto: Identifiable, Equatable, Send
 nonisolated struct PortraitVideoExportResult: Sendable {
     let videoURL: URL
     let failedPhotos: [PortraitVideoExportFailedPhoto]
+}
+
+nonisolated struct PortraitVideoExportConfiguration: Equatable, Codable, Sendable {
+    let picturesPerSecond: Int
+    let quality: PortraitVideoExportQuality
+    let includesDateBanner: Bool
+    let includesLocationBanner: Bool
+    let includesFavoriteLivePhotoVideo: Bool
+    let holdsHeartedPhotos: Bool
+    let usesAllPhotos: Bool
+    let startDate: Date
+    let endDate: Date
+}
+
+nonisolated struct PortraitVideoExportPausedSession: Identifiable, Equatable, Codable, Sendable {
+    let id: UUID
+    let createdAt: Date
+    let updatedAt: Date
+    let configuration: PortraitVideoExportConfiguration
+    let photoIDs: [String]
+    let completedPhotoCount: Int
+    let segmentFileNames: [String]
+    let failedPhotos: [PortraitVideoExportFailedPhoto]
+
+    var totalPhotoCount: Int {
+        photoIDs.count
+    }
+}
+
+nonisolated enum PortraitVideoExportResponse: Sendable {
+    case completed(PortraitVideoExportResult)
+    case paused(PortraitVideoExportPausedSession)
+}
+
+nonisolated private struct PortraitVideoSegmentWriter {
+    let writer: AVAssetWriter
+    let input: AVAssetWriterInput
+    let adaptor: AVAssetWriterInputPixelBufferAdaptor
+    let fileURL: URL
+    let fileName: String
 }
 
 nonisolated private struct PortraitVideoExportWorkEstimate: Sendable {
@@ -193,7 +233,7 @@ nonisolated enum PortraitVideoExportError: LocalizedError {
     }
 }
 
-nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable, Codable, Sendable {
     case compact
     case best
 
@@ -230,6 +270,9 @@ nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable,
 final class PortraitVideoExportService {
     static let shared = PortraitVideoExportService()
     nonisolated private static let livePhotoVideoTailDuration: TimeInterval = 1.5
+    nonisolated private static let pausedSessionStorageKey = "portraitVideoPausedExportSession"
+    nonisolated private static let pausedSessionStagingStorageKey = "portraitVideoPausedExportSessionStaging"
+    nonisolated private static let checkpointPhotoInterval = 5
 
     private let cloudKitService = CloudKitService.shared
     private let outputSize = CGSize(width: 1080, height: 1620)
@@ -238,8 +281,29 @@ final class PortraitVideoExportService {
 
     private init() {}
 
+    nonisolated func pausedSession() -> PortraitVideoExportPausedSession? {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: Self.pausedSessionStorageKey) ??
+            defaults.data(forKey: Self.pausedSessionStagingStorageKey) else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(PortraitVideoExportPausedSession.self, from: data)
+    }
+
+    nonisolated func discardPausedSession(_ session: PortraitVideoExportPausedSession? = nil) {
+        let sessionToDiscard = session ?? pausedSession()
+        UserDefaults.standard.removeObject(forKey: Self.pausedSessionStorageKey)
+        UserDefaults.standard.removeObject(forKey: Self.pausedSessionStagingStorageKey)
+
+        if let sessionToDiscard {
+            try? FileManager.default.removeItem(at: pausedExportDirectoryURL(for: sessionToDiscard.id))
+        }
+    }
+
     nonisolated func deleteTemporaryExports() {
         let directoryURL = temporaryExportDirectoryURL()
+        let pausedDirectoryToKeep = pausedSession().map { pausedExportDirectoryURL(for: $0.id).lastPathComponent }
         guard let fileURLs = try? FileManager.default.contentsOfDirectory(
             at: directoryURL,
             includingPropertiesForKeys: nil,
@@ -249,6 +313,9 @@ final class PortraitVideoExportService {
         }
 
         for fileURL in fileURLs {
+            if fileURL.lastPathComponent == pausedDirectoryToKeep {
+                continue
+            }
             try? FileManager.default.removeItem(at: fileURL)
         }
     }
@@ -256,14 +323,11 @@ final class PortraitVideoExportService {
     @concurrent
     nonisolated func createVideo(
         from photos: [PortraitVideoExportItem],
-        picturesPerSecond: Int,
-        quality: PortraitVideoExportQuality,
-        includesDateBanner: Bool,
-        includesLocationBanner: Bool,
-        includesFavoriteLivePhotoVideo: Bool,
-        holdsHeartedPhotos: Bool,
+        configuration: PortraitVideoExportConfiguration,
+        resuming pausedSession: PortraitVideoExportPausedSession? = nil,
+        shouldPause: @escaping @MainActor () -> Bool = { false },
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
-    ) async throws -> PortraitVideoExportResult {
+    ) async throws -> PortraitVideoExportResponse {
         guard !photos.isEmpty else { throw PortraitVideoExportError.noPhotos }
 
         let sortedPhotos = photos.sorted { lhs, rhs in
@@ -274,14 +338,397 @@ final class PortraitVideoExportService {
         }
         var workEstimate = makeWorkEstimate(
             for: sortedPhotos,
-            includesFavoriteLivePhotoVideo: includesFavoriteLivePhotoVideo
+            includesFavoriteLivePhotoVideo: configuration.includesFavoriteLivePhotoVideo
+        )
+        let photoIDs = sortedPhotos.map { $0.objectID.uriRepresentation().absoluteString }
+        let sessionID = pausedSession?.id ?? UUID()
+        let createdAt = pausedSession?.createdAt ?? Date()
+        let compatiblePausedSession = compatiblePausedSession(
+            pausedSession,
+            photoIDs: photoIDs,
+            configuration: configuration
+        )
+        let previousSegmentFileNames = compatiblePausedSession?.segmentFileNames ?? []
+        var segmentFileNames = previousSegmentFileNames
+        var failedPhotos = compatiblePausedSession?.failedPhotos ?? []
+        var completedPhotoCount = min(compatiblePausedSession?.completedPhotoCount ?? 0, sortedPhotos.count)
+        let resumedCompletedPhotoCount = completedPhotoCount
+        let resumedFailedPhotos = failedPhotos
+        let pausedDirectoryURL = pausedExportDirectoryURL(for: sessionID)
+        try FileManager.default.createDirectory(at: pausedDirectoryURL, withIntermediateDirectories: true)
+        var segmentWriter = try makeSegmentWriter(
+            in: pausedDirectoryURL,
+            segmentIndex: segmentFileNames.count,
+            quality: configuration.quality
+        )
+        var hasOpenSegmentWriter = true
+        var lastStoredCompletedPhotoCount = resumedCompletedPhotoCount
+        var lastStoredFailedPhotos = resumedFailedPhotos
+
+        await progress(
+            PortraitVideoExportProgress(
+                completedPhotoCount: completedPhotoCount,
+                totalPhotoCount: sortedPhotos.count,
+                phase: .preparing,
+                completedWorkUnitCount: workEstimate.completedWorkUnitCount(before: completedPhotoCount),
+                totalWorkUnitCount: workEstimate.totalWorkUnitCount
+            )
         )
 
-        let outputURL = try makeOutputURL()
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        do {
+            var writtenFrameCount = 0
+            let outputFrameRate = max(clampedPicturesPerSecond(configuration.picturesPerSecond), 30)
+            let stillFrameCount = max(1, Int((Double(outputFrameRate) / Double(clampedPicturesPerSecond(configuration.picturesPerSecond))).rounded()))
+            let heartedStillFrameCount = outputFrameRate
+
+            for (index, photo) in sortedPhotos.enumerated().dropFirst(completedPhotoCount) {
+                try Task.checkCancellation()
+                if await shouldPause() {
+                    return try await pauseExport(
+                        segmentWriter: segmentWriter,
+                        writtenFrameCount: writtenFrameCount,
+                        sessionID: sessionID,
+                        createdAt: createdAt,
+                        configuration: configuration,
+                        photoIDs: photoIDs,
+                        completedPhotoCount: completedPhotoCount,
+                        segmentFileNames: segmentFileNames,
+                        failedPhotos: failedPhotos
+                    )
+                }
+
+                await progress(
+                    PortraitVideoExportProgress(
+                        completedPhotoCount: index,
+                        totalPhotoCount: sortedPhotos.count,
+                        phase: .loading,
+                        completedWorkUnitCount: workEstimate.completedWorkUnitCount(before: index),
+                        totalWorkUnitCount: workEstimate.totalWorkUnitCount
+                    )
+                )
+
+                let photoStartedAt = Date()
+                do {
+                    let bannerText = await Self.makeBannerText(
+                        for: photo,
+                        includesDate: configuration.includesDateBanner,
+                        includesLocation: configuration.includesLocationBanner
+                    )
+
+                    if configuration.includesFavoriteLivePhotoVideo,
+                       photo.hasFavoriteLivePhotoVideo,
+                       let livePhotoVideoAssetName = photo.livePhotoVideoAssetName {
+                        let appendedFrameCount = try await appendLivePhotoVideoWithRetries(
+                            named: livePhotoVideoAssetName,
+                            bannerText: bannerText,
+                            atFrameIndex: writtenFrameCount,
+                            outputFrameRate: outputFrameRate,
+                            input: segmentWriter.input,
+                            adaptor: segmentWriter.adaptor
+                        )
+                        writtenFrameCount += appendedFrameCount
+                    } else {
+                        guard let assetName = photo.fullImageAssetName else {
+                            throw PortraitVideoExportError.noImageAsset
+                        }
+
+                        let image = try await loadImageWithRetries(named: assetName)
+                        let frameCount = configuration.holdsHeartedPhotos && photo.isHearted
+                            ? heartedStillFrameCount
+                            : stillFrameCount
+                        try await retryPhotoOperation {
+                            try await appendStillPhoto(
+                                image,
+                                bannerText: bannerText,
+                                atFrameIndex: writtenFrameCount,
+                                frameCount: frameCount,
+                                outputFrameRate: outputFrameRate,
+                                input: segmentWriter.input,
+                                adaptor: segmentWriter.adaptor
+                            )
+                        }
+                        writtenFrameCount += frameCount
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    failedPhotos.append(
+                        PortraitVideoExportFailedPhoto(
+                            photo: photo,
+                            reason: failureReason(for: error)
+                        )
+                    )
+
+                    if segmentWriter.writer.status == .failed || segmentWriter.writer.status == .cancelled {
+                        throw PortraitVideoExportError.writerFailed(segmentWriter.writer.error?.localizedDescription ?? "Video export failed.")
+                    }
+                }
+                completedPhotoCount = index + 1
+                workEstimate.recordPhotoDuration(
+                    at: index,
+                    duration: Date().timeIntervalSince(photoStartedAt)
+                )
+
+                await progress(
+                    PortraitVideoExportProgress(
+                        completedPhotoCount: index + 1,
+                        totalPhotoCount: sortedPhotos.count,
+                        phase: .writing,
+                        completedWorkUnitCount: workEstimate.completedWorkUnitCount(through: index),
+                        totalWorkUnitCount: workEstimate.totalWorkUnitCount
+                    )
+                )
+
+                if completedPhotoCount < sortedPhotos.count,
+                   completedPhotoCount.isMultiple(of: Self.checkpointPhotoInterval) {
+                    let checkpoint = try await checkpointExport(
+                        segmentWriter: segmentWriter,
+                        writtenFrameCount: writtenFrameCount,
+                        sessionID: sessionID,
+                        createdAt: createdAt,
+                        configuration: configuration,
+                        photoIDs: photoIDs,
+                        completedPhotoCount: completedPhotoCount,
+                        segmentFileNames: segmentFileNames,
+                        failedPhotos: failedPhotos
+                    )
+                    segmentFileNames = checkpoint.segmentFileNames
+                    lastStoredCompletedPhotoCount = checkpoint.session.completedPhotoCount
+                    lastStoredFailedPhotos = checkpoint.session.failedPhotos
+                    hasOpenSegmentWriter = false
+                    segmentWriter = try makeSegmentWriter(
+                        in: pausedDirectoryURL,
+                        segmentIndex: segmentFileNames.count,
+                        quality: configuration.quality
+                    )
+                    hasOpenSegmentWriter = true
+                    writtenFrameCount = 0
+                }
+
+                if await shouldPause() {
+                    return try await pauseExport(
+                        segmentWriter: segmentWriter,
+                        writtenFrameCount: writtenFrameCount,
+                        sessionID: sessionID,
+                        createdAt: createdAt,
+                        configuration: configuration,
+                        photoIDs: photoIDs,
+                        completedPhotoCount: completedPhotoCount,
+                        segmentFileNames: segmentFileNames,
+                        failedPhotos: failedPhotos
+                    )
+                }
+            }
+
+            if writtenFrameCount > 0 {
+                segmentFileNames.append(try await finishSegment(segmentWriter))
+            } else {
+                cancelSegment(segmentWriter)
+            }
+            hasOpenSegmentWriter = false
+
+            guard !segmentFileNames.isEmpty else {
+                throw PortraitVideoExportError.noFramesWritten(failedPhotos)
+            }
+
+            await progress(
+                PortraitVideoExportProgress(
+                    completedPhotoCount: sortedPhotos.count,
+                    totalPhotoCount: sortedPhotos.count,
+                    phase: .finishing,
+                    completedWorkUnitCount: workEstimate.totalWorkUnitCount,
+                    totalWorkUnitCount: workEstimate.totalWorkUnitCount
+                )
+            )
+
+            workEstimate.saveCalibration()
+            let outputURL = try makeOutputURL()
+            let segmentURLs = segmentFileNames.map { pausedDirectoryURL.appendingPathComponent($0) }
+            try await moveOrConcatenateSegments(segmentURLs, to: outputURL)
+            discardPausedSession(
+                PortraitVideoExportPausedSession(
+                    id: sessionID,
+                    createdAt: createdAt,
+                    updatedAt: Date(),
+                    configuration: configuration,
+                    photoIDs: photoIDs,
+                    completedPhotoCount: completedPhotoCount,
+                    segmentFileNames: segmentFileNames,
+                    failedPhotos: failedPhotos
+                )
+            )
+            return .completed(PortraitVideoExportResult(videoURL: outputURL, failedPhotos: failedPhotos))
+        } catch is CancellationError {
+            if hasOpenSegmentWriter {
+                cancelSegment(segmentWriter)
+            }
+
+            if await shouldPause() {
+                return try storePausedSession(
+                    id: sessionID,
+                    createdAt: createdAt,
+                    configuration: configuration,
+                    photoIDs: photoIDs,
+                    completedPhotoCount: lastStoredCompletedPhotoCount,
+                    segmentFileNames: segmentFileNames,
+                    failedPhotos: lastStoredFailedPhotos
+                )
+            }
+
+            throw CancellationError()
+        } catch {
+            if hasOpenSegmentWriter {
+                cancelSegment(segmentWriter)
+            }
+            throw error
+        }
+    }
+
+    nonisolated private func compatiblePausedSession(
+        _ session: PortraitVideoExportPausedSession?,
+        photoIDs: [String],
+        configuration: PortraitVideoExportConfiguration
+    ) -> PortraitVideoExportPausedSession? {
+        guard let session,
+              session.photoIDs == photoIDs,
+              session.configuration == configuration,
+              session.completedPhotoCount <= photoIDs.count else {
+            return nil
+        }
+
+        let directoryURL = pausedExportDirectoryURL(for: session.id)
+        let segmentFilesExist = session.segmentFileNames.allSatisfy { fileName in
+            FileManager.default.fileExists(atPath: directoryURL.appendingPathComponent(fileName).path)
+        }
+        guard segmentFilesExist else { return nil }
+
+        return session
+    }
+
+    nonisolated private func pauseExport(
+        segmentWriter: PortraitVideoSegmentWriter,
+        writtenFrameCount: Int,
+        sessionID: UUID,
+        createdAt: Date,
+        configuration: PortraitVideoExportConfiguration,
+        photoIDs: [String],
+        completedPhotoCount: Int,
+        segmentFileNames: [String],
+        failedPhotos: [PortraitVideoExportFailedPhoto]
+    ) async throws -> PortraitVideoExportResponse {
+        var pausedSegmentFileNames = segmentFileNames
+
+        if writtenFrameCount > 0 {
+            pausedSegmentFileNames.append(try await finishSegment(segmentWriter))
+        } else {
+            cancelSegment(segmentWriter)
+        }
+
+        return try storePausedSession(
+            id: sessionID,
+            createdAt: createdAt,
+            configuration: configuration,
+            photoIDs: photoIDs,
+            completedPhotoCount: completedPhotoCount,
+            segmentFileNames: pausedSegmentFileNames,
+            failedPhotos: failedPhotos
+        )
+    }
+
+    nonisolated private func checkpointExport(
+        segmentWriter: PortraitVideoSegmentWriter,
+        writtenFrameCount: Int,
+        sessionID: UUID,
+        createdAt: Date,
+        configuration: PortraitVideoExportConfiguration,
+        photoIDs: [String],
+        completedPhotoCount: Int,
+        segmentFileNames: [String],
+        failedPhotos: [PortraitVideoExportFailedPhoto]
+    ) async throws -> (session: PortraitVideoExportPausedSession, segmentFileNames: [String]) {
+        var checkpointSegmentFileNames = segmentFileNames
+
+        if writtenFrameCount > 0 {
+            checkpointSegmentFileNames.append(try await finishSegment(segmentWriter))
+        } else {
+            cancelSegment(segmentWriter)
+        }
+
+        let session = try writePausedSession(
+            id: sessionID,
+            createdAt: createdAt,
+            configuration: configuration,
+            photoIDs: photoIDs,
+            completedPhotoCount: completedPhotoCount,
+            segmentFileNames: checkpointSegmentFileNames,
+            failedPhotos: failedPhotos
+        )
+        return (session, checkpointSegmentFileNames)
+    }
+
+    nonisolated private func storePausedSession(
+        id: UUID,
+        createdAt: Date,
+        configuration: PortraitVideoExportConfiguration,
+        photoIDs: [String],
+        completedPhotoCount: Int,
+        segmentFileNames: [String],
+        failedPhotos: [PortraitVideoExportFailedPhoto]
+    ) throws -> PortraitVideoExportResponse {
+        .paused(
+            try writePausedSession(
+                id: id,
+                createdAt: createdAt,
+                configuration: configuration,
+                photoIDs: photoIDs,
+                completedPhotoCount: completedPhotoCount,
+                segmentFileNames: segmentFileNames,
+                failedPhotos: failedPhotos
+            )
+        )
+    }
+
+    nonisolated private func writePausedSession(
+        id: UUID,
+        createdAt: Date,
+        configuration: PortraitVideoExportConfiguration,
+        photoIDs: [String],
+        completedPhotoCount: Int,
+        segmentFileNames: [String],
+        failedPhotos: [PortraitVideoExportFailedPhoto]
+    ) throws -> PortraitVideoExportPausedSession {
+        let session = PortraitVideoExportPausedSession(
+            id: id,
+            createdAt: createdAt,
+            updatedAt: Date(),
+            configuration: configuration,
+            photoIDs: photoIDs,
+            completedPhotoCount: completedPhotoCount,
+            segmentFileNames: segmentFileNames,
+            failedPhotos: failedPhotos
+        )
+        let data = try JSONEncoder().encode(session)
+        let defaults = UserDefaults.standard
+        defaults.set(data, forKey: Self.pausedSessionStagingStorageKey)
+        defaults.set(data, forKey: Self.pausedSessionStorageKey)
+        defaults.removeObject(forKey: Self.pausedSessionStagingStorageKey)
+        return session
+    }
+
+    nonisolated private func makeSegmentWriter(
+        in directoryURL: URL,
+        segmentIndex: Int,
+        quality: PortraitVideoExportQuality
+    ) throws -> PortraitVideoSegmentWriter {
+        let fileName = "segment_\(segmentIndex).mp4"
+        let fileURL = directoryURL.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            try FileManager.default.removeItem(at: fileURL)
+        }
+
+        let writer = try AVAssetWriter(outputURL: fileURL, fileType: .mp4)
         let width = Int(outputSize.width)
         let height = Int(outputSize.height)
-
         let input = AVAssetWriterInput(
             mediaType: .video,
             outputSettings: [
@@ -311,141 +758,85 @@ final class PortraitVideoExportService {
         }
         writer.add(input)
 
-        await progress(
-            PortraitVideoExportProgress(
-                completedPhotoCount: 0,
-                totalPhotoCount: sortedPhotos.count,
-                phase: .preparing,
-                completedWorkUnitCount: 0,
-                totalWorkUnitCount: workEstimate.totalWorkUnitCount
-            )
-        )
-
         guard writer.startWriting() else {
             throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Unable to start video writer.")
         }
         writer.startSession(atSourceTime: .zero)
 
-        do {
-            var failedPhotos: [PortraitVideoExportFailedPhoto] = []
-            var writtenFrameCount = 0
-            let outputFrameRate = max(clampedPicturesPerSecond(picturesPerSecond), 30)
-            let stillFrameCount = max(1, Int((Double(outputFrameRate) / Double(clampedPicturesPerSecond(picturesPerSecond))).rounded()))
-            let heartedStillFrameCount = outputFrameRate
+        return PortraitVideoSegmentWriter(
+            writer: writer,
+            input: input,
+            adaptor: adaptor,
+            fileURL: fileURL,
+            fileName: fileName
+        )
+    }
 
-            for (index, photo) in sortedPhotos.enumerated() {
-                try Task.checkCancellation()
+    nonisolated private func finishSegment(_ segmentWriter: PortraitVideoSegmentWriter) async throws -> String {
+        segmentWriter.input.markAsFinished()
+        await finishWriting(segmentWriter.writer)
 
-                await progress(
-                    PortraitVideoExportProgress(
-                        completedPhotoCount: index,
-                        totalPhotoCount: sortedPhotos.count,
-                        phase: .loading,
-                        completedWorkUnitCount: workEstimate.completedWorkUnitCount(before: index),
-                        totalWorkUnitCount: workEstimate.totalWorkUnitCount
-                    )
-                )
-
-                let photoStartedAt = Date()
-                do {
-                    let bannerText = await Self.makeBannerText(
-                        for: photo,
-                        includesDate: includesDateBanner,
-                        includesLocation: includesLocationBanner
-                    )
-
-                    if includesFavoriteLivePhotoVideo,
-                       photo.hasFavoriteLivePhotoVideo,
-                       let livePhotoVideoAssetName = photo.livePhotoVideoAssetName {
-                        let appendedFrameCount = try await appendLivePhotoVideoWithRetries(
-                            named: livePhotoVideoAssetName,
-                            bannerText: bannerText,
-                            atFrameIndex: writtenFrameCount,
-                            outputFrameRate: outputFrameRate,
-                            input: input,
-                            adaptor: adaptor
-                        )
-                        writtenFrameCount += appendedFrameCount
-                    } else {
-                        guard let assetName = photo.fullImageAssetName else {
-                            throw PortraitVideoExportError.noImageAsset
-                        }
-
-                        let image = try await loadImageWithRetries(named: assetName)
-                        let frameCount = holdsHeartedPhotos && photo.isHearted
-                            ? heartedStillFrameCount
-                            : stillFrameCount
-                        try await retryPhotoOperation {
-                            try await appendStillPhoto(
-                                image,
-                                bannerText: bannerText,
-                                atFrameIndex: writtenFrameCount,
-                                frameCount: frameCount,
-                                outputFrameRate: outputFrameRate,
-                                input: input,
-                                adaptor: adaptor
-                            )
-                        }
-                        writtenFrameCount += frameCount
-                    }
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    failedPhotos.append(
-                        PortraitVideoExportFailedPhoto(
-                            photo: photo,
-                            reason: failureReason(for: error)
-                        )
-                    )
-
-                    if writer.status == .failed || writer.status == .cancelled {
-                        throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Video export failed.")
-                    }
-                }
-                workEstimate.recordPhotoDuration(
-                    at: index,
-                    duration: Date().timeIntervalSince(photoStartedAt)
-                )
-
-                await progress(
-                    PortraitVideoExportProgress(
-                        completedPhotoCount: index + 1,
-                        totalPhotoCount: sortedPhotos.count,
-                        phase: .writing,
-                        completedWorkUnitCount: workEstimate.completedWorkUnitCount(through: index),
-                        totalWorkUnitCount: workEstimate.totalWorkUnitCount
-                    )
-                )
-            }
-
-            guard writtenFrameCount > 0 else {
-                throw PortraitVideoExportError.noFramesWritten(failedPhotos)
-            }
-
-            await progress(
-                PortraitVideoExportProgress(
-                    completedPhotoCount: sortedPhotos.count,
-                    totalPhotoCount: sortedPhotos.count,
-                    phase: .finishing,
-                    completedWorkUnitCount: workEstimate.totalWorkUnitCount,
-                    totalWorkUnitCount: workEstimate.totalWorkUnitCount
-                )
+        if segmentWriter.writer.status == .failed || segmentWriter.writer.status == .cancelled {
+            throw PortraitVideoExportError.writerFailed(
+                segmentWriter.writer.error?.localizedDescription ?? "Video export failed."
             )
+        }
 
-            input.markAsFinished()
-            await finishWriting(writer)
+        return segmentWriter.fileName
+    }
 
-            if writer.status == .failed || writer.status == .cancelled {
-                throw PortraitVideoExportError.writerFailed(writer.error?.localizedDescription ?? "Video export failed.")
+    nonisolated private func cancelSegment(_ segmentWriter: PortraitVideoSegmentWriter) {
+        segmentWriter.writer.cancelWriting()
+        try? FileManager.default.removeItem(at: segmentWriter.fileURL)
+    }
+
+    nonisolated private func moveOrConcatenateSegments(_ segmentURLs: [URL], to outputURL: URL) async throws {
+        guard let firstSegmentURL = segmentURLs.first else {
+            throw PortraitVideoExportError.writerFailed("Unable to finish video export.")
+        }
+
+        if segmentURLs.count == 1 {
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try FileManager.default.removeItem(at: outputURL)
+            }
+            try FileManager.default.moveItem(at: firstSegmentURL, to: outputURL)
+            return
+        }
+
+        let composition = AVMutableComposition()
+        guard let compositionTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw PortraitVideoExportError.writerFailed("Unable to combine paused video segments.")
+        }
+
+        var insertionTime = CMTime.zero
+        for segmentURL in segmentURLs {
+            let asset = AVURLAsset(url: segmentURL)
+            let duration = try await asset.load(.duration)
+            let tracks = try await asset.loadTracks(withMediaType: .video)
+            guard let track = tracks.first else {
+                throw PortraitVideoExportError.writerFailed("Unable to read a paused video segment.")
             }
 
-            workEstimate.saveCalibration()
-            return PortraitVideoExportResult(videoURL: outputURL, failedPhotos: failedPhotos)
-        } catch {
-            writer.cancelWriting()
-            try? FileManager.default.removeItem(at: outputURL)
-            throw error
+            try compositionTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: track,
+                at: insertionTime
+            )
+            insertionTime = insertionTime + duration
         }
+
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetPassthrough
+        ) else {
+            throw PortraitVideoExportError.writerFailed("Unable to combine paused video segments.")
+        }
+
+        exportSession.shouldOptimizeForNetworkUse = true
+        try await exportSession.export(to: outputURL, as: .mp4)
     }
 
     nonisolated private func makeWorkEstimate(
@@ -840,6 +1231,11 @@ final class PortraitVideoExportService {
     nonisolated private func temporaryExportDirectoryURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("portrait_video_exports", isDirectory: true)
+    }
+
+    nonisolated private func pausedExportDirectoryURL(for id: UUID) -> URL {
+        temporaryExportDirectoryURL()
+            .appendingPathComponent("paused_\(id.uuidString)", isDirectory: true)
     }
 
     nonisolated private static func dateBannerText(for date: Date) -> String {
