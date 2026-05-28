@@ -50,6 +50,8 @@ struct PhotoGridView: View {
     @State private var isDeletingSelection = false
     @State private var didSyncExifMetadata = false
     @State private var gridFilter: PhotoGridFilter = .all
+    @State private var isMapModeActive = false
+    @State private var isMapClusterOverlayPresented = false
     @State private var metadataSyncTask: Task<Void, Never>?
     private let enableScrollDateDebugLogs = false
 
@@ -99,6 +101,15 @@ struct PhotoGridView: View {
                             .padding(.top)
                         }
                         .padding(.horizontal, 28)
+                    } else if isMapModeActive {
+                        PhotoRouteMapView(
+                            gridItems: dataController.itemsSnapshot,
+                            changeToken: dataController.changeToken,
+                            isClusterOverlayPresented: $isMapClusterOverlayPresented,
+                            onOpenPhoto: openPhotoDetail
+                        )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .ignoresSafeArea(.container, edges: [.top, .bottom])
                     } else if dataController.isEmpty {
                         filteredEmptyState
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -155,15 +166,22 @@ struct PhotoGridView: View {
 
             }
             .overlay(alignment: .bottom) {
-                if dataController.hasAnyPhotos, !isSelectionMode {
+                if dataController.hasAnyPhotos, !isSelectionMode, !isMapModeActive {
                     floatingCaptureButton
                         .padding(.bottom, 20)
                 }
             }
             .overlay(alignment: .bottomLeading) {
-                if dataController.hasAnyPhotos, !isSelectionMode {
+                if dataController.hasAnyPhotos, !isSelectionMode, !(isMapModeActive && isMapClusterOverlayPresented) {
                     floatingFilterButton
                         .padding(.leading, 18)
+                        .padding(.bottom, 24)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if dataController.hasAnyPhotos, !isSelectionMode, !(isMapModeActive && isMapClusterOverlayPresented) {
+                    floatingMapButton
+                        .padding(.trailing, 18)
                         .padding(.bottom, 24)
                 }
             }
@@ -174,10 +192,10 @@ struct PhotoGridView: View {
                         .padding(.bottom, dataController.hasAnyPhotos ? 132 : 24)
                 }
             }
-            .navigationTitle("Work in Progress")
+            .navigationTitle(isMapModeActive ? "" : "Work in Progress")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if !dataController.isEmpty {
+                    if !dataController.isEmpty, !isMapModeActive {
                         Button(isSelectionMode ? "Cancel" : "Select") {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 isSelectionMode.toggle()
@@ -260,11 +278,13 @@ struct PhotoGridView: View {
                             Text("This action cannot be undone.")
                         }
                     } else {
-                        Button(action: openPortraitVideoExporter) {
-                            Image(systemName: "film.stack")
-                                .font(.title3)
+                        if !isMapModeActive {
+                            Button(action: openPortraitVideoExporter) {
+                                Image(systemName: "film.stack")
+                                    .font(.title3)
+                            }
+                            .disabled(!dataController.hasAnyPhotos || photoImporter.isImporting)
                         }
-                        .disabled(!dataController.hasAnyPhotos || photoImporter.isImporting)
 
                         Button(action: { showingNotificationSettings = true }) {
                             Image(systemName: "gearshape")
@@ -319,6 +339,7 @@ struct PhotoGridView: View {
             selectedPhotoIDs.removeAll()
             pendingDetailDismissObjectID = nil
             gridCenteringRequest = nil
+            isMapClusterOverlayPresented = false
             dataController.setFilter(newValue)
         }
         .onChange(of: dataController.changeToken) { _, _ in
@@ -386,6 +407,10 @@ struct PhotoGridView: View {
 
     private func closePhotoDetail(_ objectID: NSManagedObjectID?) {
         guard photoDetailPresentation != nil else { return }
+        guard !isMapModeActive else {
+            finalizePhotoDetailDismissal()
+            return
+        }
         guard let objectID else {
             finalizePhotoDetailDismissal()
             return
@@ -498,6 +523,21 @@ struct PhotoGridView: View {
         .accessibilityIdentifier("gridFilterButton")
     }
 
+    private var floatingMapButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                isMapModeActive.toggle()
+                isMapClusterOverlayPresented = false
+            }
+        } label: {
+            mapButtonLabel
+        }
+        .contentShape(.circle)
+        .buttonStyle(floatingCaptureButtonStyle)
+        .accessibilityLabel(isMapModeActive ? "Show Photo Grid" : "Show Photo Map")
+        .accessibilityIdentifier("gridMapButton")
+    }
+
     @ViewBuilder
     private func filterMenuSymbol(for filter: PhotoGridFilter) -> some View {
         if filter == .favoriteLivePhotos {
@@ -546,6 +586,37 @@ struct PhotoGridView: View {
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(filterButtonForegroundStyle)
         }
+    }
+
+    @ViewBuilder
+    private var mapButtonLabel: some View {
+        if #available(iOS 26.0, *) {
+            mapButtonSymbol
+                .frame(width: 42, height: 42)
+                .background(
+                    Circle()
+                        .fill(.clear)
+                )
+                .shadow(color: .black.opacity(0.1), radius: 12, y: 7)
+        } else {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+
+                Circle()
+                    .stroke(Color.white.opacity(0.5), lineWidth: 1)
+
+                mapButtonSymbol
+            }
+            .frame(width: 42, height: 42)
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 7)
+        }
+    }
+
+    private var mapButtonSymbol: some View {
+        Image(systemName: isMapModeActive ? "square.grid.3x3.fill" : "map.fill")
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.primary)
     }
 
     private var filterButtonForegroundStyle: Color {
