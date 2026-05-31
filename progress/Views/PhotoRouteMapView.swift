@@ -36,6 +36,9 @@ struct PhotoRouteMapView: View {
     let gridItems: [UIKitPhotoGridItem]
     let changeToken: Int
     @Binding var isClusterOverlayPresented: Bool
+    @Binding var hasInitializedMapCameraInAppLifecycle: Bool
+    @Binding var mapCameraSnapshot: MapCamera?
+    @Binding var mapVisibleRegionSnapshot: MKCoordinateRegion?
     let onOpenPhoto: (NSManagedObjectID) -> Void
 
     @Namespace private var mapScope
@@ -126,6 +129,7 @@ struct PhotoRouteMapView: View {
             visibleRegion = context.region
             updateMapHeading(context.camera.heading)
             latestMapCamera = context.camera
+            saveCameraSnapshot(camera: context.camera, region: context.region)
             let nextClusterCellSize = clusterCellMapPointSize(region: context.region, viewSize: size)
             let shouldAnimateClusterChange = renderedClusterCellMapPointSize.map {
                 abs(log2(nextClusterCellSize / max($0, 1))) > 0.001
@@ -139,10 +143,9 @@ struct PhotoRouteMapView: View {
         }
         .onChange(of: changeToken) { _, _ in
             rebuildMapItems()
-            didSetInitialCamera = false
             clusterPresentation = nil
             isClusterOverlayPresented = false
-            setInitialCameraIfNeeded(size: size)
+            updateAnnotationsAfterMapItemsChanged(size: size)
         }
     }
 
@@ -363,10 +366,13 @@ struct PhotoRouteMapView: View {
             showClusterGrid(for: annotation)
         } else {
             let region = zoomRegion(for: annotation)
+            let nextCamera = camera(for: region, heading: mapHeading)
             withAnimation(.easeInOut(duration: 0.28)) {
-                cameraPosition = .camera(camera(for: region, heading: mapHeading))
+                cameraPosition = .camera(nextCamera)
             }
             visibleRegion = region
+            latestMapCamera = nextCamera
+            saveCameraSnapshot(camera: nextCamera, region: region)
         }
     }
 
@@ -565,6 +571,46 @@ struct PhotoRouteMapView: View {
         )
     }
 
+    private func saveCameraSnapshot(camera: MapCamera, region: MKCoordinateRegion) {
+        mapCameraSnapshot = camera
+        mapVisibleRegionSnapshot = region
+        hasInitializedMapCameraInAppLifecycle = true
+    }
+
+    private func restoreSavedCameraIfPossible(size: CGSize) -> Bool {
+        guard hasInitializedMapCameraInAppLifecycle,
+              let savedCamera = mapCameraSnapshot,
+              let savedRegion = mapVisibleRegionSnapshot else {
+            return false
+        }
+
+        visibleRegion = savedRegion
+        latestMapCamera = savedCamera
+        updateMapHeading(savedCamera.heading)
+        renderedClusterCellMapPointSize = clusterCellMapPointSize(region: savedRegion, viewSize: size)
+        cameraPosition = .camera(savedCamera)
+        updateRenderedAnnotations(size: size, region: savedRegion, animated: false)
+        return true
+    }
+
+    private func updateAnnotationsAfterMapItemsChanged(size: CGSize) {
+        guard !mapItems.isEmpty else {
+            renderedAnnotations = []
+            renderedClusterCellMapPointSize = nil
+            return
+        }
+
+        if let visibleRegion {
+            renderedClusterCellMapPointSize = clusterCellMapPointSize(region: visibleRegion, viewSize: size)
+            updateRenderedAnnotations(size: size, region: visibleRegion, animated: false)
+        } else if restoreSavedCameraIfPossible(size: size) {
+            return
+        } else {
+            didSetInitialCamera = false
+            setInitialCameraIfNeeded(size: size)
+        }
+    }
+
     private func resetMapHeading() {
         let camera = latestMapCamera ?? MapCamera(
             centerCoordinate: visibleRegion?.center ?? CLLocationCoordinate2D(latitude: 0, longitude: 0),
@@ -573,15 +619,18 @@ struct PhotoRouteMapView: View {
             pitch: 0
         )
         withAnimation(.easeInOut(duration: 0.24)) {
-            cameraPosition = .camera(
-                MapCamera(
-                    centerCoordinate: camera.centerCoordinate,
-                    distance: camera.distance,
-                    heading: 0,
-                    pitch: camera.pitch
-                )
+            let resetCamera = MapCamera(
+                centerCoordinate: camera.centerCoordinate,
+                distance: camera.distance,
+                heading: 0,
+                pitch: camera.pitch
             )
+            cameraPosition = .camera(resetCamera)
+            latestMapCamera = resetCamera
             mapHeading = 0
+            if let visibleRegion {
+                saveCameraSnapshot(camera: resetCamera, region: visibleRegion)
+            }
         }
     }
 
@@ -635,10 +684,17 @@ struct PhotoRouteMapView: View {
         }
 
         didSetInitialCamera = true
+        if restoreSavedCameraIfPossible(size: size) {
+            return
+        }
+
         guard let region = initialCameraRegion() else { return }
+        let initialCamera = camera(for: region, heading: 0)
         visibleRegion = region
         renderedClusterCellMapPointSize = clusterCellMapPointSize(region: region, viewSize: size)
-        cameraPosition = .camera(camera(for: region, heading: mapHeading))
+        latestMapCamera = initialCamera
+        cameraPosition = .camera(initialCamera)
+        saveCameraSnapshot(camera: initialCamera, region: region)
         updateRenderedAnnotations(size: size, region: region, animated: false)
     }
 

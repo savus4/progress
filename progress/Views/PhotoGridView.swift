@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreData
 import Combine
+import MapKit
 import UIKit
 
 private struct PhotoDetailPresentation: Identifiable {
@@ -52,6 +53,9 @@ struct PhotoGridView: View {
     @State private var gridFilter: PhotoGridFilter = .all
     @State private var isMapModeActive = false
     @State private var isMapClusterOverlayPresented = false
+    @State private var hasInitializedMapCameraInAppLifecycle = false
+    @State private var mapCameraSnapshot: MapCamera?
+    @State private var mapVisibleRegionSnapshot: MKCoordinateRegion?
     @State private var metadataSyncTask: Task<Void, Never>?
     private let enableScrollDateDebugLogs = false
 
@@ -106,6 +110,9 @@ struct PhotoGridView: View {
                             gridItems: dataController.itemsSnapshot,
                             changeToken: dataController.changeToken,
                             isClusterOverlayPresented: $isMapClusterOverlayPresented,
+                            hasInitializedMapCameraInAppLifecycle: $hasInitializedMapCameraInAppLifecycle,
+                            mapCameraSnapshot: $mapCameraSnapshot,
+                            mapVisibleRegionSnapshot: $mapVisibleRegionSnapshot,
                             onOpenPhoto: openPhotoDetail
                         )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
