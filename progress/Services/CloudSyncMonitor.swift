@@ -44,8 +44,10 @@ final class CloudSyncMonitor: ObservableObject {
     @Published private(set) var downloadingAssetCount = 0
     @Published private(set) var isMetadataImportActive = false
     @Published private(set) var isUploadProcessorActive = false
+    @Published private(set) var isICloudUnavailable = false
 
     private var observer: NSObjectProtocol?
+    private var iCloudAvailabilityObserver: NSObjectProtocol?
     private var uploadObserver: NSObjectProtocol?
     private var uploadProcessingObserver: NSObjectProtocol?
     private var contextSaveObserver: NSObjectProtocol?
@@ -69,6 +71,16 @@ final class CloudSyncMonitor: ObservableObject {
             }
             Task { @MainActor [weak self] in
                 self?.handle(event: event)
+            }
+        }
+
+        iCloudAvailabilityObserver = NotificationCenter.default.addObserver(
+            forName: ICloudAvailabilityMonitor.availabilityDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateICloudAvailability()
             }
         }
 
@@ -135,6 +147,7 @@ final class CloudSyncMonitor: ObservableObject {
         }
 
         Task { @MainActor [weak self] in
+            self?.updateICloudAvailability()
             self?.scheduleUploadStatusRefresh(delay: .zero)
         }
     }
@@ -144,6 +157,9 @@ final class CloudSyncMonitor: ObservableObject {
         metadataImportQuietTask?.cancel()
         if let observer {
             NotificationCenter.default.removeObserver(observer)
+        }
+        if let iCloudAvailabilityObserver {
+            NotificationCenter.default.removeObserver(iCloudAvailabilityObserver)
         }
         if let uploadObserver {
             NotificationCenter.default.removeObserver(uploadObserver)
@@ -163,6 +179,10 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var statusSymbolName: String {
+        if isICloudUnavailable {
+            return "internaldrive"
+        }
+
         if pausedUploadCount > 0 {
             return "exclamationmark.icloud"
         }
@@ -187,6 +207,10 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var isFailing: Bool {
+        if isICloudUnavailable {
+            return false
+        }
+
         if pausedUploadCount > 0 {
             return true
         }
@@ -197,7 +221,10 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var retryableUploadCount: Int {
-        failedUploadCount + pausedUploadCount
+        if isICloudUnavailable {
+            return 0
+        }
+        return failedUploadCount + pausedUploadCount
     }
 
     var hasRetryableUploads: Bool {
@@ -205,10 +232,17 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var automaticOutstandingUploadCount: Int {
-        pendingUploadCount + uploadingAssetCount + failedUploadCount
+        if isICloudUnavailable {
+            return 0
+        }
+        return pendingUploadCount + uploadingAssetCount + failedUploadCount
     }
 
     var statusTitle: String {
+        if isICloudUnavailable {
+            return "Stored on this device"
+        }
+
         if isRunningMigration {
             return "Preparing older photos for iCloud sync"
         }
@@ -249,6 +283,10 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var statusDetail: String {
+        if isICloudUnavailable {
+            return "Full-resolution photos are included in this device backup. iCloud sync resumes automatically when enabled."
+        }
+
         if isRunningMigration {
             return pendingMigrationCount > 0
                 ? "\(pendingMigrationCount) older photo\(pendingMigrationCount == 1 ? "" : "s") left to backfill."
@@ -382,6 +420,7 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     func refreshUploadStatus() async {
+        updateICloudAvailability()
         let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
 
         do {
@@ -475,7 +514,10 @@ final class CloudSyncMonitor: ObservableObject {
 
         if event.type == .export, let endDate = event.endDate {
             if let error = event.error {
-                if !isSystemDeferredCloudKitError(error) {
+                if ICloudAvailabilityMonitor.isUnavailableCloudKitError(error) {
+                    ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+                    resolveExportWaiters(completedAt: endDate, result: .timedOut)
+                } else if !isSystemDeferredCloudKitError(error) {
                     resolveExportWaiters(completedAt: endDate, result: .failed(error.localizedDescription))
                 }
             } else {
@@ -486,7 +528,11 @@ final class CloudSyncMonitor: ObservableObject {
         if let endDate = event.endDate {
             if let error = event.error {
                 logCloudKitEventError(error, eventType: event.type)
-                if isSystemDeferredCloudKitError(error) {
+                if ICloudAvailabilityMonitor.isUnavailableCloudKitError(error) {
+                    ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+                    syncState = .idle
+                    isMetadataImportActive = false
+                } else if isSystemDeferredCloudKitError(error) {
                     syncState = .idle
                 } else {
                     syncState = .failed(error.localizedDescription)
@@ -497,6 +543,18 @@ final class CloudSyncMonitor: ObservableObject {
             }
         } else {
             syncState = .syncing(event.type)
+        }
+    }
+
+    private func updateICloudAvailability() {
+        isICloudUnavailable = ICloudAvailabilityMonitor.shared.isLocalModeActive
+        if isICloudUnavailable {
+            if case .failed = syncState {
+                syncState = .idle
+            }
+            isMetadataImportActive = false
+            downloadingAssetCount = 0
+            activeDownloadAssetNames.removeAll()
         }
     }
 

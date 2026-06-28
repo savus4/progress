@@ -1,4 +1,5 @@
 import AVFoundation
+import CloudKit
 import CoreData
 import Foundation
 import Testing
@@ -279,6 +280,40 @@ struct ProgressCoreFunctionalityTests {
         #expect(photo.captureDate != nil)
         #expect(photo.thumbnailData != nil)
         #expect(FileManager.default.fileExists(atPath: assetURL.path))
+    }
+
+    @MainActor
+    @Test("PhotoStorageService keeps local-mode originals in device backup")
+    func photoStorageLocalModeOriginalsAreBackupIncluded() async throws {
+        ICloudAvailabilityMonitor.shared.setStateForTesting(.unavailable("Testing local mode"))
+        defer {
+            ICloudAvailabilityMonitor.shared.setStateForTesting(.available)
+            ICloudAvailabilityMonitor.shared.setStateForTesting(nil)
+        }
+
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .orange)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let objectID = try await PhotoStorageService.shared.saveImportedPhoto(
+            imageData: imageData,
+            context: context,
+            enqueuesPendingUpload: false
+        )
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
+        let assetName = try #require(photo.fullImageAssetName)
+        let assetURL = try #require(CloudKitService.shared.stagedAssetURL(named: assetName))
+        defer { CloudKitService.shared.deleteAsset(named: assetName) }
+
+        let values = try assetURL.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        #expect(values.isExcludedFromBackup == false)
+    }
+
+    @Test("ICloudAvailabilityMonitor classifies disabled iCloud errors")
+    func iCloudAvailabilityClassifiesDisabledErrors() {
+        #expect(ICloudAvailabilityMonitor.isUnavailableCloudKitError(CKError(.notAuthenticated)))
+        #expect(ICloudAvailabilityMonitor.isUnavailableCloudKitError(CKError(.permissionFailure)))
+        #expect(!ICloudAvailabilityMonitor.isUnavailableCloudKitError(CKError(.quotaExceeded)))
     }
 
     @MainActor

@@ -3,6 +3,7 @@ import CoreData
 
 struct SettingsMaintenanceView: View {
     @Environment(\.managedObjectContext) private var viewContext
+    @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
 
     @State private var localAssetStorageUsage = LocalPhotoAssetStorageUsage.empty
     @State private var isLoadingLocalAssetStorageUsage = false
@@ -24,13 +25,15 @@ struct SettingsMaintenanceView: View {
             Section("Storage") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("System CloudKit Cache")
+                        Text(cloudSyncMonitor.isICloudUnavailable ? "Local Originals" : "System CloudKit Cache")
                         Spacer()
-                        Text(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes))
+                        Text(PhotoAssetCacheSettings.formattedByteCount(primaryStorageUsageBytes))
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("Fetched originals live in CloudKit's system-managed cache. Pending Uploads stay local until iCloud has a copy.")
+                    Text(cloudSyncMonitor.isICloudUnavailable
+                         ? "Full-resolution originals stay on this device and are included in device backup until iCloud sync resumes."
+                         : "Fetched originals live in CloudKit's system-managed cache. Pending Uploads stay local until iCloud has a copy.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -48,7 +51,9 @@ struct SettingsMaintenanceView: View {
                 }
 
                 if localAssetStorageUsage.pendingUploadBytes > 0 {
-                    Text("Pending uploads use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) until iCloud has a copy.")
+                    Text(cloudSyncMonitor.isICloudUnavailable
+                         ? "Local originals use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) and are included in device backup."
+                         : "Pending uploads use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) until iCloud has a copy.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -169,12 +174,20 @@ struct SettingsMaintenanceView: View {
 
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently delete every photo from Work in Progress on this device and remove the matching records and stored assets from iCloud.")
+            Text(cloudSyncMonitor.isICloudUnavailable
+                 ? "This will permanently delete every photo from Work in Progress on this device. iCloud cleanup will resume automatically when iCloud is enabled."
+                 : "This will permanently delete every photo from Work in Progress on this device and remove the matching records and stored assets from iCloud.")
         }
     }
 
     private var storageUsageDescription: String {
-        PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.cachedFullResolutionBytes)
+        PhotoAssetCacheSettings.formattedByteCount(primaryStorageUsageBytes)
+    }
+
+    private var primaryStorageUsageBytes: Int {
+        cloudSyncMonitor.isICloudUnavailable
+            ? localAssetStorageUsage.pendingUploadBytes
+            : localAssetStorageUsage.cachedFullResolutionBytes
     }
 
     private var deleteRangeStartBinding: Binding<Date> {
@@ -323,7 +336,9 @@ struct SettingsMaintenanceView: View {
                     context: viewContext,
                     ignoreGracePeriod: true
                 )
-                try await PersistenceController.shared.rebuildPersistentStore()
+                if result.shouldRebuildPersistentStore {
+                    try await PersistenceController.shared.rebuildPersistentStore()
+                }
                 deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
@@ -347,6 +362,10 @@ struct SettingsMaintenanceView: View {
 
         guard !result.isCloudDeletionComplete else {
             return "\(photoCountDescription) from this device and iCloud."
+        }
+
+        if result.isDeferredUntilICloudAvailable {
+            return "\(photoCountDescription) from this device. iCloud cleanup will resume automatically when iCloud is enabled."
         }
 
         switch result.cloudMetadataDeletionState {

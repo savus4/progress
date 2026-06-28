@@ -243,6 +243,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let dataController: PhotoGridDataController
     let changeToken: Int
     let centeringRequest: PhotoGridCenteringRequest?
+    let showsUploadStatus: Bool
     @Binding var isSelectionMode: Bool
     @Binding var selectedPhotoIDs: Set<NSManagedObjectID>
     let onOpenPhoto: (NSManagedObjectID, Int, CGRect) -> Void
@@ -269,6 +270,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             items: dataController.itemsSnapshot,
             changeToken: changeToken,
             centeringRequest: centeringRequest,
+            showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
             selectedPhotoIDs: selectedPhotoIDs
         )
@@ -389,6 +391,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var dataSource: UICollectionViewDiffableDataSource<UIKitPhotoGridSection, NSManagedObjectID>!
     private var items: [UIKitPhotoGridItem] = []
     private var itemsByID: [NSManagedObjectID: UIKitPhotoGridItem] = [:]
+    private var showsUploadStatus = true
     private var isSelectionMode = false
     private var selectedPhotoIDs: Set<NSManagedObjectID> = []
     private var lastAppliedSelectedPhotoIDs: Set<NSManagedObjectID> = []
@@ -564,12 +567,15 @@ final class PhotoGridCollectionViewController: UIViewController {
         items: [UIKitPhotoGridItem],
         changeToken: Int,
         centeringRequest: PhotoGridCenteringRequest?,
+        showsUploadStatus: Bool,
         isSelectionMode: Bool,
         selectedPhotoIDs: Set<NSManagedObjectID>
     ) {
         let didChangeItems = currentChangeToken != changeToken
         let didChangeSelectionMode = self.isSelectionMode != isSelectionMode
+        let didChangeUploadStatusVisibility = self.showsUploadStatus != showsUploadStatus
 
+        self.showsUploadStatus = showsUploadStatus
         self.isSelectionMode = isSelectionMode
         self.selectedPhotoIDs = selectedPhotoIDs
         if didChangeSelectionMode, !isSelectionMode {
@@ -592,7 +598,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
 
         synchronizeSelection(animated: false)
-        if didChangeItems || didChangeSelectionMode {
+        if didChangeItems || didChangeSelectionMode || didChangeUploadStatusVisibility {
             refreshVisibleCells()
         }
         handleCenteringRequestIfNeeded(centeringRequest)
@@ -605,6 +611,7 @@ final class PhotoGridCollectionViewController: UIViewController {
             guard let self, indexPath.item < self.items.count, let item = self.itemsByID[objectID] else { return }
             cell.configure(
                 with: item,
+                showsUploadStatus: self.showsUploadStatus,
                 isSelectionMode: self.isSelectionMode,
                 isSelected: self.selectedPhotoIDs.contains(objectID)
             )
@@ -655,6 +662,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         let item = items[indexPath.item]
         cell.configure(
             with: item,
+            showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
             isSelected: selectedPhotoIDs.contains(item.objectID)
         )
@@ -1225,6 +1233,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             if let cell = collectionView.cellForItem(at: indexPath) as? PhotoGridCollectionViewCell {
                 cell.configure(
                     with: items[indexPath.item],
+                    showsUploadStatus: showsUploadStatus,
                     isSelectionMode: true,
                     isSelected: true
                 )
@@ -1245,6 +1254,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
         if let cell = collectionView.cellForItem(at: indexPath) as? PhotoGridCollectionViewCell {
             cell.configure(
                 with: items[indexPath.item],
+                showsUploadStatus: showsUploadStatus,
                 isSelectionMode: true,
                 isSelected: false
             )
@@ -1359,6 +1369,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
         let item = items[indexPath.item]
         gridCell.configure(
             with: item,
+            showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
             isSelected: selectedPhotoIDs.contains(item.objectID)
         )
@@ -1475,6 +1486,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
 
     func configure(
         with item: UIKitPhotoGridItem,
+        showsUploadStatus: Bool,
         isSelectionMode: Bool,
         isSelected: Bool
     ) {
@@ -1492,14 +1504,18 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         livePhotoFavoriteBadgeImageView.isHidden = !item.isFavoriteLivePhoto
 
         let badge: (text: String, systemName: String, backgroundColor: UIColor, foregroundColor: UIColor)?
-        switch item.uploadState {
-        case .pending, .uploading:
-            badge = ("Uploading", "icloud.and.arrow.up", UIColor.black.withAlphaComponent(0.62), .white)
-        case .failed:
-            badge = ("Retrying later", "exclamationmark.icloud", UIColor.systemOrange.withAlphaComponent(0.9), .black)
-        case .paused:
-            badge = ("Upload paused", "pause.circle", UIColor.systemRed.withAlphaComponent(0.9), .white)
-        case .uploaded:
+        if showsUploadStatus {
+            switch item.uploadState {
+            case .pending, .uploading:
+                badge = ("Uploading", "icloud.and.arrow.up", UIColor.black.withAlphaComponent(0.62), .white)
+            case .failed:
+                badge = ("Retrying later", "exclamationmark.icloud", UIColor.systemOrange.withAlphaComponent(0.9), .black)
+            case .paused:
+                badge = ("Upload paused", "pause.circle", UIColor.systemRed.withAlphaComponent(0.9), .white)
+            case .uploaded:
+                badge = nil
+            }
+        } else {
             badge = nil
         }
 

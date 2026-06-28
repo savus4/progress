@@ -154,7 +154,18 @@ final class CloudKitService {
         }
 
         let recordID = CKRecord.ID(recordName: assetName)
-        let results = try await privateDatabase.records(for: [recordID], desiredKeys: nil)
+        let results: [CKRecord.ID: Result<CKRecord, Error>]
+        do {
+            results = try await privateDatabase.records(for: [recordID], desiredKeys: nil)
+        } catch {
+            if reportsTransferEvents {
+                postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
+            }
+            await MainActor.run {
+                ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+            }
+            throw cloudKitError(for: error)
+        }
         guard let result = results[recordID] else {
             postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
             throw CloudKitError.assetNotFound
@@ -167,6 +178,9 @@ final class CloudKitService {
         case .failure(let error):
             if reportsTransferEvents {
                 postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
+            }
+            await MainActor.run {
+                ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
             }
             throw cloudKitError(for: error)
         }
@@ -194,20 +208,26 @@ final class CloudKitService {
         )
     }
 
-    func stageAssetData(_ data: Data, named assetName: String) throws -> URL {
+    func stageAssetData(_ data: Data, named assetName: String, includesInBackup: Bool = false) throws -> URL {
         let fileURL = stagingFileURL(for: assetName)
         try ensureDirectoryExists(at: stagingDirectoryURL)
         try data.write(to: fileURL, options: .atomic)
+        if includesInBackup {
+            try markIncludedInBackup(fileURL)
+        }
         return fileURL
     }
 
-    func stageAssetFile(from sourceURL: URL, named assetName: String) throws -> URL {
+    func stageAssetFile(from sourceURL: URL, named assetName: String, includesInBackup: Bool = false) throws -> URL {
         let destinationURL = stagingFileURL(for: assetName)
         try ensureDirectoryExists(at: stagingDirectoryURL)
         if fileManager.fileExists(atPath: destinationURL.path) {
             try fileManager.removeItem(at: destinationURL)
         }
         try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        if includesInBackup {
+            try markIncludedInBackup(destinationURL)
+        }
         return destinationURL
     }
 
@@ -263,6 +283,9 @@ final class CloudKitService {
                 return true
             case .failure(let error):
                 let normalizedError = cloudKitError(for: error)
+                await MainActor.run {
+                    ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+                }
                 if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
                     return false
                 }
@@ -270,6 +293,9 @@ final class CloudKitService {
             }
         } catch {
             let normalizedError = cloudKitError(for: error)
+            await MainActor.run {
+                ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+            }
             if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
                 return false
             }
@@ -306,6 +332,9 @@ final class CloudKitService {
 
             if case .failure(let error) = results.deleteResults[recordID] {
                 let normalizedError = cloudKitError(for: error)
+                await MainActor.run {
+                    ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+                }
                 if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
                     return
                 }
@@ -313,6 +342,9 @@ final class CloudKitService {
             }
         } catch {
             let normalizedError = cloudKitError(for: error)
+            await MainActor.run {
+                ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+            }
             if let cloudKitError = normalizedError as? CloudKitError, cloudKitError == .assetNotFound {
                 return
             }
@@ -372,6 +404,9 @@ final class CloudKitService {
             return outcomes
         } catch {
             let normalizedError = cloudKitError(for: error)
+            await MainActor.run {
+                ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+            }
 
             if let ckError = normalizedError as? CKError,
                let partialErrors = ckError.partialErrorsByItemID {
@@ -414,6 +449,30 @@ final class CloudKitService {
     func storedPersistentAssetNames() -> Set<String> {
         let stagedNames = (try? fileManager.contentsOfDirectory(atPath: stagingDirectoryURL.path)) ?? []
         return Set(stagedNames)
+    }
+
+    func markStagedAssetsIncludedInBackup() {
+        do {
+            try ensureDirectoryExists(at: stagingDirectoryURL)
+            var directoryURL = stagingDirectoryURL
+            var directoryValues = URLResourceValues()
+            directoryValues.isExcludedFromBackup = false
+            try directoryURL.setResourceValues(directoryValues)
+
+            let stagedURLs = try fileManager.contentsOfDirectory(
+                at: stagingDirectoryURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            for stagedURL in stagedURLs {
+                let values = try? stagedURL.resourceValues(forKeys: [.isRegularFileKey])
+                guard values?.isRegularFile == true else { continue }
+                try markIncludedInBackup(stagedURL)
+            }
+        } catch {
+            logger.error("mark-staged-assets-backup-included-failed \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func deleteAllLocalAssets() {
@@ -500,10 +559,16 @@ final class CloudKitService {
 
             if case .failure(let error) = results.saveResults[recordID] {
                 logger.error("save-asset-file-result-failed name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) error=\(Self.describe(error), privacy: .public)")
+                await MainActor.run {
+                    ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+                }
                 throw cloudKitError(for: error)
             }
         } catch {
             logger.error("save-asset-file-threw name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) error=\(Self.describe(error), privacy: .public)")
+            await MainActor.run {
+                ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+            }
             throw cloudKitError(for: error)
         }
     }
@@ -719,6 +784,18 @@ final class CloudKitService {
         if !fileManager.fileExists(atPath: directoryURL.path) {
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         }
+    }
+
+    private func markIncludedInBackup(_ fileURL: URL) throws {
+        var directoryURL = fileURL.deletingLastPathComponent()
+        var directoryValues = URLResourceValues()
+        directoryValues.isExcludedFromBackup = false
+        try directoryURL.setResourceValues(directoryValues)
+
+        var fileURL = fileURL
+        var fileValues = URLResourceValues()
+        fileValues.isExcludedFromBackup = false
+        try fileURL.setResourceValues(fileValues)
     }
 }
 

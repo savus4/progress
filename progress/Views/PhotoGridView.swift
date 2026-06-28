@@ -126,6 +126,7 @@ struct PhotoGridView: View {
                             dataController: dataController,
                             changeToken: dataController.changeToken,
                             centeringRequest: gridCenteringRequest,
+                            showsUploadStatus: !cloudSyncMonitor.isICloudUnavailable,
                             isSelectionMode: $isSelectionMode,
                             selectedPhotoIDs: $selectedPhotoIDs,
                             onOpenPhoto: { objectID, _, _ in

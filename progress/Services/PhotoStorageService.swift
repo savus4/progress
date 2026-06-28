@@ -36,6 +36,8 @@ struct DeleteAllPhotosResult: Sendable {
     let deletedCount: Int
     let cloudMetadataDeletionState: CloudMetadataDeletionState
     let pendingRemoteAssetDeletionCount: Int
+    let shouldRebuildPersistentStore: Bool
+    let isDeferredUntilICloudAvailable: Bool
 
     var isCloudDeletionComplete: Bool {
         if pendingRemoteAssetDeletionCount > 0 {
@@ -121,14 +123,14 @@ final class PhotoStorageService {
 
         let extractedMetadata = exifMetadata(from: sourceImageData)
         let resolvedLocation = extractedMetadata?.location ?? location
-        let stillAssetName = try stageStillAsset(
+        let stillAssetName = try await stageStillAsset(
             data: sourceImageData,
             photoID: photoID,
             role: .still
         )
         let livePhotoVideoAssetName: String?
         if let livePhotoVideoURL {
-            livePhotoVideoAssetName = try stageVideoAsset(
+            livePhotoVideoAssetName = try await stageVideoAsset(
                 from: livePhotoVideoURL,
                 photoID: photoID,
                 role: .livePhotoVideo
@@ -635,12 +637,41 @@ final class PhotoStorageService {
             return DeleteAllPhotosResult(
                 deletedCount: 0,
                 cloudMetadataDeletionState: .confirmed,
-                pendingRemoteAssetDeletionCount: 0
+                pendingRemoteAssetDeletionCount: 0,
+                shouldRebuildPersistentStore: true,
+                isDeferredUntilICloudAvailable: false
             )
         }
 
         await PhotoUploadService.shared.cancelPendingWork()
         let uploadsDrainedBeforeDeletion = await PhotoUploadService.shared.waitUntilIdle(timeout: .seconds(30))
+
+        if ICloudAvailabilityMonitor.shared.isLocalModeActive {
+            let (assetNames, deletedCount) = try await context.perform {
+                let request = DailyPhoto.fetchRequest()
+                let photos = try context.fetch(request)
+                guard !photos.isEmpty else { return (Set<String>(), 0) }
+
+                let assetNames = Set(photos.flatMap(self.assetNames(for:)))
+                for photo in photos {
+                    context.delete(photo)
+                }
+
+                try context.save()
+                return (assetNames, photos.count)
+            }
+
+            await deleteAssets(named: assetNames)
+
+            return DeleteAllPhotosResult(
+                deletedCount: deletedCount,
+                cloudMetadataDeletionState: .pending,
+                pendingRemoteAssetDeletionCount: assetNames.count,
+                shouldRebuildPersistentStore: false,
+                isDeferredUntilICloudAvailable: true
+            )
+        }
+
         let exportWaitTask = Task { @MainActor in
             await CloudSyncMonitor.shared.waitForNextExportCompletion(timeout: .seconds(30))
         }
@@ -681,7 +712,9 @@ final class PhotoStorageService {
         return DeleteAllPhotosResult(
             deletedCount: deletedCount,
             cloudMetadataDeletionState: cloudMetadataDeletionState,
-            pendingRemoteAssetDeletionCount: pendingRemoteAssetDeletionCount
+            pendingRemoteAssetDeletionCount: pendingRemoteAssetDeletionCount,
+            shouldRebuildPersistentStore: true,
+            isDeferredUntilICloudAvailable: false
         )
     }
 
@@ -998,17 +1031,19 @@ final class PhotoStorageService {
         return try await cloudKitService.loadAssetURL(named: fullImageAssetName)
     }
 
-    private func stageStillAsset(data: Data, photoID: UUID, role: PhotoAssetRole) throws -> String {
+    private func stageStillAsset(data: Data, photoID: UUID, role: PhotoAssetRole) async throws -> String {
         let fileExtension = imageFileExtension(for: data)
         let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
-        _ = try cloudKitService.stageAssetData(data, named: assetName)
+        let includesInBackup = ICloudAvailabilityMonitor.shared.isLocalModeActive
+        _ = try cloudKitService.stageAssetData(data, named: assetName, includesInBackup: includesInBackup)
         return assetName
     }
 
-    private func stageVideoAsset(from videoURL: URL, photoID: UUID, role: PhotoAssetRole) throws -> String {
+    private func stageVideoAsset(from videoURL: URL, photoID: UUID, role: PhotoAssetRole) async throws -> String {
         let fileExtension = videoURL.pathExtension.isEmpty ? "mov" : videoURL.pathExtension
         let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
-        _ = try cloudKitService.stageAssetFile(from: videoURL, named: assetName)
+        let includesInBackup = ICloudAvailabilityMonitor.shared.isLocalModeActive
+        _ = try cloudKitService.stageAssetFile(from: videoURL, named: assetName, includesInBackup: includesInBackup)
         return assetName
     }
 
@@ -1290,7 +1325,7 @@ final class PhotoStorageService {
         let exifMetadata = exifMetadata(from: imageData)
         let thumbnailData = await thumbnailService.generateThumbnailAsync(from: imageData)
         let importFingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: livePhotoVideoURL)
-        let imageAssetName = try stageStillAsset(
+        let imageAssetName = try await stageStillAsset(
             data: imageData,
             photoID: photoID,
             role: .still
@@ -1298,7 +1333,7 @@ final class PhotoStorageService {
 
         let videoAssetName: String?
         if let livePhotoVideoURL {
-            videoAssetName = try stageVideoAsset(
+            videoAssetName = try await stageVideoAsset(
                 from: livePhotoVideoURL,
                 photoID: photoID,
                 role: .livePhotoVideo
@@ -1712,6 +1747,7 @@ actor RemoteAssetDeletionService {
 
         guard !queuedDeletionsByAssetName.isEmpty else { return }
         guard !isProcessing else { return }
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
 
         if !expeditingRetries, pathMonitor.currentPath.status != .satisfied {
             return
@@ -1763,6 +1799,15 @@ actor RemoteAssetDeletionService {
                     didChangeQueue = true
                     logger.log("remote-asset-delete-succeeded name=\(assetName, privacy: .public)")
                 case .failure(let failure):
+                    if let ckErrorCodeRawValue = failure.ckErrorCodeRawValue,
+                       let ckErrorCode = CKError.Code(rawValue: ckErrorCodeRawValue),
+                       ICloudAvailabilityMonitor.isUnavailableCloudKitError(CKError(ckErrorCode)) {
+                        await MainActor.run {
+                            ICloudAvailabilityMonitor.shared.recordCloudKitError(CKError(ckErrorCode))
+                        }
+                        return
+                    }
+
                     pendingDeletion.attemptCount += 1
                     pendingDeletion.retryAfter = retryDate(
                         for: failure,
@@ -1911,6 +1956,7 @@ actor PhotoUploadService {
     private var cancelProcessingRequested = false
     private var activeUploadCount = 0
     private var idleWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
+    private var availabilityObserver: NSObjectProtocol?
 
     nonisolated static func registerBackgroundTask() {
         let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
@@ -1977,9 +2023,25 @@ actor PhotoUploadService {
         guard !didStart else { return }
         didStart = true
 
+        availabilityObserver = NotificationCenter.default.addObserver(
+            forName: ICloudAvailabilityMonitor.availabilityDidChangeNotification,
+            object: nil,
+            queue: nil
+        ) { _ in
+            Task {
+                guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
+                await PhotoUploadService.shared.enqueuePendingUploads(
+                    expeditingRetries: true,
+                    forceRetryExpedite: true
+                )
+                await RemoteAssetDeletionService.shared.processPendingDeletions(expeditingRetries: true)
+            }
+        }
+
         pathMonitor.pathUpdateHandler = { path in
             guard path.status == .satisfied else { return }
             Task {
+                guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
                 await PhotoUploadService.shared.enqueuePendingUploads(
                     expeditingRetries: true,
                     forceRetryExpedite: false
@@ -1988,9 +2050,13 @@ actor PhotoUploadService {
         }
         pathMonitor.start(queue: monitorQueue)
 
-        Self.scheduleBackgroundProcessing()
+        Task {
+            guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
+            Self.scheduleBackgroundProcessing()
+        }
 
         Task {
+            guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
             await enqueuePendingUploads(
                 expeditingRetries: true,
                 forceRetryExpedite: true
@@ -1999,6 +2065,7 @@ actor PhotoUploadService {
     }
 
     func enqueuePendingUploads(expeditingRetries: Bool = false, forceRetryExpedite: Bool = false) async {
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
         cancelProcessingRequested = false
         if expeditingRetries {
             await expediteRetryableUploadsIfPossible(force: forceRetryExpedite)
@@ -2008,12 +2075,14 @@ actor PhotoUploadService {
     }
 
     func processPendingUploadsDuringBackgroundTime() async {
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
         cancelProcessingRequested = false
         await expediteRetryableUploadsIfPossible(force: false)
         _ = await processPendingUploads(maxCount: nil, schedulesRemainingWork: false)
     }
 
     func processPendingUploadsForTesting() async {
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
         cancelProcessingRequested = false
         _ = await processPendingUploads(maxCount: nil)
     }
@@ -2040,6 +2109,10 @@ actor PhotoUploadService {
     }
 
     private func handleBackgroundProcessingTask(_ task: BGProcessingTask) async {
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else {
+            task.setTaskCompleted(success: true)
+            return
+        }
         Self.scheduleBackgroundProcessing()
 
         let worker = Task {
@@ -2056,6 +2129,10 @@ actor PhotoUploadService {
 
     @discardableResult
     private func processPendingUploads(maxCount: Int?, schedulesRemainingWork: Bool = true) async -> Int {
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else {
+            return await pendingUploadCount()
+        }
+
         guard !isProcessing else {
             return await pendingUploadCount()
         }
@@ -2117,6 +2194,14 @@ actor PhotoUploadService {
                 )
                 break
             } catch {
+                if ICloudAvailabilityMonitor.isUnavailableCloudKitError(error) {
+                    await MainActor.run {
+                        ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
+                    }
+                    await deferUploadUntilICloudAvailable(for: candidate.objectID)
+                    break
+                }
+
                 let disposition = retryDisposition(for: error, attemptCount: candidate.attemptCount)
                 logger.error(
                     "upload-candidate-failed photo=\(candidate.photoID.uuidString, privacy: .public) attempt=\(candidate.attemptCount, privacy: .public) error=\(self.describe(error), privacy: .public)"
@@ -2131,7 +2216,9 @@ actor PhotoUploadService {
         }
 
         let remaining = await pendingUploadCount()
-        if schedulesRemainingWork, remaining > 0 {
+        if schedulesRemainingWork,
+           remaining > 0,
+           await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations {
             Self.scheduleBackgroundProcessing(earliestBeginDate: await nextRetryDate())
         }
         return remaining
@@ -2310,6 +2397,25 @@ actor PhotoUploadService {
         }
     }
 
+    private func deferUploadUntilICloudAvailable(for objectID: NSManagedObjectID) async {
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        do {
+            try await context.perform {
+                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
+                    return
+                }
+
+                photo.uploadState = .pending
+                photo.uploadErrorMessage = nil
+                photo.uploadRetryAfter = nil
+                try context.save()
+                self.logger.log("upload-deferred-until-icloud photo=\(photo.id?.uuidString ?? "nil", privacy: .public)")
+            }
+        } catch {
+            logger.error("upload-defer-until-icloud: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     private func pendingUploadCount() async -> Int {
         let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
         return (try? await context.perform {
@@ -2325,6 +2431,7 @@ actor PhotoUploadService {
     }
 
     func retryFailedUploads() async -> Int {
+        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return 0 }
         let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
 
         let resetCount = (try? await context.perform {

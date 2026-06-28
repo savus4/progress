@@ -58,6 +58,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         PhotoUploadService.registerBackgroundTask()
 
         Task {
+            await ICloudAvailabilityMonitor.shared.refresh()
             let context = await MainActor.run {
                 PersistenceController.shared.makeBackgroundContext()
             }
@@ -82,14 +83,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
-        PhotoUploadService.scheduleBackgroundProcessing()
-        beginBackgroundUploadTaskIfNeeded(application)
+        Task {
+            guard ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
+            PhotoUploadService.scheduleBackgroundProcessing()
+            await MainActor.run {
+                beginBackgroundUploadTaskIfNeeded(application)
+            }
+        }
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
 
         Task {
+            await ICloudAvailabilityMonitor.shared.refresh()
             await PhotoUploadService.shared.enqueuePendingUploads(
                 expeditingRetries: true,
                 forceRetryExpedite: true
