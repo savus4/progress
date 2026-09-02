@@ -56,6 +56,7 @@ struct PhotoGridView: View {
     @State private var hasInitializedMapCameraInAppLifecycle = false
     @State private var mapCameraSnapshot: MapCamera?
     @State private var mapVisibleRegionSnapshot: MKCoordinateRegion?
+    @State private var mapFocusRequest: PhotoMapFocusRequest?
     @State private var metadataSyncTask: Task<Void, Never>?
     private let enableScrollDateDebugLogs = false
 
@@ -113,6 +114,7 @@ struct PhotoGridView: View {
                             hasInitializedMapCameraInAppLifecycle: $hasInitializedMapCameraInAppLifecycle,
                             mapCameraSnapshot: $mapCameraSnapshot,
                             mapVisibleRegionSnapshot: $mapVisibleRegionSnapshot,
+                            focusRequest: mapFocusRequest,
                             onOpenPhoto: openPhotoDetail
                         )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -406,7 +408,8 @@ struct PhotoGridView: View {
                 onClose: closePhotoDetail,
                 onCurrentItemChanged: { objectID in
                     activePhotoDetailObjectID = objectID
-                }
+                },
+                onShowOnMap: showPhotoOnMap
             )
             .toolbarBackground(.visible, for: .navigationBar, .bottomBar)
             .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
@@ -439,6 +442,15 @@ struct PhotoGridView: View {
     private func finalizePhotoDetailDismissal() {
         activePhotoDetailObjectID = nil
         photoDetailPresentation = nil
+    }
+
+    private func showPhotoOnMap(_ objectID: NSManagedObjectID) {
+        mapFocusRequest = PhotoMapFocusRequest(objectID: objectID, token: UUID())
+        isMapClusterOverlayPresented = false
+        withAnimation(.easeInOut(duration: 0.22)) {
+            isMapModeActive = true
+            finalizePhotoDetailDismissal()
+        }
     }
 
     private var filteredEmptyState: some View {
@@ -533,6 +545,7 @@ struct PhotoGridView: View {
 
     private var floatingMapButton: some View {
         Button {
+            mapFocusRequest = nil
             withAnimation(.easeInOut(duration: 0.22)) {
                 isMapModeActive.toggle()
                 isMapClusterOverlayPresented = false

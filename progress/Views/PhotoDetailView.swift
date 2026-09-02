@@ -265,6 +265,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
 struct PhotoDetailView: View {
     let onClose: (NSManagedObjectID?) -> Void
     let onCurrentItemChanged: (NSManagedObjectID?) -> Void
+    let onShowOnMap: (NSManagedObjectID) -> Void
 
     @Environment(\.managedObjectContext) private var viewContext
 
@@ -283,10 +284,12 @@ struct PhotoDetailView: View {
         items: [PhotoDetailItem],
         initialIndex: Int,
         onClose: @escaping (NSManagedObjectID?) -> Void,
-        onCurrentItemChanged: @escaping (NSManagedObjectID?) -> Void
+        onCurrentItemChanged: @escaping (NSManagedObjectID?) -> Void,
+        onShowOnMap: @escaping (NSManagedObjectID) -> Void
     ) {
         self.onClose = onClose
         self.onCurrentItemChanged = onCurrentItemChanged
+        self.onShowOnMap = onShowOnMap
         _detailItems = State(initialValue: items)
         _selectedIndex = State(initialValue: initialIndex)
     }
@@ -312,15 +315,18 @@ struct PhotoDetailView: View {
                 dateTitle: currentDateText,
                 isShareEnabled: !isPerformingAction && currentItem != nil,
                 isSaveEnabled: !isPerformingAction && currentItem != nil && !hasSavedCurrentItemToLibrary,
+                isShowOnMapEnabled: !isPerformingAction && currentItemHasLocation,
                 isDeleteEnabled: !isPerformingAction && currentItem != nil,
                 isHeartEnabled: !isPerformingAction && currentItem != nil,
                 isHearted: currentItem?.isHearted ?? false,
                 isFavoriteLivePhotoEnabled: !isPerformingAction && supportsLivePhoto,
                 isFavoriteLivePhoto: currentItem?.isFavoriteLivePhoto ?? false,
+                saveTitle: saveToLibraryButtonTitle,
                 saveImageSystemName: saveToLibraryButtonSystemImage,
                 onClose: closeCurrentPhoto,
                 onShare: shareStillPhoto,
                 onSave: saveCurrentAssetToPhotoLibrary,
+                onShowOnMap: showCurrentPhotoOnMap,
                 onHeart: toggleCurrentPhotoHeart,
                 onFavoriteLivePhoto: toggleCurrentPhotoFavoriteLivePhoto,
                 onDelete: deleteCurrentPhoto
@@ -443,6 +449,11 @@ struct PhotoDetailView: View {
         return currentItem.livePhotoImageAssetName != nil && currentItem.livePhotoVideoAssetName != nil
     }
 
+    private var currentItemHasLocation: Bool {
+        guard let currentItem else { return false }
+        return currentItem.latitude != 0 || currentItem.longitude != 0
+    }
+
     private var actionErrorBinding: Binding<Bool> {
         Binding(
             get: { actionError != nil },
@@ -513,6 +524,11 @@ struct PhotoDetailView: View {
                 actionError = PhotoDetailActionError(message: "Unable to save this photo to the Photos library.")
             }
         }
+    }
+
+    private func showCurrentPhotoOnMap() {
+        guard let currentItem, currentItemHasLocation else { return }
+        onShowOnMap(currentItem.objectID)
     }
 
     private func toggleCurrentPhotoHeart() {
@@ -730,15 +746,18 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
     let dateTitle: String
     let isShareEnabled: Bool
     let isSaveEnabled: Bool
+    let isShowOnMapEnabled: Bool
     let isDeleteEnabled: Bool
     let isHeartEnabled: Bool
     let isHearted: Bool
     let isFavoriteLivePhotoEnabled: Bool
     let isFavoriteLivePhoto: Bool
+    let saveTitle: String
     let saveImageSystemName: String
     let onClose: () -> Void
     let onShare: () -> Void
     let onSave: () -> Void
+    let onShowOnMap: () -> Void
     let onHeart: () -> Void
     let onFavoriteLivePhoto: () -> Void
     let onDelete: () -> Void
@@ -754,15 +773,18 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
             dateTitle: dateTitle,
             isShareEnabled: isShareEnabled,
             isSaveEnabled: isSaveEnabled,
+            isShowOnMapEnabled: isShowOnMapEnabled,
             isDeleteEnabled: isDeleteEnabled,
             isHeartEnabled: isHeartEnabled,
             isHearted: isHearted,
             isFavoriteLivePhotoEnabled: isFavoriteLivePhotoEnabled,
             isFavoriteLivePhoto: isFavoriteLivePhoto,
+            saveTitle: saveTitle,
             saveImageSystemName: saveImageSystemName,
             onClose: onClose,
             onShare: onShare,
             onSave: onSave,
+            onShowOnMap: onShowOnMap,
             onHeart: onHeart,
             onFavoriteLivePhoto: onFavoriteLivePhoto,
             onDelete: onDelete
@@ -783,15 +805,18 @@ private final class ToolbarConfigViewController: UIViewController {
         let dateTitle: String
         let isShareEnabled: Bool
         let isSaveEnabled: Bool
+        let isShowOnMapEnabled: Bool
         let isDeleteEnabled: Bool
         let isHeartEnabled: Bool
         let isHearted: Bool
         let isFavoriteLivePhotoEnabled: Bool
         let isFavoriteLivePhoto: Bool
+        let saveTitle: String
         let saveImageSystemName: String
         var onClose: () -> Void
         var onShare: () -> Void
         var onSave: () -> Void
+        var onShowOnMap: () -> Void
         var onHeart: () -> Void
         var onFavoriteLivePhoto: () -> Void
         var onDelete: () -> Void
@@ -802,11 +827,13 @@ private final class ToolbarConfigViewController: UIViewController {
             lhs.dateTitle == rhs.dateTitle &&
             lhs.isShareEnabled == rhs.isShareEnabled &&
             lhs.isSaveEnabled == rhs.isSaveEnabled &&
+            lhs.isShowOnMapEnabled == rhs.isShowOnMapEnabled &&
             lhs.isDeleteEnabled == rhs.isDeleteEnabled &&
             lhs.isHeartEnabled == rhs.isHeartEnabled &&
             lhs.isHearted == rhs.isHearted &&
             lhs.isFavoriteLivePhotoEnabled == rhs.isFavoriteLivePhotoEnabled &&
             lhs.isFavoriteLivePhoto == rhs.isFavoriteLivePhoto &&
+            lhs.saveTitle == rhs.saveTitle &&
             lhs.saveImageSystemName == rhs.saveImageSystemName
         }
     }
@@ -847,7 +874,7 @@ private final class ToolbarConfigViewController: UIViewController {
         chromeViewController.navigationItem.leftItemsSupplementBackButton = false
         chromeViewController.navigationItem.leftBarButtonItem = closeItem()
         chromeViewController.navigationItem.titleView = makeTitleView(configuration: configuration)
-        chromeViewController.navigationItem.rightBarButtonItems = []
+        chromeViewController.navigationItem.rightBarButtonItem = moreItem(configuration: configuration)
 
         applyNavigationAppearance(to: navigationController)
 
@@ -859,16 +886,12 @@ private final class ToolbarConfigViewController: UIViewController {
         )
         share.isEnabled = configuration.isShareEnabled
 
-        let save = Self.compactBarButtonItem(
-            systemName: configuration.saveImageSystemName,
-            accessibilityLabel: "Save to Library",
+        let delete = Self.compactBarButtonItem(
+            systemName: "trash",
+            accessibilityLabel: "Delete",
             target: self,
-            action: #selector(saveTapped)
+            action: #selector(deleteTapped)
         )
-        save.isEnabled = configuration.isSaveEnabled
-
-        let delete = deleteBarButtonItem()
-        delete.tintColor = .systemRed
         delete.isEnabled = configuration.isDeleteEnabled
 
         let heart = Self.compactBarButtonItem(
@@ -891,7 +914,6 @@ private final class ToolbarConfigViewController: UIViewController {
 
         let items: [UIBarButtonItem] = [
             share,
-            save,
             Self.flexibleSpaceItem(),
             heart,
             livePhotoFavorite,
@@ -970,6 +992,41 @@ private final class ToolbarConfigViewController: UIViewController {
         return item
     }
 
+    private func moreItem(configuration: Configuration) -> UIBarButtonItem {
+        let saveAction = UIAction(
+            title: configuration.saveTitle,
+            image: UIImage(systemName: configuration.saveImageSystemName)
+        ) { [weak self] _ in
+            self?.configuration?.onSave()
+        }
+        if !configuration.isSaveEnabled {
+            saveAction.attributes = .disabled
+        }
+
+        let showOnMapAction = UIAction(
+            title: "Show on Map",
+            image: UIImage(systemName: "map")
+        ) { [weak self] _ in
+            self?.configuration?.onShowOnMap()
+        }
+        if !configuration.isShowOnMapEnabled {
+            showOnMapAction.attributes = .disabled
+        }
+
+        let image = UIImage(systemName: "ellipsis.circle")?.applyingSymbolConfiguration(
+            UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        )
+        let item = UIBarButtonItem(
+            image: image,
+            style: .plain,
+            target: nil,
+            action: nil
+        )
+        item.accessibilityLabel = "More Photo Actions"
+        item.menu = UIMenu(children: [saveAction, showOnMapAction])
+        return item
+    }
+
     private static func compactBarButtonItem(
         systemName: String,
         accessibilityLabel: String,
@@ -1022,28 +1079,6 @@ private final class ToolbarConfigViewController: UIViewController {
         return image.withRenderingMode(.alwaysTemplate)
     }
 
-    private func deleteBarButtonItem() -> UIBarButtonItem {
-        let image = UIImage(systemName: "trash")?.applyingSymbolConfiguration(
-            UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-        )
-        let deleteAction = UIAction(
-            title: "Delete Photo",
-            image: UIImage(systemName: "trash"),
-            attributes: .destructive
-        ) { [weak self] _ in
-            self?.configuration?.onDelete()
-        }
-        let item = UIBarButtonItem(
-            image: image,
-            style: .plain,
-            target: nil,
-            action: nil
-        )
-        item.accessibilityLabel = "Delete"
-        item.menu = UIMenu(title: "Delete photo?", children: [deleteAction])
-        return item
-    }
-
     @objc private func closeTapped() {
         configuration?.onClose()
     }
@@ -1052,8 +1087,8 @@ private final class ToolbarConfigViewController: UIViewController {
         configuration?.onShare()
     }
 
-    @objc private func saveTapped() {
-        configuration?.onSave()
+    @objc private func deleteTapped() {
+        configuration?.onDelete()
     }
 
     @objc private func heartTapped() {

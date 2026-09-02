@@ -32,6 +32,11 @@ struct PhotoRouteMapItem: Identifiable, Equatable {
     }
 }
 
+struct PhotoMapFocusRequest: Equatable {
+    let objectID: NSManagedObjectID
+    let token: UUID
+}
+
 struct PhotoRouteMapView: View {
     let gridItems: [UIKitPhotoGridItem]
     let changeToken: Int
@@ -39,6 +44,7 @@ struct PhotoRouteMapView: View {
     @Binding var hasInitializedMapCameraInAppLifecycle: Bool
     @Binding var mapCameraSnapshot: MapCamera?
     @Binding var mapVisibleRegionSnapshot: MKCoordinateRegion?
+    let focusRequest: PhotoMapFocusRequest?
     let onOpenPhoto: (NSManagedObjectID) -> Void
 
     @Namespace private var mapScope
@@ -139,13 +145,21 @@ struct PhotoRouteMapView: View {
         }
         .onAppear {
             rebuildMapItemsIfNeeded()
+            if focusOnRequestedPhotoIfPossible(size: size, animated: false) {
+                return
+            }
             setInitialCameraIfNeeded(size: size)
         }
         .onChange(of: changeToken) { _, _ in
             rebuildMapItems()
             clusterPresentation = nil
             isClusterOverlayPresented = false
-            updateAnnotationsAfterMapItemsChanged(size: size)
+            if !focusOnRequestedPhotoIfPossible(size: size, animated: false) {
+                updateAnnotationsAfterMapItemsChanged(size: size)
+            }
+        }
+        .onChange(of: focusRequest?.token) { _, _ in
+            focusOnRequestedPhotoIfPossible(size: size, animated: true)
         }
     }
 
@@ -453,6 +467,41 @@ struct PhotoRouteMapView: View {
             paddingFraction: padding,
             minimumMapPointPadding: 1800
         )
+    }
+
+    @discardableResult
+    private func focusOnRequestedPhotoIfPossible(size: CGSize, animated: Bool) -> Bool {
+        guard let focusRequest,
+              let item = mapItems.first(where: { $0.objectID == focusRequest.objectID }) else {
+            return false
+        }
+
+        let region = region(
+            containing: [item.coordinate],
+            paddingFraction: 0.12,
+            minimumMapPointPadding: 1400
+        )
+        let nextCamera = camera(for: region, heading: mapHeading)
+        let applyFocus = {
+            cameraPosition = .camera(nextCamera)
+            visibleRegion = region
+            latestMapCamera = nextCamera
+            renderedClusterCellMapPointSize = clusterCellMapPointSize(region: region, viewSize: size)
+            clusterPresentation = nil
+            isClusterOverlayPresented = false
+        }
+
+        if animated {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                applyFocus()
+            }
+        } else {
+            applyFocus()
+        }
+
+        saveCameraSnapshot(camera: nextCamera, region: region)
+        updateRenderedAnnotations(size: size, region: region, animated: animated)
+        return true
     }
 
     private func annotationAccessibilityLabel(for annotation: PhotoMapAnnotationItem) -> String {
