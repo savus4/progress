@@ -7,6 +7,7 @@ struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
+    @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
 
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -158,6 +159,15 @@ struct NotificationSettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                Section("Camera") {
+                    Toggle("Hirs-Mode", isOn: $isHirsModeEnabled)
+                        .accessibilityIdentifier("hirsModeToggle")
+
+                    Text("Shows the photo preview mirrored, matching the camera preview. Saved photos stay unchanged.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {

@@ -43,7 +43,8 @@ struct ExperimentalCameraView: View {
     @ObservedObject private var alignmentGuideStore = AlignmentGuideStore.shared
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("experimentalCameraLivePhotoCaptureEnabled") private var isLivePhotoCaptureEnabled = true
+    @AppStorage(CameraPreferenceKey.livePhotoCaptureEnabled) private var isLivePhotoCaptureEnabled = true
+    @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
 
     let gridTargetFrameInGlobal: CGRect?
 
@@ -141,6 +142,7 @@ struct ExperimentalCameraView: View {
                         image: pendingCaptureImage,
                         livePhotoImageURL: pendingLivePhotoImageURL,
                         livePhotoVideoURL: pendingLivePhotoVideoURL,
+                        isMirrored: isHirsModeEnabled,
                         isSaving: isSaving,
                         isAnimatingToGrid: isAnimatingPreviewToGrid,
                         targetFrameInGlobal: gridTargetFrameInGlobal,
@@ -661,6 +663,7 @@ struct ExperimentalCapturePreviewOverlay: View {
     let image: UIImage
     let livePhotoImageURL: URL?
     let livePhotoVideoURL: URL?
+    let isMirrored: Bool
     let isSaving: Bool
     let isAnimatingToGrid: Bool
     let targetFrameInGlobal: CGRect?
@@ -730,6 +733,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                                 }
                             }
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
                         }
                         .aspectRatio(image.size, contentMode: .fit)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
@@ -804,6 +808,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                             width: animatedFrameInOverlay == .zero ? localTargetFrame.width : animatedFrameInOverlay.width,
                             height: animatedFrameInOverlay == .zero ? localTargetFrame.height : animatedFrameInOverlay.height
                         )
+                        .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
                         .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
                         .position(
                             x: (animatedFrameInOverlay == .zero ? localTargetFrame : animatedFrameInOverlay).midX,
@@ -827,6 +832,7 @@ struct ExperimentalCapturePreviewOverlay: View {
         }
         .contentShape(Rectangle())
         .accessibilityIdentifier("capturePreviewOverlay")
+        .accessibilityValue(isMirrored ? "Mirrored" : "Original")
         .gesture(
             DragGesture(minimumDistance: 20)
                 .onEnded { value in

@@ -890,7 +890,7 @@ private final class ToolbarConfigViewController: UIViewController {
             systemName: "trash",
             accessibilityLabel: "Delete",
             target: self,
-            action: #selector(deleteTapped)
+            action: #selector(deleteTapped(_:))
         )
         delete.isEnabled = configuration.isDeleteEnabled
 
@@ -1087,8 +1087,22 @@ private final class ToolbarConfigViewController: UIViewController {
         configuration?.onShare()
     }
 
-    @objc private func deleteTapped() {
-        configuration?.onDelete()
+    @objc private func deleteTapped(_ sender: UIBarButtonItem) {
+        guard let configuredViewController,
+              configuredViewController.presentedViewController == nil else { return }
+
+        let confirmation = UIAlertController(
+            title: "Delete photo?",
+            message: "This action cannot be undone.",
+            preferredStyle: .actionSheet
+        )
+        confirmation.addAction(UIAlertAction(title: "Delete Photo", style: .destructive) { [weak self] _ in
+            self?.configuration?.onDelete()
+        })
+        confirmation.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        confirmation.popoverPresentationController?.barButtonItem = sender
+
+        configuredViewController.present(confirmation, animated: true)
     }
 
     @objc private func heartTapped() {
