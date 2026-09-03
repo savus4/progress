@@ -1,4 +1,4 @@
-import CoreData
+@preconcurrency import CoreData
 import Combine
 import Foundation
 import OSLog
@@ -69,7 +69,7 @@ final class CloudSyncMonitor: ObservableObject {
                 as? NSPersistentCloudKitContainer.Event else {
                 return
             }
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.handle(event: event)
             }
         }
@@ -79,7 +79,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.updateICloudAvailability()
             }
         }
@@ -89,7 +89,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.scheduleUploadStatusRefresh(delay: .zero)
             }
         }
@@ -103,7 +103,7 @@ final class CloudSyncMonitor: ObservableObject {
                 return
             }
 
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.isUploadProcessorActive = isProcessing
             }
         }
@@ -113,7 +113,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.scheduleUploadStatusRefresh()
             }
         }
@@ -123,7 +123,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.handleRemoteStoreChange()
             }
         }
@@ -141,7 +141,7 @@ final class CloudSyncMonitor: ObservableObject {
                 return
             }
 
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.handleAssetTransfer(kind: kind, phase: phase, assetName: assetName)
             }
         }
@@ -152,7 +152,7 @@ final class CloudSyncMonitor: ObservableObject {
         }
     }
 
-    deinit {
+    isolated deinit {
         uploadStatusRefreshTask?.cancel()
         metadataImportQuietTask?.cancel()
         if let observer {

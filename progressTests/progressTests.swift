@@ -6,7 +6,7 @@ import Testing
 import UIKit
 @testable import progress
 
-private let runsCloudKitIntegrationTests = ProcessInfo.processInfo.environment["RUN_CLOUDKIT_TESTS"] == "1"
+nonisolated private let runsCloudKitIntegrationTests = ProcessInfo.processInfo.environment["RUN_CLOUDKIT_TESTS"] == "1"
 
 @Suite("Core Functionality Tests")
 struct ProgressCoreFunctionalityTests {
@@ -213,9 +213,10 @@ struct ProgressCoreFunctionalityTests {
 
         let input = makeImage(size: CGSize(width: 1200, height: 1200), color: .brown)
         let thumbnailData = try #require(ThumbnailService.shared.generateThumbnail(from: input))
+        let objectID = photo.objectID
 
-        async let first = DecodedThumbnailCache.shared.image(for: photo.objectID, data: thumbnailData)
-        async let second = DecodedThumbnailCache.shared.image(for: photo.objectID, data: thumbnailData)
+        async let first = DecodedThumbnailCache.shared.image(for: objectID, data: thumbnailData)
+        async let second = DecodedThumbnailCache.shared.image(for: objectID, data: thumbnailData)
         let (firstResult, secondResult) = await (first, second)
         let firstImage = try #require(firstResult)
         let secondImage = try #require(secondResult)

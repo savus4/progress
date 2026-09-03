@@ -330,8 +330,6 @@ enum PhotoGridContextAction {
 
 final class PhotoThumbnailDataProvider {
     private let context = PersistenceController.shared.makeBackgroundContext()
-    private var readCount = 0
-    private let resetInterval = 192
 
     init() {
         context.undoManager = nil
@@ -349,15 +347,7 @@ final class PhotoThumbnailDataProvider {
                 request.predicate = NSPredicate(format: "SELF == %@", objectID)
                 request.propertiesToFetch = ["thumbnailData"]
 
-                let data = (try? context.fetch(request).first?["thumbnailData"] as? Data) ?? nil
-
-                self.readCount += 1
-                if self.readCount >= self.resetInterval {
-                    context.reset()
-                    self.readCount = 0
-                }
-
-                return data
+                return (try? context.fetch(request).first?["thumbnailData"] as? Data) ?? nil
             }
         }
     }
@@ -366,7 +356,6 @@ final class PhotoThumbnailDataProvider {
         let context = context
         await context.perform {
             context.reset()
-            self.readCount = 0
         }
     }
 }
@@ -541,7 +530,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         )
     }
 
-    deinit {
+    isolated deinit {
         selectionAutoScrollDisplayLink?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }

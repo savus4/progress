@@ -15,22 +15,22 @@ struct progressApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
-    let persistenceController = PersistenceController.shared
+    @StateObject private var persistenceController = PersistenceController.shared
 
     init() {
-        Task { @MainActor in
-            _ = CloudSyncMonitor.shared
-        }
         loadRocketSimConnect()
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+            PersistenceRootView(persistenceController: persistenceController)
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
                     DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
+                }
+                .task(id: persistenceController.loadState) {
+                    guard persistenceController.isLoaded else { return }
+                    appDelegate.startPersistenceServices()
                 }
         }
     }
@@ -46,8 +46,35 @@ struct progressApp: App {
     }
 }
 
+private struct PersistenceRootView: View {
+    @ObservedObject var persistenceController: PersistenceController
+
+    var body: some View {
+        switch persistenceController.loadState {
+        case .loading:
+            ProgressView("Opening your library…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .loaded:
+            ContentView()
+                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("Library Couldn’t Open", systemImage: "externaldrive.badge.exclamationmark")
+            } description: {
+                Text("Your photos remain stored. Nothing was deleted.\n\n\(message)")
+            } actions: {
+                Button("Try Again") {
+                    persistenceController.retryLoading()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private var backgroundUploadTask: UIBackgroundTaskIdentifier = .invalid
+    private var didStartPersistenceServices = false
 
     func application(
         _ application: UIApplication,
@@ -56,12 +83,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().delegate = self
         PortraitVideoExportService.shared.deleteTemporaryExports()
         PhotoUploadService.registerBackgroundTask()
+        return true
+    }
+
+    func startPersistenceServices() {
+        guard PersistenceController.shared.isLoaded, !didStartPersistenceServices else { return }
+        didStartPersistenceServices = true
+        _ = CloudSyncMonitor.shared
 
         Task {
             await ICloudAvailabilityMonitor.shared.refresh()
-            let context = await MainActor.run {
-                PersistenceController.shared.makeBackgroundContext()
-            }
+            let context = PersistenceController.shared.makeBackgroundContext()
             let recoveredCount = await PhotoStorageService.shared.recoverPendingUploadsFromManifest(context: context)
             if recoveredCount > 0 {
                 let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "AppLifecycle")
@@ -73,17 +105,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         Task.detached(priority: .utility) {
             try? await Task.sleep(for: .seconds(5))
-            let context = await MainActor.run {
-                PersistenceController.shared.makeBackgroundContext()
+            let context: NSManagedObjectContext? = await MainActor.run {
+                guard PersistenceController.shared.isLoaded else { return nil }
+                return PersistenceController.shared.makeBackgroundContext()
             }
+            guard let context else { return }
             await PhotoStorageService.shared.optimizeStoredThumbnailsIfNeeded(context: context)
             await PhotoStorageService.shared.purgeOrphanedAssets(context: context)
         }
-        return true
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
         Task {
+            guard PersistenceController.shared.isLoaded else { return }
             guard ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
             PhotoUploadService.scheduleBackgroundProcessing()
             await MainActor.run {
@@ -96,6 +130,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
 
         Task {
+            guard PersistenceController.shared.isLoaded else { return }
             await ICloudAvailabilityMonitor.shared.refresh()
             await PhotoUploadService.shared.enqueuePendingUploads(
                 expeditingRetries: true,

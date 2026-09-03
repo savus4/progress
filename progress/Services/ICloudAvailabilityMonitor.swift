@@ -54,8 +54,10 @@ final class ICloudAvailabilityMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.refresh()
+            MainActor.assumeIsolated {
+                _ = Task<Void, Never> { @MainActor [weak self] in
+                    await self?.refresh()
+                }
             }
         }
 
@@ -64,7 +66,7 @@ final class ICloudAvailabilityMonitor: ObservableObject {
         }
     }
 
-    deinit {
+    isolated deinit {
         if let accountObserver {
             NotificationCenter.default.removeObserver(accountObserver)
         }

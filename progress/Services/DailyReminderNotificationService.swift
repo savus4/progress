@@ -106,7 +106,7 @@ final class DailyReminderNotificationService {
     }
 
     func authorizationStatus() async -> UNAuthorizationStatus {
-        await notificationSettings().authorizationStatus
+        await currentAuthorizationStatus()
     }
 
     func isDailyReminderNotification(userInfo: [AnyHashable: Any]) -> Bool {
@@ -181,8 +181,7 @@ final class DailyReminderNotificationService {
     }
 
     private func ensureAuthorization() async throws -> Bool {
-        let settings = await notificationSettings()
-        switch settings.authorizationStatus {
+        switch await currentAuthorizationStatus() {
         case .authorized, .provisional, .ephemeral:
             return true
         case .notDetermined:
@@ -194,10 +193,10 @@ final class DailyReminderNotificationService {
         }
     }
 
-    private func notificationSettings() async -> UNNotificationSettings {
+    private func currentAuthorizationStatus() async -> UNAuthorizationStatus {
         await withCheckedContinuation { continuation in
             center.getNotificationSettings { settings in
-                continuation.resume(returning: settings)
+                continuation.resume(returning: settings.authorizationStatus)
             }
         }
     }

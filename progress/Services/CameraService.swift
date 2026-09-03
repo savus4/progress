@@ -1,13 +1,13 @@
 import SwiftUI
-import AVFoundation
+@preconcurrency import AVFoundation
 import UIKit
 import Combine
 import CoreLocation
 import ImageIO
 
-class CameraService: NSObject, ObservableObject {
+@MainActor
+final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isAuthorized = false
-    @Published var session = AVCaptureSession()
     @Published var previewLayer: AVCaptureVideoPreviewLayer?
     @Published var capturedImage: UIImage?
     @Published var capturedImageData: Data?
@@ -17,20 +17,25 @@ class CameraService: NSObject, ObservableObject {
     @Published var sensorAspectRatio: CGFloat
     @Published var isLivePhotoCaptureSupported = false
     
-    private let photoOutput = AVCapturePhotoOutput()
-    private var livePhotoCompanionMovieURL: URL?
-    private var isCapturingLivePhoto = false
-    private var capturedPhotoData: Data?
-    private var capturedStillImage: UIImage?
+    nonisolated(unsafe) let session = AVCaptureSession()
+    nonisolated(unsafe) private let photoOutput = AVCapturePhotoOutput()
+    nonisolated private let sessionQueue = DispatchQueue(
+        label: "me.riepl.progress.camera-session",
+        qos: .userInitiated
+    )
+    nonisolated(unsafe) private var livePhotoCompanionMovieURL: URL?
+    nonisolated(unsafe) private var isCapturingLivePhoto = false
+    nonisolated(unsafe) private var capturedPhotoData: Data?
+    nonisolated(unsafe) private var capturedStillImage: UIImage?
     private let processInfo = ProcessInfo.processInfo
-    static let defaultPortraitPhotoAspectRatio: CGFloat = 3.0 / 4.0
+    nonisolated static let defaultPortraitPhotoAspectRatio: CGFloat = 3.0 / 4.0
     
     override init() {
         self.sensorAspectRatio = Self.defaultPortraitPhotoAspectRatio
         super.init()
     }
 
-    static func preferredCodec(from availableCodecs: [AVVideoCodecType]) -> AVVideoCodecType? {
+    nonisolated static func preferredCodec(from availableCodecs: [AVVideoCodecType]) -> AVVideoCodecType? {
         availableCodecs.contains(.hevc) ? .hevc : nil
     }
     
@@ -60,7 +65,21 @@ class CameraService: NSObject, ObservableObject {
     }
     
     func setupCamera() {
-        isLivePhotoCaptureSupported = false
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let configuration = self.configureCameraOnSessionQueue()
+            Task { @MainActor [weak self] in
+                self?.sensorAspectRatio = configuration.sensorAspectRatio
+                self?.isLivePhotoCaptureSupported = configuration.isLivePhotoCaptureSupported
+            }
+        }
+    }
+
+    nonisolated private func configureCameraOnSessionQueue() -> (
+        sensorAspectRatio: CGFloat,
+        isLivePhotoCaptureSupported: Bool
+    ) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
         session.beginConfiguration()
         
         // Set session preset for high quality
@@ -71,7 +90,7 @@ class CameraService: NSObject, ObservableObject {
               let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
               session.canAddInput(videoInput) else {
             session.commitConfiguration()
-            return
+            return (Self.defaultPortraitPhotoAspectRatio, false)
         }
         
         session.addInput(videoInput)
@@ -79,18 +98,20 @@ class CameraService: NSObject, ObservableObject {
         // Add photo output
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
-            sensorAspectRatio = Self.portraitPhotoAspectRatio(for: photoOutput.maxPhotoDimensions)
 
             // Enable Live Photo capture
             photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
-            isLivePhotoCaptureSupported = photoOutput.isLivePhotoCaptureSupported
             photoOutput.maxPhotoQualityPrioritization = .quality
         }
         
         session.commitConfiguration()
+        return (
+            Self.portraitPhotoAspectRatio(for: photoOutput.maxPhotoDimensions),
+            photoOutput.isLivePhotoCaptureSupported
+        )
     }
 
-    static func portraitPhotoAspectRatio(for dimensions: CMVideoDimensions) -> CGFloat {
+    nonisolated static func portraitPhotoAspectRatio(for dimensions: CMVideoDimensions) -> CGFloat {
         let width = CGFloat(dimensions.width)
         let height = CGFloat(dimensions.height)
         guard width > 0, height > 0 else {
@@ -103,26 +124,45 @@ class CameraService: NSObject, ObservableObject {
     }
     
     func startSession() {
-        if !session.isRunning {
-            DispatchQueue.global(qos: .userInitiated).async {
-                self.session.startRunning()
-            }
+        sessionQueue.async { [weak self] in
+            guard let self, !self.session.isRunning else { return }
+            self.session.startRunning()
         }
     }
-    
+
     func stopSession() {
-        if session.isRunning {
-            DispatchQueue.global(qos: .userInitiated).async {
-                self.session.stopRunning()
-            }
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
         }
     }
-    
+
     func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
         if usesMockCapture {
             simulateMockCapture(location: location)
             return
         }
+
+        capturedImage = nil
+        capturedImageData = nil
+        livePhotoCapture = nil
+
+        let locationSnapshot = location.map {
+            CameraLocation(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
+        }
+        sessionQueue.async { [weak self] in
+            self?.capturePhotoOnSessionQueue(
+                withLivePhoto: withLivePhoto,
+                location: locationSnapshot
+            )
+        }
+    }
+
+    nonisolated private func capturePhotoOnSessionQueue(
+        withLivePhoto: Bool,
+        location: CameraLocation?
+    ) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
 
         let settings: AVCapturePhotoSettings
         if let preferredPhotoCodec = Self.preferredCodec(from: photoOutput.availablePhotoCodecTypes) {
@@ -132,18 +172,14 @@ class CameraService: NSObject, ObservableObject {
         }
 
         if let location {
-            settings.metadata = [kCGImagePropertyGPSDictionary as String: gpsMetadataDictionary(for: location)]
+            settings.metadata = [
+                kCGImagePropertyGPSDictionary as String: Self.gpsMetadataDictionary(for: location)
+            ]
         }
-        
-        // Reset previous capture
-        capturedImage = nil
-        capturedImageData = nil
-        livePhotoCapture = nil
+
         capturedPhotoData = nil
         capturedStillImage = nil
-        
-        // Configure Live Photo if supported and requested.
-        // Simulator camera pipelines often don't produce valid paired metadata.
+
         #if targetEnvironment(simulator)
         livePhotoCompanionMovieURL = nil
         isCapturingLivePhoto = false
@@ -151,9 +187,8 @@ class CameraService: NSObject, ObservableObject {
         let shouldCaptureLivePhoto = withLivePhoto && photoOutput.isLivePhotoCaptureSupported
 
         if shouldCaptureLivePhoto {
-            let livePhotoMovieFileName = UUID().uuidString
             let livePhotoMovieFilePath = FileManager.default.temporaryDirectory
-                .appendingPathComponent(livePhotoMovieFileName)
+                .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("mov")
 
             settings.livePhotoMovieFileURL = livePhotoMovieFilePath
@@ -167,9 +202,8 @@ class CameraService: NSObject, ObservableObject {
             isCapturingLivePhoto = false
         }
         #endif
-        
+
         settings.photoQualityPrioritization = .quality
-        
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
@@ -218,17 +252,23 @@ class CameraService: NSObject, ObservableObject {
             || processInfo.environment["UI_TEST_MOCK_CAPTURE"] == "1"
     }
 
-    private func gpsMetadataDictionary(for location: CLLocation) -> [String: Any] {
-        let coordinate = location.coordinate
+    nonisolated private static func gpsMetadataDictionary(for location: CameraLocation) -> [String: Any] {
         return [
-            kCGImagePropertyGPSLatitudeRef as String: coordinate.latitude >= 0 ? "N" : "S",
-            kCGImagePropertyGPSLatitude as String: abs(coordinate.latitude),
-            kCGImagePropertyGPSLongitudeRef as String: coordinate.longitude >= 0 ? "E" : "W",
-            kCGImagePropertyGPSLongitude as String: abs(coordinate.longitude)
+            kCGImagePropertyGPSLatitudeRef as String: location.latitude >= 0 ? "N" : "S",
+            kCGImagePropertyGPSLatitude as String: abs(location.latitude),
+            kCGImagePropertyGPSLongitudeRef as String: location.longitude >= 0 ? "E" : "W",
+            kCGImagePropertyGPSLongitude as String: abs(location.longitude)
         ]
     }
     
     func switchCamera() {
+        sessionQueue.async { [weak self] in
+            self?.switchCameraOnSessionQueue()
+        }
+    }
+
+    nonisolated private func switchCameraOnSessionQueue() {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
         session.beginConfiguration()
         
         // Remove current input
@@ -256,9 +296,21 @@ class CameraService: NSObject, ObservableObject {
     }
 }
 
+private struct CameraLocation: Sendable {
+    let latitude: Double
+    let longitude: Double
+}
+
 // MARK: - AVCapturePhotoCaptureDelegate
 extension CameraService: AVCapturePhotoCaptureDelegate {
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        sessionQueue.async { [weak self] in
+            self?.handleProcessedPhoto(photo, error: error)
+        }
+    }
+
+    nonisolated private func handleProcessedPhoto(_ photo: AVCapturePhoto, error: Error?) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
         guard error == nil,
               let imageData = photo.fileDataRepresentation(),
               let image = UIImage(data: imageData) else {
@@ -267,10 +319,11 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         }
         
         // Keep still data/image immediately for Live Photo pairing callback.
-        self.capturedPhotoData = imageData
-        self.capturedStillImage = image
+        capturedPhotoData = imageData
+        capturedStillImage = image
 
-        DispatchQueue.main.async {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             self.capturedImage = image
             self.capturedImageData = imageData
             
@@ -281,16 +334,24 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         }
     }
     
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingLivePhotoToMovieFileAt outputFileURL: URL, duration: CMTime, photoDisplayTime: CMTime, resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingLivePhotoToMovieFileAt outputFileURL: URL, duration: CMTime, photoDisplayTime: CMTime, resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        sessionQueue.async { [weak self] in
+            self?.handleProcessedLivePhoto(at: outputFileURL, error: error)
+        }
+    }
+
+    nonisolated private func handleProcessedLivePhoto(at outputFileURL: URL, error: Error?) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
         guard error == nil else {
             print("Error processing Live Photo video: \(error?.localizedDescription ?? "Unknown error")")
             return
         }
         
         // Store the video URL with the paired still image.
-        if let image = self.capturedStillImage {
-            let stillData = self.capturedPhotoData ?? (image.jpegData(compressionQuality: 1.0) ?? Data())
-            DispatchQueue.main.async {
+        if let image = capturedStillImage {
+            let stillData = capturedPhotoData ?? (image.jpegData(compressionQuality: 1.0) ?? Data())
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 self.capturedImage = image
                 self.capturedImageData = stillData
                 self.livePhotoCapture = (image: image, imageData: stillData, videoURL: outputFileURL)
@@ -299,9 +360,9 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         }
     }
 
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
-        DispatchQueue.main.async {
-            self.captureFinished += 1
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        Task { @MainActor [weak self] in
+            self?.captureFinished += 1
         }
     }
 }

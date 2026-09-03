@@ -3,7 +3,7 @@ import CoreData
 import ImageIO
 import UniformTypeIdentifiers
 
-class ThumbnailService {
+nonisolated final class ThumbnailService: Sendable {
     static let shared = ThumbnailService()
 
     private init() {}
@@ -132,7 +132,7 @@ class ThumbnailService {
     }
 }
 
-final class DecodedThumbnailCache {
+nonisolated final class DecodedThumbnailCache: @unchecked Sendable {
     static let shared = DecodedThumbnailCache()
 
     private let cache = NSCache<NSString, UIImage>()

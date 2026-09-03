@@ -7,8 +7,17 @@
 
 import CoreData
 import UIKit
+import Combine
+import OSLog
 
-struct PersistenceController {
+@MainActor
+final class PersistenceController: ObservableObject {
+    enum LoadState: Hashable {
+        case loading
+        case loaded
+        case failed(String)
+    }
+
     static let shared = PersistenceController()
 
     @MainActor
@@ -35,8 +44,7 @@ struct PersistenceController {
         do {
             try viewContext.save()
         } catch {
-            let nsError = error as NSError
-            fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+            assertionFailure("Preview store save failed: \(error.localizedDescription)")
         }
         return result
     }()
@@ -71,6 +79,15 @@ struct PersistenceController {
     }
 
     let container: NSPersistentContainer
+    @Published private(set) var loadState: LoadState = .loading
+
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "progress",
+        category: "Persistence"
+    )
+    private var pendingStoreLoads = 0
+    private var firstStoreLoadError: Error?
+    private var isLoadingStore = false
 
     init(inMemory: Bool = false) {
         let processInfo = ProcessInfo.processInfo
@@ -89,31 +106,62 @@ struct PersistenceController {
         if shouldUseInMemory {
             container.persistentStoreDescriptions.first!.type = NSInMemoryStoreType
         }
-        container.loadPersistentStores(completionHandler: { (storeDescription, error) in
-            if let error = error as NSError? {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-
-                /*
-                 Typical reasons for an error here include:
-                 * The parent directory does not exist, cannot be created, or disallows writing.
-                 * The persistent store is not accessible, due to permissions or data protection when the device is locked.
-                 * The device is out of space.
-                 * The store could not be migrated to the current model version.
-                 Check the error message to determine what the actual problem was.
-                 */
-                fatalError("Unresolved error \(error), \(error.userInfo)")
-            }
-        })
         container.viewContext.name = "ViewContext"
-        container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        container.viewContext.mergePolicy = NSMergePolicy(
+            merge: .mergeByPropertyObjectTrumpMergePolicyType
+        )
         container.viewContext.automaticallyMergesChangesFromParent = true
+        loadPersistentStores()
+    }
+
+    var isLoaded: Bool {
+        loadState == .loaded
+    }
+
+    func retryLoading() {
+        guard !isLoadingStore, container.persistentStoreCoordinator.persistentStores.isEmpty else {
+            return
+        }
+        loadPersistentStores()
+    }
+
+    private func loadPersistentStores() {
+        isLoadingStore = true
+        loadState = .loading
+        firstStoreLoadError = nil
+        pendingStoreLoads = max(container.persistentStoreDescriptions.count, 1)
+
+        container.loadPersistentStores { [weak self] _, error in
+            Task { @MainActor in
+                self?.handlePersistentStoreLoad(error: error)
+            }
+        }
+    }
+
+    private func handlePersistentStoreLoad(error: Error?) {
+        if let error, firstStoreLoadError == nil {
+            firstStoreLoadError = error
+        }
+
+        pendingStoreLoads -= 1
+        guard pendingStoreLoads <= 0 else { return }
+        isLoadingStore = false
+
+        if let firstStoreLoadError {
+            logger.error("persistent-store-load-failed error=\(firstStoreLoadError.localizedDescription, privacy: .public)")
+            loadState = .failed(firstStoreLoadError.localizedDescription)
+        } else {
+            logger.log("persistent-store-load-succeeded")
+            loadState = .loaded
+        }
     }
 
     func makeBackgroundContext() -> NSManagedObjectContext {
         let context = container.newBackgroundContext()
         context.name = "BackgroundContext"
-        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        context.mergePolicy = NSMergePolicy(
+            merge: .mergeByPropertyObjectTrumpMergePolicyType
+        )
         context.automaticallyMergesChangesFromParent = true
         return context
     }

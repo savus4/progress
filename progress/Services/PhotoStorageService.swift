@@ -1,5 +1,5 @@
 import Foundation
-import BackgroundTasks
+@preconcurrency import BackgroundTasks
 import CloudKit
 @preconcurrency import CoreData
 import Network
@@ -66,7 +66,7 @@ enum PhotoUploadState: String, Sendable {
     case paused
 }
 
-extension DailyPhoto {
+nonisolated extension DailyPhoto {
     var uploadState: PhotoUploadState {
         get {
             guard let rawValue = uploadStateRaw else {
@@ -93,10 +93,6 @@ final class PhotoStorageService {
     private let thumbnailService = ThumbnailService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoStorage")
     private let metadataSyncBatchLimit = 50
-    private let fullImageDecodeQueue = DispatchQueue(
-        label: "me.riepl.progress.full-image-decoding",
-        qos: .userInitiated
-    )
     private let decodedFullImageCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 18
@@ -121,7 +117,7 @@ final class PhotoStorageService {
             throw PhotoStorageError.missingImageData
         }
 
-        let extractedMetadata = exifMetadata(from: sourceImageData)
+        let extractedMetadata = await Self.exifMetadata(from: sourceImageData)
         let resolvedLocation = extractedMetadata?.location ?? location
         let stillAssetName = try await stageStillAsset(
             data: sourceImageData,
@@ -139,7 +135,7 @@ final class PhotoStorageService {
             livePhotoVideoAssetName = nil
         }
 
-        let importFingerprint = try fingerprint(imageData: sourceImageData, livePhotoVideoURL: livePhotoVideoURL)
+        let importFingerprint = try await fingerprint(imageData: sourceImageData, livePhotoVideoURL: livePhotoVideoURL)
         let thumbnailData = await thumbnailService.generateThumbnailAsync(from: sourceImageData)
         let createdAt = Date()
         let manifestEntry = PendingUploadManifestEntry(
@@ -261,7 +257,7 @@ final class PhotoStorageService {
 
         for (index, payload) in payloads.enumerated() {
             do {
-                payloadFingerprints[index] = try fingerprint(for: payload)
+                payloadFingerprints[index] = try await fingerprint(for: payload)
             } catch {
                 let stage = payload.livePhotoVideoURL == nil ? "fingerprint-still" : "fingerprint-live-photo"
                 let message = "\(stage) payload=\(index): \(error.localizedDescription)"
@@ -461,7 +457,7 @@ final class PhotoStorageService {
                 named: assetName,
                 reportsTransferEvents: false
             ) else { continue }
-            guard let metadata = exifMetadata(from: assetURL) else { continue }
+            guard let metadata = await Self.exifMetadata(from: assetURL) else { continue }
 
             if let exifDate = metadata.captureDate {
                 let shouldUpdateDate: Bool
@@ -500,12 +496,13 @@ final class PhotoStorageService {
         }
 
         guard !updatesByObjectID.isEmpty else { return }
+        let metadataUpdates = Array(updatesByObjectID.values)
 
         do {
             try await context.perform {
                 var updatedPhotos: [DailyPhoto] = []
 
-                for update in updatesByObjectID.values {
+                for update in metadataUpdates {
                     guard let photo = try? context.existingObject(with: update.objectID) as? DailyPhoto else {
                         continue
                     }
@@ -1032,10 +1029,10 @@ final class PhotoStorageService {
     }
 
     private func stageStillAsset(data: Data, photoID: UUID, role: PhotoAssetRole) async throws -> String {
-        let fileExtension = imageFileExtension(for: data)
+        let fileExtension = await Self.imageFileExtension(for: data)
         let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
         let includesInBackup = ICloudAvailabilityMonitor.shared.isLocalModeActive
-        _ = try cloudKitService.stageAssetData(data, named: assetName, includesInBackup: includesInBackup)
+        _ = try await cloudKitService.stageAssetDataAsync(data, named: assetName, includesInBackup: includesInBackup)
         return assetName
     }
 
@@ -1043,27 +1040,26 @@ final class PhotoStorageService {
         let fileExtension = videoURL.pathExtension.isEmpty ? "mov" : videoURL.pathExtension
         let assetName = cloudKitService.makeAssetName(photoID: photoID, role: role, fileExtension: fileExtension)
         let includesInBackup = ICloudAvailabilityMonitor.shared.isLocalModeActive
-        _ = try cloudKitService.stageAssetFile(from: videoURL, named: assetName, includesInBackup: includesInBackup)
+        _ = try await cloudKitService.stageAssetFileAsync(from: videoURL, named: assetName, includesInBackup: includesInBackup)
         return assetName
     }
 
     private func decodeAndCacheFullImage(from fileURL: URL, cacheKey: String) async throws -> UIImage {
-        try await withCheckedThrowingContinuation { continuation in
-            fullImageDecodeQueue.async {
-                guard let image = UIImage(contentsOfFile: fileURL.path) else {
-                    continuation.resume(throwing: CloudKitError.assetNotFound)
-                    return
-                }
+        let preparedImage = try await Self.decodeFullImage(from: fileURL)
+        decodedFullImageCache.setObject(
+            preparedImage,
+            forKey: cacheKey as NSString,
+            cost: cacheCost(for: preparedImage)
+        )
+        return preparedImage
+    }
 
-                let preparedImage = image.preparingForDisplay() ?? image
-                self.decodedFullImageCache.setObject(
-                    preparedImage,
-                    forKey: cacheKey as NSString,
-                    cost: self.cacheCost(for: preparedImage)
-                )
-                continuation.resume(returning: preparedImage)
-            }
+    @concurrent
+    nonisolated private static func decodeFullImage(from fileURL: URL) async throws -> UIImage {
+        guard let image = UIImage(contentsOfFile: fileURL.path) else {
+            throw CloudKitError.assetNotFound
         }
+        return image.preparingForDisplay() ?? image
     }
 
     private func cacheCost(for image: UIImage) -> Int {
@@ -1128,13 +1124,11 @@ final class PhotoStorageService {
     private func copyAsset(named assetName: String, to directory: URL) async throws {
         let sourceURL = try await cloudKitService.loadAssetURL(named: assetName)
         let destinationURL = directory.appendingPathComponent(assetName)
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            try FileManager.default.removeItem(at: destinationURL)
-        }
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        try await PhotoAssetFileWorker.copyReplacingItem(from: sourceURL, to: destinationURL)
     }
 
-    private func imageFileExtension(for imageData: Data) -> String {
+    @concurrent
+    nonisolated private static func imageFileExtension(for imageData: Data) async -> String {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let type = CGImageSourceGetType(source) else {
             return "heic"
@@ -1149,18 +1143,20 @@ final class PhotoStorageService {
         return "heic"
     }
 
-    private func exifMetadata(from imageData: Data) -> (captureDate: Date?, location: (latitude: Double, longitude: Double)?)? {
+    @concurrent
+    nonisolated private static func exifMetadata(from imageData: Data) async -> (captureDate: Date?, location: (latitude: Double, longitude: Double)?)? {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             return nil
         }
 
-        let captureDate = extractCaptureDate(from: metadata)
-        let location = extractLocation(from: metadata)
+        let captureDate = Self.extractCaptureDate(from: metadata)
+        let location = Self.extractLocation(from: metadata)
         return (captureDate: captureDate, location: location)
     }
 
-    private func exifMetadata(from imageURL: URL) -> (captureDate: Date?, location: (latitude: Double, longitude: Double)?)? {
+    @concurrent
+    nonisolated private static func exifMetadata(from imageURL: URL) async -> (captureDate: Date?, location: (latitude: Double, longitude: Double)?)? {
         let sourceOptions: [CFString: Any] = [
             kCGImageSourceShouldCache: false
         ]
@@ -1170,12 +1166,12 @@ final class PhotoStorageService {
             return nil
         }
 
-        let captureDate = extractCaptureDate(from: metadata)
-        let location = extractLocation(from: metadata)
+        let captureDate = Self.extractCaptureDate(from: metadata)
+        let location = Self.extractLocation(from: metadata)
         return (captureDate: captureDate, location: location)
     }
 
-    private func extractCaptureDate(from metadata: [CFString: Any]) -> Date? {
+    nonisolated private static func extractCaptureDate(from metadata: [CFString: Any]) -> Date? {
         let exif = metadata[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let tiff = metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
 
@@ -1184,19 +1180,19 @@ final class PhotoStorageService {
 
         if let exifDateString = exif?[kCGImagePropertyExifDateTimeOriginal] as? String
             ?? exif?[kCGImagePropertyExifDateTimeDigitized] as? String,
-           let parsedExifDate = parseExifDate(exifDateString, offset: offsetTime) {
+           let parsedExifDate = Self.parseExifDate(exifDateString, offset: offsetTime) {
             return parsedExifDate
         }
 
         if let tiffDateString = tiff?[kCGImagePropertyTIFFDateTime] as? String,
-           let parsedTiffDate = parseExifDate(tiffDateString, offset: nil) {
+           let parsedTiffDate = Self.parseExifDate(tiffDateString, offset: nil) {
             return parsedTiffDate
         }
 
         return nil
     }
 
-    private func extractLocation(from metadata: [CFString: Any]) -> (latitude: Double, longitude: Double)? {
+    nonisolated private static func extractLocation(from metadata: [CFString: Any]) -> (latitude: Double, longitude: Double)? {
         guard let gps = metadata[kCGImagePropertyGPSDictionary] as? [CFString: Any],
               let rawLatitude = gps[kCGImagePropertyGPSLatitude] as? Double,
               let rawLongitude = gps[kCGImagePropertyGPSLongitude] as? Double else {
@@ -1211,36 +1207,36 @@ final class PhotoStorageService {
         return (latitude, longitude)
     }
 
-    private func parseExifDate(_ dateString: String, offset: String?) -> Date? {
+    nonisolated private static func parseExifDate(_ dateString: String, offset: String?) -> Date? {
         if let offset,
-           let date = exifDateTimeWithOffsetFormatter.date(from: "\(dateString)\(offset)") {
+           let date = Self.exifDateTimeWithOffsetFormatter.date(from: "\(dateString)\(offset)") {
             return date
         }
-        return exifDateTimeFormatter.date(from: dateString)
+        return Self.exifDateTimeFormatter.date(from: dateString)
     }
 
-    private var exifDateTimeFormatter: DateFormatter {
+    nonisolated private static var exifDateTimeFormatter: DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return formatter
     }
 
-    private var exifDateTimeWithOffsetFormatter: DateFormatter {
+    nonisolated private static var exifDateTimeWithOffsetFormatter: DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy:MM:dd HH:mm:ssXXXXX"
         return formatter
     }
 
-    private func updateModifiedTimestamps(for photos: [DailyPhoto]) {
+    nonisolated private func updateModifiedTimestamps(for photos: [DailyPhoto]) {
         let now = Date()
         for photo in photos {
             photo.modifiedAt = now
         }
     }
 
-    private func assetNames(for photo: DailyPhoto) -> [String] {
+    nonisolated private func assetNames(for photo: DailyPhoto) -> [String] {
         Set([
             photo.fullImageAssetName,
             photo.livePhotoImageAssetName,
@@ -1304,7 +1300,7 @@ final class PhotoStorageService {
         }
     }
 
-    private static func dateRangePredicate(from startDate: Date, to endDate: Date) -> NSPredicate {
+    nonisolated private static func dateRangePredicate(from startDate: Date, to endDate: Date) -> NSPredicate {
         let calendar = Calendar.current
         let normalizedStartDate = calendar.startOfDay(for: min(startDate, endDate))
         let normalizedEndDate = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: max(startDate, endDate))) ?? max(startDate, endDate)
@@ -1322,9 +1318,9 @@ final class PhotoStorageService {
         saveChanges: Bool = true
     ) async throws -> StoredPendingPhoto {
         let photoID = UUID()
-        let exifMetadata = exifMetadata(from: imageData)
+        let exifMetadata = await Self.exifMetadata(from: imageData)
         let thumbnailData = await thumbnailService.generateThumbnailAsync(from: imageData)
-        let importFingerprint = try fingerprint(imageData: imageData, livePhotoVideoURL: livePhotoVideoURL)
+        let importFingerprint = try await fingerprint(imageData: imageData, livePhotoVideoURL: livePhotoVideoURL)
         let imageAssetName = try await stageStillAsset(
             data: imageData,
             photoID: photoID,
@@ -1389,20 +1385,15 @@ final class PhotoStorageService {
         }
     }
 
-    private func fingerprint(for payload: ImportedPhotoPayload) throws -> String {
-        try fingerprint(imageData: payload.imageData, livePhotoVideoURL: payload.livePhotoVideoURL)
+    private func fingerprint(for payload: ImportedPhotoPayload) async throws -> String {
+        try await fingerprint(imageData: payload.imageData, livePhotoVideoURL: payload.livePhotoVideoURL)
     }
 
-    private func fingerprint(imageData: Data, livePhotoVideoURL: URL?) throws -> String {
-        let imageDigest = SHA256.hash(data: imageData).hexString
-
-        if let livePhotoVideoURL {
-            let videoData = try Data(contentsOf: livePhotoVideoURL)
-            let videoDigest = SHA256.hash(data: videoData).hexString
-            return "\(imageDigest):\(videoDigest)"
-        }
-
-        return imageDigest
+    private func fingerprint(imageData: Data, livePhotoVideoURL: URL?) async throws -> String {
+        try await PhotoAssetFileWorker.fingerprint(
+            imageData: imageData,
+            videoURL: livePhotoVideoURL
+        )
     }
 
     @MainActor

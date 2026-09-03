@@ -103,14 +103,14 @@ final class CloudKitService {
         let sourceExtension = videoURL.pathExtension
         let fileExtension = sourceExtension.isEmpty ? "mov" : sourceExtension
         let assetName = assetRecordName(photoID: photoID, role: role, fileExtension: fileExtension)
-        let data = try Data(contentsOf: videoURL)
+        let digest = try await PhotoAssetFileWorker.digestAndByteCount(at: videoURL)
         try await saveAssetFile(
             sourceURL: videoURL,
-            data: data,
+            byteCount: digest.byteCount,
             assetName: assetName,
             photoID: photoID,
             role: role,
-            checksum: SHA256Hasher.hexDigest(for: data)
+            checksum: digest.checksum
         )
         return assetName
     }
@@ -231,6 +231,30 @@ final class CloudKitService {
         return destinationURL
     }
 
+    func stageAssetDataAsync(
+        _ data: Data,
+        named assetName: String,
+        includesInBackup: Bool = false
+    ) async throws -> URL {
+        try await PhotoAssetFileWorker.stage(
+            data: data,
+            at: stagingFileURL(for: assetName),
+            includesInBackup: includesInBackup
+        )
+    }
+
+    func stageAssetFileAsync(
+        from sourceURL: URL,
+        named assetName: String,
+        includesInBackup: Bool = false
+    ) async throws -> URL {
+        try await PhotoAssetFileWorker.stage(
+            file: sourceURL,
+            at: stagingFileURL(for: assetName),
+            includesInBackup: includesInBackup
+        )
+    }
+
     func stagedAssetURL(named assetName: String) -> URL? {
         let stagedURL = stagingFileURL(for: assetName)
         guard fileManager.fileExists(atPath: stagedURL.path) else {
@@ -252,15 +276,15 @@ final class CloudKitService {
             throw CloudKitError.assetNotFound
         }
 
-        let data = try Data(contentsOf: sourceURL)
-        logger.log("upload-staged-asset-start name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) bytes=\(data.count, privacy: .public) source=\(sourceURL.path(percentEncoded: false), privacy: .public)")
+        let digest = try await PhotoAssetFileWorker.digestAndByteCount(at: sourceURL)
+        logger.log("upload-staged-asset-start name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) bytes=\(digest.byteCount, privacy: .public) source=\(sourceURL.path(percentEncoded: false), privacy: .public)")
         try await saveAssetFile(
             sourceURL: sourceURL,
-            data: data,
+            byteCount: digest.byteCount,
             assetName: assetName,
             photoID: photoID,
             role: role,
-            checksum: SHA256Hasher.hexDigest(for: data)
+            checksum: digest.checksum
         )
 
         if sourceURL.deletingLastPathComponent() == stagingDirectoryURL {
@@ -525,7 +549,7 @@ final class CloudKitService {
 
         try await saveAssetFile(
             sourceURL: temporaryURL,
-            data: data,
+            byteCount: Int64(data.count),
             assetName: assetName,
             photoID: photoID,
             role: role,
@@ -535,7 +559,7 @@ final class CloudKitService {
 
     private func saveAssetFile(
         sourceURL: URL,
-        data: Data,
+        byteCount: Int64,
         assetName: String,
         photoID: UUID,
         role: PhotoAssetRole,
@@ -547,7 +571,7 @@ final class CloudKitService {
         record[RecordKey.photoID] = photoID.uuidString as CKRecordValue
         record[RecordKey.role] = role.rawValue as CKRecordValue
         record[RecordKey.checksum] = checksum as CKRecordValue
-        record[RecordKey.byteCount] = NSNumber(value: data.count)
+        record[RecordKey.byteCount] = NSNumber(value: byteCount)
 
         do {
             let results = try await privateDatabase.modifyRecords(
