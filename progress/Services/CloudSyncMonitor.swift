@@ -432,6 +432,19 @@ final class CloudSyncMonitor: ObservableObject {
                     PhotoUploadState.paused.rawValue
                 ]
 
+                // In-memory preview and UI-test stores do not support GROUP BY.
+                // Count each state without materializing photo objects instead.
+                if context.persistentStoreCoordinator?.persistentStores.contains(where: {
+                    $0.type != NSSQLiteStoreType
+                }) == true {
+                    let counts = try states.map { state in
+                        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "DailyPhoto")
+                        request.predicate = NSPredicate(format: "uploadStateRaw == %@", state)
+                        return try context.count(for: request)
+                    }
+                    return (counts[0], counts[1], counts[2], counts[3])
+                }
+
                 let countExpression = NSExpressionDescription()
                 countExpression.name = "count"
                 countExpression.expression = NSExpression(

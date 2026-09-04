@@ -865,6 +865,7 @@ struct ExperimentalCapturePreviewOverlay: View {
             }
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("capturePreviewOverlay")
         .accessibilityValue(isMirrored ? "Mirrored" : "Original")
         .gesture(

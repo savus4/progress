@@ -20,6 +20,16 @@ final class PersistenceController: ObservableObject {
 
     static let shared = PersistenceController()
 
+    // Reuse entity descriptions across live, preview, and test containers so
+    // DailyPhoto(context:) cannot resolve an entity from another model instance.
+    private static let managedObjectModel: NSManagedObjectModel = {
+        guard let url = Bundle(for: PersistenceController.self).url(forResource: "progress", withExtension: "momd"),
+              let model = NSManagedObjectModel(contentsOf: url) else {
+            preconditionFailure("Unable to load the progress Core Data model")
+        }
+        return model
+    }()
+
     @MainActor
     static let preview: PersistenceController = {
         let result = PersistenceController(inMemory: true)
@@ -95,9 +105,9 @@ final class PersistenceController: ObservableObject {
             || processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
             || processInfo.environment["UI_TEST_IN_MEMORY_STORE"] == "1"
         container = if shouldUseInMemory {
-            NSPersistentContainer(name: "progress")
+            NSPersistentContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
         } else {
-            NSPersistentCloudKitContainer(name: "progress")
+            NSPersistentCloudKitContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
         }
         for description in container.persistentStoreDescriptions {
             description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
