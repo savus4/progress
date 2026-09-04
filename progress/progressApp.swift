@@ -36,7 +36,9 @@ struct progressApp: App {
     }
 
     private func loadRocketSimConnect() {
-        #if DEBUG
+        #if DEBUG && targetEnvironment(simulator)
+        // Core Data inspection can deadlock the app; enable only when needed.
+        guard ProcessInfo.processInfo.environment["ROCKETSIM_CONNECT_ENABLED"] == "1" else { return }
         guard (Bundle(path: "/Applications/RocketSim.app/Contents/Frameworks/RocketSimConnectLinker.nocache.framework")?.load() == true) else {
             print("Failed to load linker framework")
             return

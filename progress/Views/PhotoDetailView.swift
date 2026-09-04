@@ -877,91 +877,134 @@ private final class ToolbarConfigViewController: UIViewController {
     private var appliedConfiguration: Configuration?
     private weak var configuredViewController: UIViewController?
     private weak var configuredNavigationController: UINavigationController?
+    private var isAppearing = false
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
+    // Keep item identity stable when location, selection, or visibility changes.
+    // Replacing the items makes UIKit rebuild its button wrappers during layout.
+    private lazy var backButton = closeItem()
+    private lazy var moreButton = moreItem()
+    private lazy var shareButton = Self.toolbarButton(
+        systemName: "square.and.arrow.up",
+        accessibilityLabel: "Share", target: self, action: #selector(shareTapped)
+    )
+    private lazy var deleteButton = Self.toolbarButton(
+        systemName: "trash",
+        accessibilityLabel: "Delete", target: self, action: #selector(deleteTapped(_:))
+    )
+    private lazy var heartButton = Self.toolbarButton(
+        systemName: "heart",
+        accessibilityLabel: "Favorite", target: self, action: #selector(heartTapped)
+    )
+    private lazy var livePhotoFavoriteButton = Self.toolbarButton(
+        image: Self.favoriteLivePhotoImage(isSelected: false),
+        accessibilityLabel: "Favorite Live Photo", target: self, action: #selector(favoriteLivePhotoTapped)
+    )
+    private lazy var shareItem = UIBarButtonItem(customView: shareButton)
+    private lazy var heartItem = UIBarButtonItem(customView: heartButton)
+    private lazy var livePhotoFavoriteItem = UIBarButtonItem(customView: livePhotoFavoriteButton)
+    private lazy var deleteItem = UIBarButtonItem(customView: deleteButton)
+    private lazy var bottomItems: [UIBarButtonItem] = [
+        shareItem, Self.flexibleSpaceItem(), heartItem,
+        livePhotoFavoriteItem, Self.flexibleSpaceItem(), deleteItem
+    ]
+
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        isAppearing = true
+        applyConfigurationIfPossible()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
         applyConfigurationIfPossible()
     }
 
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
-        applyConfigurationIfPossible()
+        if parent == nil {
+            clearToolbar()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        clearToolbar()
+        // A share sheet can temporarily cover this controller. Keep its items
+        // until dismantling instead of tearing them down and rebuilding them.
+        isAppearing = false
     }
 
     func applyConfigurationIfPossible() {
-        guard let configuration,
+        guard isAppearing,
+              let configuration,
               let parentViewController = parent,
-              let navigationController = parentViewController.navigationController else { return }
+              let navigationController = parentViewController.navigationController,
+              navigationController.view.window != nil,
+              navigationController.view.bounds.width > 0 else { return }
 
         let chromeViewController = navigationController.topViewController ?? parentViewController
 
         guard appliedConfiguration != configuration || configuredViewController !== chromeViewController else { return }
+        let previousConfiguration = appliedConfiguration
+        let needsInstallation = configuredViewController !== chromeViewController
         appliedConfiguration = configuration
         configuredViewController = chromeViewController
         configuredNavigationController = navigationController
 
-        chromeViewController.navigationItem.hidesBackButton = true
-        chromeViewController.navigationItem.leftItemsSupplementBackButton = false
-        chromeViewController.navigationItem.leftBarButtonItem = closeItem()
-        chromeViewController.navigationItem.titleView = makeTitleView(configuration: configuration)
-        chromeViewController.navigationItem.rightBarButtonItem = moreItem(configuration: configuration)
+        // Keep both the bar item and custom control in sync; UIKit can propagate
+        // the item's enabled state to its custom view when installing the item.
+        shareItem.isEnabled = configuration.isShareEnabled
+        deleteItem.isEnabled = configuration.isDeleteEnabled
+        heartItem.isEnabled = configuration.isHeartEnabled
+        livePhotoFavoriteItem.isEnabled = configuration.isFavoriteLivePhotoEnabled
+        shareButton.isEnabled = configuration.isShareEnabled
+        deleteButton.isEnabled = configuration.isDeleteEnabled
+        heartButton.isEnabled = configuration.isHeartEnabled
+        livePhotoFavoriteButton.isEnabled = configuration.isFavoriteLivePhotoEnabled
 
-        applyNavigationAppearance(to: navigationController)
+        if previousConfiguration?.isHearted != configuration.isHearted {
+            heartButton.setImage(UIImage(
+                systemName: configuration.isHearted ? "heart.fill" : "heart",
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+            ), for: .normal)
+            heartButton.accessibilityLabel = configuration.isHearted ? "Remove Favorite" : "Favorite"
+            heartButton.tintColor = configuration.isHearted ? .systemRed : .white
+        }
+        if previousConfiguration?.isFavoriteLivePhoto != configuration.isFavoriteLivePhoto {
+            livePhotoFavoriteButton.setImage(
+                Self.favoriteLivePhotoImage(isSelected: configuration.isFavoriteLivePhoto),
+                for: .normal
+            )
+            livePhotoFavoriteButton.accessibilityLabel = configuration.isFavoriteLivePhoto ? "Remove Favorite Live Photo" : "Favorite Live Photo"
+            livePhotoFavoriteButton.tintColor = configuration.isFavoriteLivePhoto ? .systemBlue : .white
+        }
+        if needsInstallation || previousConfiguration?.locationTitle != configuration.locationTitle ||
+            previousConfiguration?.dateTitle != configuration.dateTitle {
+            chromeViewController.navigationItem.titleView = makeTitleView(configuration: configuration)
+        }
+        if needsInstallation || previousConfiguration?.saveTitle != configuration.saveTitle ||
+            previousConfiguration?.saveImageSystemName != configuration.saveImageSystemName ||
+            previousConfiguration?.isSaveEnabled != configuration.isSaveEnabled ||
+            previousConfiguration?.isShowOnMapEnabled != configuration.isShowOnMapEnabled {
+            moreButton.menu = moreMenu(configuration: configuration)
+        }
 
-        let share = Self.compactBarButtonItem(
-            systemName: "square.and.arrow.up",
-            accessibilityLabel: "Share",
-            target: self,
-            action: #selector(shareTapped)
-        )
-        share.isEnabled = configuration.isShareEnabled
-
-        let delete = Self.compactBarButtonItem(
-            systemName: "trash",
-            accessibilityLabel: "Delete",
-            target: self,
-            action: #selector(deleteTapped(_:))
-        )
-        delete.isEnabled = configuration.isDeleteEnabled
-
-        let heart = Self.compactBarButtonItem(
-            systemName: configuration.isHearted ? "heart.fill" : "heart",
-            accessibilityLabel: configuration.isHearted ? "Remove Favorite" : "Favorite",
-            target: self,
-            action: #selector(heartTapped)
-        )
-        heart.tintColor = configuration.isHearted ? .systemRed : .white
-        heart.isEnabled = configuration.isHeartEnabled
-
-        let livePhotoFavorite = Self.compactBarButtonItem(
-            image: Self.favoriteLivePhotoImage(isSelected: configuration.isFavoriteLivePhoto),
-            accessibilityLabel: configuration.isFavoriteLivePhoto ? "Remove Favorite Live Photo" : "Favorite Live Photo",
-            target: self,
-            action: #selector(favoriteLivePhotoTapped)
-        )
-        livePhotoFavorite.tintColor = configuration.isFavoriteLivePhoto ? .systemBlue : .white
-        livePhotoFavorite.isEnabled = configuration.isFavoriteLivePhotoEnabled
-
-        let items: [UIBarButtonItem] = [
-            share,
-            Self.flexibleSpaceItem(),
-            heart,
-            livePhotoFavorite,
-            Self.flexibleSpaceItem(),
-            delete
-        ]
-
-        chromeViewController.setToolbarItems(items, animated: false)
-        navigationController.navigationBar.tintColor = .white
-        navigationController.toolbar.tintColor = .white
-        navigationController.setNavigationBarHidden(false, animated: false)
-        navigationController.setToolbarHidden(false, animated: false)
-        setChromeVisible(configuration.isVisible, in: navigationController)
+        if needsInstallation {
+            applyNavigationAppearance(to: navigationController)
+            navigationController.navigationBar.tintColor = .white
+            navigationController.toolbar.tintColor = .white
+            navigationController.setNavigationBarHidden(false, animated: false)
+            navigationController.setToolbarHidden(false, animated: false)
+            // Give the initially hidden toolbar its geometry before adding items.
+            navigationController.view.layoutIfNeeded()
+            chromeViewController.navigationItem.hidesBackButton = true
+            chromeViewController.navigationItem.leftItemsSupplementBackButton = false
+            chromeViewController.navigationItem.leftBarButtonItem = backButton
+            chromeViewController.navigationItem.rightBarButtonItem = moreButton
+            chromeViewController.setToolbarItems(bottomItems, animated: false)
+        }
+        if needsInstallation || previousConfiguration?.isVisible != configuration.isVisible {
+            setChromeVisible(configuration.isVisible, in: navigationController)
+        }
     }
 
     func clearToolbar() {
@@ -1027,7 +1070,7 @@ private final class ToolbarConfigViewController: UIViewController {
         return item
     }
 
-    private func moreItem(configuration: Configuration) -> UIBarButtonItem {
+    private func moreMenu(configuration: Configuration) -> UIMenu {
         let saveAction = UIAction(
             title: configuration.saveTitle,
             image: UIImage(systemName: configuration.saveImageSystemName)
@@ -1048,6 +1091,10 @@ private final class ToolbarConfigViewController: UIViewController {
             showOnMapAction.attributes = .disabled
         }
 
+        return UIMenu(children: [saveAction, showOnMapAction])
+    }
+
+    private func moreItem() -> UIBarButtonItem {
         let image = UIImage(systemName: "ellipsis.circle")?.applyingSymbolConfiguration(
             UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
         )
@@ -1058,43 +1105,42 @@ private final class ToolbarConfigViewController: UIViewController {
             action: nil
         )
         item.accessibilityLabel = "More Photo Actions"
-        item.menu = UIMenu(children: [saveAction, showOnMapAction])
         return item
     }
 
-    private static func compactBarButtonItem(
+    private static func toolbarButton(
         systemName: String,
         accessibilityLabel: String,
         target: Any?,
         action: Selector
-    ) -> UIBarButtonItem {
+    ) -> PhotoDetailToolbarButton {
         let image = UIImage(systemName: systemName)?.applyingSymbolConfiguration(
             UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
         )
-        let item = UIBarButtonItem(
+        return toolbarButton(
             image: image,
-            style: .plain,
+            accessibilityLabel: accessibilityLabel,
             target: target,
             action: action
         )
-        item.accessibilityLabel = accessibilityLabel
-        return item
     }
 
-    private static func compactBarButtonItem(
+    private static func toolbarButton(
         image: UIImage?,
         accessibilityLabel: String,
         target: Any?,
         action: Selector
-    ) -> UIBarButtonItem {
-        let item = UIBarButtonItem(
-            image: image,
-            style: .plain,
-            target: target,
-            action: action
-        )
-        item.accessibilityLabel = accessibilityLabel
-        return item
+    ) -> PhotoDetailToolbarButton {
+        // Image-based UIBarButtonItems create _UIModernBarButton wrappers whose
+        // required horizontal insets conflict with a transient zero-width pass.
+        // A custom control supplies its own fitting size without those insets.
+        let button = PhotoDetailToolbarButton(type: .system)
+        button.frame = CGRect(origin: .zero, size: button.intrinsicContentSize)
+        button.tintColor = .white
+        button.setImage(image, for: .normal)
+        button.accessibilityLabel = accessibilityLabel
+        button.addTarget(target, action: action, for: .touchUpInside)
+        return button
     }
 
     private static func favoriteLivePhotoImage(isSelected: Bool) -> UIImage? {
@@ -1122,7 +1168,7 @@ private final class ToolbarConfigViewController: UIViewController {
         configuration?.onShare()
     }
 
-    @objc private func deleteTapped(_ sender: UIBarButtonItem) {
+    @objc private func deleteTapped(_ sender: UIButton) {
         guard let configuredViewController,
               configuredViewController.presentedViewController == nil else { return }
 
@@ -1135,7 +1181,8 @@ private final class ToolbarConfigViewController: UIViewController {
             self?.configuration?.onDelete()
         })
         confirmation.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        confirmation.popoverPresentationController?.barButtonItem = sender
+        confirmation.popoverPresentationController?.sourceView = sender
+        confirmation.popoverPresentationController?.sourceRect = sender.bounds
 
         configuredViewController.present(confirmation, animated: true)
     }

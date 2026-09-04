@@ -56,7 +56,9 @@ struct ExportDocumentPicker: UIViewControllerRepresentable {
     }
 }
 
-final class ImageActivityItemSource: NSObject, UIActivityItemSource {
+// UIKit may request share payloads from an NSItemProvider worker queue. These
+// sources only read immutable data; they must not inherit MainActor isolation.
+nonisolated final class ImageActivityItemSource: NSObject, UIActivityItemSource, Sendable {
     private let image: UIImage
     private let title: String
 
@@ -86,7 +88,7 @@ final class ImageActivityItemSource: NSObject, UIActivityItemSource {
     }
 }
 
-final class URLActivityItemSource: NSObject, UIActivityItemSource {
+nonisolated final class URLActivityItemSource: NSObject, UIActivityItemSource, Sendable {
     private let url: URL
     private let title: String
     private let subject: String?
@@ -197,7 +199,7 @@ enum StillPhotoShareItemFactory {
     }
 }
 
-final class HEICDataActivityItemSource: NSObject, UIActivityItemSource {
+nonisolated final class HEICDataActivityItemSource: NSObject, UIActivityItemSource, Sendable {
     private let data: Data
     private let title: String
     private let previewImage: UIImage?
