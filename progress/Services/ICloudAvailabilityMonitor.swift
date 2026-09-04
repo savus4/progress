@@ -47,17 +47,15 @@ final class ICloudAvailabilityMonitor: ObservableObject {
     private var accountObserver: NSObjectProtocol?
     private var testingOverrideState: State?
 
-    private init(container: CKContainer = .default()) {
+    private init(container: CKContainer = CKContainer(identifier: CloudKitConfiguration.containerIdentifier)) {
         self.container = container
         accountObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name.CKAccountChanged,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                _ = Task<Void, Never> { @MainActor [weak self] in
-                    await self?.refresh()
-                }
+            Task { @MainActor [weak self] in
+                await self?.refresh()
             }
         }
 

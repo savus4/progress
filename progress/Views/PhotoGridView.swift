@@ -204,6 +204,13 @@ struct PhotoGridView: View {
             }
             .navigationTitle(isMapModeActive ? "" : "Work in Progress")
             .toolbar {
+                if isSelectionMode {
+                    ToolbarItem(placement: .title) {
+                        Text("")
+                            .accessibilityHidden(true)
+                    }
+                }
+
                 ToolbarItem(placement: .topBarLeading) {
                     if !dataController.isEmpty, !isMapModeActive {
                         Button(isSelectionMode ? "Cancel" : "Select") {

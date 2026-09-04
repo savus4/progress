@@ -119,9 +119,9 @@ final class PhotoLibrarySaveService {
         )
     }
 
-    private func saveResolvedItems(_ items: [ResolvedPhotoLibrarySaveItem]) async throws {
+    nonisolated private func saveResolvedItems(_ items: [ResolvedPhotoLibrarySaveItem]) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHPhotoLibrary.shared().performChanges {
+            let changes: @Sendable () -> Void = {
                 for item in items {
                     let creationRequest = PHAssetCreationRequest.forAsset()
                     creationRequest.creationDate = item.captureDate
@@ -132,7 +132,8 @@ final class PhotoLibrarySaveService {
                         creationRequest.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
                     }
                 }
-            } completionHandler: { success, error in
+            }
+            let completion: @Sendable (Bool, Error?) -> Void = { success, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else if success {
@@ -141,6 +142,7 @@ final class PhotoLibrarySaveService {
                     continuation.resume(throwing: PhotoLibrarySaveError.saveFailed)
                 }
             }
+            PHPhotoLibrary.shared().performChanges(changes, completionHandler: completion)
         }
     }
 
@@ -150,7 +152,7 @@ final class PhotoLibrarySaveService {
     }
 }
 
-private struct ResolvedPhotoLibrarySaveItem {
+nonisolated private struct ResolvedPhotoLibrarySaveItem: Sendable {
     let imageURL: URL
     let videoURL: URL?
     let captureDate: Date?

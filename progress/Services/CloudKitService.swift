@@ -13,6 +13,10 @@ enum PhotoAssetRole: String, Sendable {
     case livePhotoVideo
 }
 
+enum CloudKitConfiguration {
+    static let containerIdentifier = "iCloud.me.riepl.progress"
+}
+
 final class CloudKitService {
     static let shared = CloudKitService()
     static let assetTransferDidChangeNotification = Notification.Name("CloudKitService.assetTransferDidChange")
@@ -48,7 +52,7 @@ final class CloudKitService {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudKitAsset")
 
     private init() {
-        container = CKContainer.default()
+        container = CKContainer(identifier: CloudKitConfiguration.containerIdentifier)
         privateDatabase = container.privateCloudDatabase
         systemCloudKitCacheDirectoryURL = Self.makeSystemCloudKitCacheDirectoryURL()
         stagingDirectoryURL = Self.makeStagingDirectoryURL()

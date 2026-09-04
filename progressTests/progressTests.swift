@@ -385,6 +385,30 @@ struct ProgressCoreFunctionalityTests {
     }
 
     @MainActor
+    @Test("PhotoStorageService primes a captured thumbnail for immediate grid display")
+    func photoStoragePrimesCapturedThumbnailCache() async throws {
+        let context = PersistenceController(inMemory: true).container.viewContext
+        let image = makeImage(size: CGSize(width: 640, height: 480), color: .systemPink)
+        let imageData = try #require(image.jpegData(compressionQuality: 0.9))
+
+        let objectID = try await PhotoStorageService.shared.savePhoto(
+            image: image,
+            imageData: imageData,
+            location: nil,
+            context: context,
+            enqueuesPendingUpload: false
+        )
+        let photo = try #require(context.existingObject(with: objectID) as? DailyPhoto)
+        let assetName = try #require(photo.fullImageAssetName)
+        defer {
+            DecodedThumbnailCache.shared.removeImage(for: objectID)
+            CloudKitService.shared.deleteAsset(named: assetName)
+        }
+
+        #expect(DecodedThumbnailCache.shared.cachedImage(for: objectID) != nil)
+    }
+
+    @MainActor
     @Test("PhotoStorageService skips exact duplicate imports and reports duplicate count")
     func photoStorageSkipsExactDuplicateImports() async throws {
         let persistence = PersistenceController(inMemory: true)

@@ -52,8 +52,7 @@ private struct PersistenceRootView: View {
     var body: some View {
         switch persistenceController.loadState {
         case .loading:
-            ProgressView("Opening your library…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            LibraryLoadingView()
         case .loaded:
             ContentView()
                 .environment(\.managedObjectContext, persistenceController.container.viewContext)
@@ -67,6 +66,65 @@ private struct PersistenceRootView: View {
                     persistenceController.retryLoading()
                 }
                 .buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+private struct LibraryLoadingView: View {
+    @State private var placeholderOpacity = 0.45
+    @State private var showsDelayedIndicator = false
+
+    private let columns = Array(
+        repeating: GridItem(.flexible(), spacing: 2),
+        count: 3
+    )
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(0..<18, id: \.self) { index in
+                        RoundedRectangle(cornerRadius: 2, style: .continuous)
+                            .fill(index.isMultiple(of: 4) ? Color.secondary.opacity(0.18) : Color.secondary.opacity(0.12))
+                            .aspectRatio(1, contentMode: .fit)
+                    }
+                }
+                .opacity(placeholderOpacity)
+            }
+            .scrollDisabled(true)
+            .navigationTitle("Work in Progress")
+            .background(Color(uiColor: .systemBackground))
+            .overlay(alignment: .bottom) {
+                if showsDelayedIndicator {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Still opening your library…")
+                            .font(.subheadline)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Opening your photo library")
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) {
+                placeholderOpacity = 0.8
+            }
+        }
+        .task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                showsDelayedIndicator = true
             }
         }
     }

@@ -546,6 +546,12 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        loadVisibleThumbnails()
+        prefetchNearVisibleThumbnails()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateLayoutItemSize()

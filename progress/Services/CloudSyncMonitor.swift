@@ -69,7 +69,7 @@ final class CloudSyncMonitor: ObservableObject {
                 as? NSPersistentCloudKitContainer.Event else {
                 return
             }
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.handle(event: event)
             }
         }
@@ -79,7 +79,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.updateICloudAvailability()
             }
         }
@@ -89,7 +89,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.scheduleUploadStatusRefresh(delay: .zero)
             }
         }
@@ -103,7 +103,7 @@ final class CloudSyncMonitor: ObservableObject {
                 return
             }
 
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.isUploadProcessorActive = isProcessing
             }
         }
@@ -113,7 +113,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.scheduleUploadStatusRefresh()
             }
         }
@@ -123,7 +123,7 @@ final class CloudSyncMonitor: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.handleRemoteStoreChange()
             }
         }
@@ -141,7 +141,7 @@ final class CloudSyncMonitor: ObservableObject {
                 return
             }
 
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.handleAssetTransfer(kind: kind, phase: phase, assetName: assetName)
             }
         }

@@ -180,6 +180,12 @@ final class PhotoStorageService {
             await PendingUploadManifestService.shared.remove(photoID: photoID)
             throw error
         }
+
+        // The grid reads thumbnails through a separate background context. Prime the
+        // decoded cache before returning so a photo saved while the grid is covered by
+        // the camera is immediately available, even when no CloudKit event follows.
+        _ = await DecodedThumbnailCache.shared.image(for: objectID, data: thumbnailData)
+
         if enqueuesPendingUpload {
             Task.detached(priority: .utility) {
                 await PhotoUploadService.shared.enqueuePendingUploads()

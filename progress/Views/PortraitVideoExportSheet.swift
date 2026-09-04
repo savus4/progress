@@ -33,6 +33,7 @@ struct PortraitVideoExportSheet: View {
     @State private var smoothedRemainingSeconds: TimeInterval?
     @State private var isShowingDiscardUnsavedExportAlert = false
     @State private var isShowingDiscardExportConfirmation = false
+    @State private var isShowingCancelExportConfirmation = false
     @State private var pausedSession: PortraitVideoExportPausedSession?
     @State private var isPauseRequested = false
     @State private var backgroundPauseTask: UIBackgroundTaskIdentifier = .invalid
@@ -461,7 +462,9 @@ struct PortraitVideoExportSheet: View {
             }
 
             if exportTask != nil {
-                Button(role: .destructive, action: cancelExport) {
+                Button(role: .destructive) {
+                    isShowingCancelExportConfirmation = true
+                } label: {
                     Label("Cancel Export", systemImage: "xmark.circle.fill")
                         .font(.headline.weight(.semibold))
                         .frame(maxWidth: .infinity)
@@ -469,6 +472,19 @@ struct PortraitVideoExportSheet: View {
                 }
                 .buttonStyle(floatingOverlayButtonStyle)
                 .foregroundStyle(.red)
+                .confirmationDialog(
+                    "Cancel video export?",
+                    isPresented: $isShowingCancelExportConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Cancel Export", role: .destructive) {
+                        cancelExport()
+                    }
+
+                    Button("Keep Exporting", role: .cancel) {}
+                } message: {
+                    Text("This will stop creating your video and discard its progress.")
+                }
             } else if let pausedSession, exportedVideoURL == nil {
                 pausedExportOfferView(pausedSession)
             } else if exportedVideoURL == nil {
@@ -1090,11 +1106,12 @@ struct PortraitVideoExportSheet: View {
         self.exportedVideoURL = nil
     }
 
-    private func saveVideoToPhotoLibrary(_ url: URL) async throws {
+    nonisolated private func saveVideoToPhotoLibrary(_ url: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHPhotoLibrary.shared().performChanges {
+            let changes: @Sendable () -> Void = {
                 PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
-            } completionHandler: { success, error in
+            }
+            let completion: @Sendable (Bool, Error?) -> Void = { success, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else if success {
@@ -1103,6 +1120,7 @@ struct PortraitVideoExportSheet: View {
                     continuation.resume(throwing: PortraitVideoSaveError.saveFailed)
                 }
             }
+            PHPhotoLibrary.shared().performChanges(changes, completionHandler: completion)
         }
     }
 

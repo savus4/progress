@@ -118,9 +118,10 @@ struct LivePhotoContainerView: UIViewRepresentable {
     let videoURL: URL
     let fallbackImage: UIImage
     var playsHintOnLoad = true
+    var onLoadCompleted: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(onLoadCompleted: onLoadCompleted)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -156,13 +157,20 @@ struct LivePhotoContainerView: UIViewRepresentable {
         )
         context.coordinator.livePhotoView = livePhotoView
         context.coordinator.fallbackImageView = fallbackImageView
+        context.coordinator.currentImageURL = imageURL
+        context.coordinator.currentVideoURL = videoURL
         livePhotoView.addGestureRecognizer(longPress)
 
-        loadLivePhoto(into: livePhotoView, fallbackImageView: fallbackImageView)
+        loadLivePhoto(
+            into: livePhotoView,
+            fallbackImageView: fallbackImageView,
+            coordinator: context.coordinator
+        )
         return container
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onLoadCompleted = onLoadCompleted
         context.coordinator.fallbackImageView?.image = fallbackImage
 
         if context.coordinator.currentImageURL != imageURL || context.coordinator.currentVideoURL != videoURL {
@@ -170,12 +178,29 @@ struct LivePhotoContainerView: UIViewRepresentable {
             context.coordinator.currentVideoURL = videoURL
             if let livePhotoView = context.coordinator.livePhotoView,
                let fallbackImageView = context.coordinator.fallbackImageView {
-                loadLivePhoto(into: livePhotoView, fallbackImageView: fallbackImageView)
+                loadLivePhoto(
+                    into: livePhotoView,
+                    fallbackImageView: fallbackImageView,
+                    coordinator: context.coordinator
+                )
             }
         }
     }
 
-    private func loadLivePhoto(into view: PHLivePhotoView, fallbackImageView: UIImageView) {
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.activeRequestID = nil
+        coordinator.livePhotoView?.stopPlayback()
+        coordinator.livePhotoView?.livePhoto = nil
+    }
+
+    private func loadLivePhoto(
+        into view: PHLivePhotoView,
+        fallbackImageView: UIImageView,
+        coordinator: Coordinator
+    ) {
+        let requestID = UUID()
+        coordinator.activeRequestID = requestID
+
         PHLivePhoto.request(
             withResourceFileURLs: [imageURL, videoURL],
             placeholderImage: nil,
@@ -183,6 +208,8 @@ struct LivePhotoContainerView: UIViewRepresentable {
             contentMode: .aspectFit
         ) { livePhoto, _ in
             DispatchQueue.main.async {
+                guard coordinator.activeRequestID == requestID else { return }
+
                 if let livePhoto {
                     view.livePhoto = livePhoto
                     view.isHidden = false
@@ -195,6 +222,8 @@ struct LivePhotoContainerView: UIViewRepresentable {
                     view.isHidden = true
                     fallbackImageView.isHidden = false
                 }
+
+                coordinator.onLoadCompleted(livePhoto != nil)
             }
         }
     }
@@ -204,6 +233,12 @@ struct LivePhotoContainerView: UIViewRepresentable {
         weak var fallbackImageView: UIImageView?
         var currentImageURL: URL?
         var currentVideoURL: URL?
+        var activeRequestID: UUID?
+        var onLoadCompleted: (Bool) -> Void
+
+        init(onLoadCompleted: @escaping (Bool) -> Void) {
+            self.onLoadCompleted = onLoadCompleted
+        }
 
         @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
             guard let view = livePhotoView else { return }
@@ -1163,7 +1198,9 @@ private struct PhotoDetailPageView: View {
     private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
 
     @State private var displayedImage: UIImage?
-    @State private var isLoadingImage = true
+    @State private var isLoadingMedia = true
+    @State private var shouldShowLoadingIndicator = false
+    @State private var didFailLivePhotoLoading = false
     @State private var livePhotoResources: LivePhotoResources?
     @State private var representedObjectID: NSManagedObjectID?
 
@@ -1176,7 +1213,8 @@ private struct PhotoDetailPageView: View {
                             imageURL: livePhotoResources.imageURL,
                             videoURL: livePhotoResources.videoURL,
                             fallbackImage: displayedImage,
-                            playsHintOnLoad: false
+                            playsHintOnLoad: false,
+                            onLoadCompleted: handleLivePhotoLoadCompleted
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.black)
@@ -1199,8 +1237,9 @@ private struct PhotoDetailPageView: View {
             Group {
                 if shouldShowLivePhotoStatusIndicator {
                     LivePhotoStatusIndicator(
-                        isLivePhoto: hasLivePhoto,
-                        isLoadingImage: isLoadingImage
+                        showsLoadingIndicator: isLoadingMedia && shouldShowLoadingIndicator,
+                        hasLivePhoto: hasLivePhoto,
+                        didFailLivePhotoLoading: didFailLivePhotoLoading
                     )
                 }
             }
@@ -1210,6 +1249,9 @@ private struct PhotoDetailPageView: View {
         .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
             await loadImage()
         }
+        .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
+            await revealLoadingIndicatorIfNeeded()
+        }
     }
 
     @MainActor
@@ -1218,9 +1260,11 @@ private struct PhotoDetailPageView: View {
         if representedObjectID != objectID {
             representedObjectID = objectID
             displayedImage = nil
-            isLoadingImage = true
         }
 
+        isLoadingMedia = true
+        shouldShowLoadingIndicator = false
+        didFailLivePhotoLoading = false
         livePhotoResources = nil
 
         if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: objectID) {
@@ -1239,19 +1283,21 @@ private struct PhotoDetailPageView: View {
         }
 
         guard let fullImage = try? await PhotoStorageService.shared.loadFullImage(named: item.fullImageAssetName) else {
-            isLoadingImage = false
+            didFailLivePhotoLoading = hasLivePhoto
+            isLoadingMedia = false
             return
         }
         guard !Task.isCancelled, representedObjectID == objectID else { return }
 
         displayedImage = fullImage
-        isLoadingImage = false
 
         guard isCurrentPage else {
+            isLoadingMedia = false
             return
         }
 
         guard hasLivePhoto else {
+            isLoadingMedia = false
             return
         }
 
@@ -1259,6 +1305,8 @@ private struct PhotoDetailPageView: View {
             imageAssetName: item.livePhotoImageAssetName,
             videoAssetName: item.livePhotoVideoAssetName
         ) else {
+            didFailLivePhotoLoading = true
+            isLoadingMedia = false
             return
         }
         guard !Task.isCancelled, representedObjectID == objectID else { return }
@@ -1267,6 +1315,27 @@ private struct PhotoDetailPageView: View {
             imageURL: resources.imageURL,
             videoURL: resources.videoURL
         )
+    }
+
+    @MainActor
+    private func handleLivePhotoLoadCompleted(_ isPlayable: Bool) {
+        guard isCurrentPage else { return }
+        didFailLivePhotoLoading = !isPlayable
+        isLoadingMedia = false
+    }
+
+    @MainActor
+    private func revealLoadingIndicatorIfNeeded() async {
+        shouldShowLoadingIndicator = false
+
+        do {
+            try await Task.sleep(for: .milliseconds(250))
+        } catch {
+            return
+        }
+
+        guard !Task.isCancelled, isLoadingMedia else { return }
+        shouldShowLoadingIndicator = true
     }
 
     private var hasLivePhoto: Bool {
@@ -1289,17 +1358,18 @@ private struct LivePhotoResources {
 }
 
 private struct LivePhotoStatusIndicator: View {
-    let isLivePhoto: Bool
-    let isLoadingImage: Bool
+    let showsLoadingIndicator: Bool
+    let hasLivePhoto: Bool
+    let didFailLivePhotoLoading: Bool
 
     var body: some View {
         ZStack {
-            if isLoadingImage {
+            if showsLoadingIndicator {
                 ProgressView()
                     .controlSize(.small)
                     .tint(.white)
             } else {
-                Image(systemName: isLivePhoto ? "livephoto" : "livephoto.slash")
+                Image(systemName: showsLivePhoto ? "livephoto" : "livephoto.slash")
                     .imageScale(.medium)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
@@ -1315,11 +1385,19 @@ private struct LivePhotoStatusIndicator: View {
     }
 
     private var statusAccessibilityLabel: String {
-        if isLoadingImage {
-            return "Loading Photo"
+        if showsLoadingIndicator {
+            return hasLivePhoto ? "Loading Live Photo" : "Loading Photo"
         }
 
-        return isLivePhoto ? "Live Photo" : "Still Photo"
+        if showsLivePhoto {
+            return "Live Photo"
+        }
+
+        return hasLivePhoto ? "Live Photo Unavailable" : "Still Photo"
+    }
+
+    private var showsLivePhoto: Bool {
+        hasLivePhoto && !didFailLivePhotoLoading
     }
 }
 
