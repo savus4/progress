@@ -8,6 +8,9 @@ import ImageIO
 @MainActor
 final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isAuthorized = false
+    @Published private(set) var isReadyForCapture = false
+    @Published private(set) var livePhotoAudioUnavailable = false
+    private var audioConfigurationID = UUID()
     @Published var previewLayer: AVCaptureVideoPreviewLayer?
     @Published var capturedImage: UIImage?
     @Published var capturedImageData: Data?
@@ -64,15 +67,54 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
     
-    func setupCamera() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            let configuration = self.configureCameraOnSessionQueue()
-            Task { @MainActor [weak self] in
-                self?.sensorAspectRatio = configuration.sensorAspectRatio
-                self?.isLivePhotoCaptureSupported = configuration.isLivePhotoCaptureSupported
+    func setupCamera() async {
+        let configuration = await withCheckedContinuation { continuation in
+            sessionQueue.async { [self] in
+                continuation.resume(returning: configureCameraOnSessionQueue())
             }
         }
+        sensorAspectRatio = configuration.sensorAspectRatio
+        isLivePhotoCaptureSupported = configuration.isLivePhotoCaptureSupported
+    }
+
+    func configureLivePhotoAudio(enabled: Bool) async {
+        let configurationID = UUID()
+        audioConfigurationID = configurationID
+        isReadyForCapture = false
+        let needsAudio = enabled && isLivePhotoCaptureSupported && !usesMockCapture
+        let authorized = await CameraMicrophonePermission.authorize(
+            enabled: needsAudio,
+            status: { AVCaptureDevice.authorizationStatus(for: .audio) },
+            request: { await AVCaptureDevice.requestAccess(for: .audio) }
+        )
+        guard !Task.isCancelled, audioConfigurationID == configurationID else { return }
+        let connected = await withCheckedContinuation { continuation in
+            sessionQueue.async { [self] in
+                continuation.resume(returning: configureAudioInputOnSessionQueue(enabled: authorized))
+            }
+        }
+        guard !Task.isCancelled, audioConfigurationID == configurationID else { return }
+        livePhotoAudioUnavailable = needsAudio && !connected
+        isReadyForCapture = true
+    }
+
+    nonisolated private func configureAudioInputOnSessionQueue(enabled: Bool) -> Bool {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        let audioInputs = session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+            .filter { $0.device.hasMediaType(.audio) }
+        // Recheck here: never create a microphone input before authorization.
+        guard enabled, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            for input in audioInputs { session.removeInput(input) }
+            return false
+        }
+        if !audioInputs.isEmpty { return true }
+        guard let device = AVCaptureDevice.default(for: .audio),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else { return false }
+        session.addInput(input)
+        return true
     }
 
     nonisolated private func configureCameraOnSessionQueue() -> (
@@ -80,6 +122,10 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         isLivePhotoCaptureSupported: Bool
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
+        if session.outputs.contains(photoOutput) {
+            return (Self.portraitPhotoAspectRatio(for: photoOutput.maxPhotoDimensions),
+                    photoOutput.isLivePhotoCaptureSupported)
+        }
         session.beginConfiguration()
         
         // Set session preset for high quality
@@ -131,6 +177,8 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func stopSession() {
+        audioConfigurationID = UUID()
+        isReadyForCapture = false
         sessionQueue.async { [weak self] in
             guard let self, self.session.isRunning else { return }
             self.session.stopRunning()
@@ -272,7 +320,8 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         session.beginConfiguration()
         
         // Remove current input
-        guard let currentInput = session.inputs.first as? AVCaptureDeviceInput else {
+        guard let currentInput = session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+            .first(where: { $0.device.hasMediaType(.video) }) else {
             session.commitConfiguration()
             return
         }

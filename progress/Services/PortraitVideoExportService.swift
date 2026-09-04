@@ -78,6 +78,9 @@ nonisolated struct PortraitVideoExportPausedSession: Identifiable, Equatable, Co
     let segmentFileNames: [String]
     let failedPhotos: [PortraitVideoExportFailedPhoto]
 
+    // Missing in older checkpoints, which contain silent Live Photo segments.
+    let audioFormatVersion: Int?
+
     var totalPhotoCount: Int {
         photoIDs.count
     }
@@ -93,7 +96,7 @@ nonisolated private struct PortraitVideoSegmentWriter {
     let input: AVAssetWriterInput
     let adaptor: AVAssetWriterInputPixelBufferAdaptor
     let fileURL: URL
-    let fileName: String
+    let audio: PortraitVideoSegmentAudio
 }
 
 nonisolated private enum PortraitVideoExportAssetSelector {
@@ -596,7 +599,8 @@ final class PortraitVideoExportService {
                             atFrameIndex: writtenFrameCount,
                             outputFrameRate: outputFrameRate,
                             input: segmentWriter.input,
-                            adaptor: segmentWriter.adaptor
+                            adaptor: segmentWriter.adaptor,
+                            audio: segmentWriter.audio
                         )
                         writtenFrameCount += appendedFrameCount
                     } else {
@@ -736,7 +740,8 @@ final class PortraitVideoExportService {
                     photoIDs: photoIDs,
                     completedPhotoCount: completedPhotoCount,
                     segmentFileNames: segmentFileNames,
-                    failedPhotos: failedPhotos
+                    failedPhotos: failedPhotos,
+                    audioFormatVersion: 1
                 )
             )
             await assetPrefetcher.cancelAndDiscardOutstanding()
@@ -777,6 +782,7 @@ final class PortraitVideoExportService {
         guard let session,
               session.photoIDs == photoIDs,
               session.configuration == configuration,
+              (!configuration.includesFavoriteLivePhotoVideo || session.audioFormatVersion == 1),
               session.completedPhotoCount <= photoIDs.count else {
             return nil
         }
@@ -890,7 +896,8 @@ final class PortraitVideoExportService {
             photoIDs: photoIDs,
             completedPhotoCount: completedPhotoCount,
             segmentFileNames: segmentFileNames,
-            failedPhotos: failedPhotos
+            failedPhotos: failedPhotos,
+            audioFormatVersion: 1
         )
         let data = try JSONEncoder().encode(session)
         let defaults = UserDefaults.standard
@@ -953,7 +960,7 @@ final class PortraitVideoExportService {
             input: input,
             adaptor: adaptor,
             fileURL: fileURL,
-            fileName: fileName
+            audio: PortraitVideoSegmentAudio(directoryURL: directoryURL)
         )
     }
 
@@ -967,11 +974,13 @@ final class PortraitVideoExportService {
             )
         }
 
-        return segmentWriter.fileName
+        let finishedURL = try await segmentWriter.audio.finish(videoURL: segmentWriter.fileURL)
+        return finishedURL.lastPathComponent
     }
 
     nonisolated private func cancelSegment(_ segmentWriter: PortraitVideoSegmentWriter) {
         segmentWriter.writer.cancelWriting()
+        segmentWriter.audio.cleanup()
         try? FileManager.default.removeItem(at: segmentWriter.fileURL)
     }
 
@@ -997,6 +1006,7 @@ final class PortraitVideoExportService {
         }
 
         var insertionTime = CMTime.zero
+        var compositionAudioTrack: AVMutableCompositionTrack?
         for segmentURL in segmentURLs {
             let asset = AVURLAsset(url: segmentURL)
             let duration = try await asset.load(.duration)
@@ -1010,6 +1020,25 @@ final class PortraitVideoExportService {
                 of: track,
                 at: insertionTime
             )
+            if let audioTrack = try await asset.loadTracks(withMediaType: .audio).first {
+                if compositionAudioTrack == nil {
+                    compositionAudioTrack = composition.addMutableTrack(
+                        withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
+                    )
+                }
+                guard let compositionAudioTrack else {
+                    throw PortraitVideoExportError.writerFailed("Unable to combine Live Photo audio.")
+                }
+                let audioRange = CMTimeRangeGetIntersection(
+                    try await audioTrack.load(.timeRange),
+                    otherRange: CMTimeRange(start: .zero, duration: duration)
+                )
+                if audioRange.isValid, audioRange.duration > .zero {
+                    try compositionAudioTrack.insertTimeRange(
+                        audioRange, of: audioTrack, at: insertionTime + audioRange.start
+                    )
+                }
+            }
             insertionTime = insertionTime + duration
         }
 
@@ -1071,7 +1100,8 @@ final class PortraitVideoExportService {
         atFrameIndex frameIndex: Int,
         outputFrameRate: Int,
         input: AVAssetWriterInput,
-        adaptor: AVAssetWriterInputPixelBufferAdaptor
+        adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        audio: PortraitVideoSegmentAudio
     ) async throws -> Int {
         try await retryPhotoOperation {
             let videoURL = try await prefetcher.consumeAssetURL(named: assetName)
@@ -1085,7 +1115,8 @@ final class PortraitVideoExportService {
                 atFrameIndex: frameIndex,
                 outputFrameRate: outputFrameRate,
                 input: input,
-                adaptor: adaptor
+                adaptor: adaptor,
+                audio: audio
             )
         }
     }
@@ -1140,7 +1171,8 @@ final class PortraitVideoExportService {
         atFrameIndex frameIndex: Int,
         outputFrameRate: Int,
         input: AVAssetWriterInput,
-        adaptor: AVAssetWriterInputPixelBufferAdaptor
+        adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        audio: PortraitVideoSegmentAudio
     ) async throws -> Int {
         let asset = AVURLAsset(url: videoURL)
         let duration = try await asset.load(.duration)
@@ -1153,6 +1185,24 @@ final class PortraitVideoExportService {
         let trimmedDurationSeconds = min(durationSeconds, Self.livePhotoVideoTailDuration)
         let trimStartSeconds = max(0, durationSeconds - trimmedDurationSeconds)
         let frameCount = max(1, Int((trimmedDurationSeconds * Double(outputFrameRate)).rounded(.up)))
+        let audioClip = try await audio.prepareClip(
+            from: asset,
+            sourceTimeRange: CMTimeRange(
+                start: CMTime(seconds: trimStartSeconds, preferredTimescale: 600),
+                duration: CMTime(seconds: trimmedDurationSeconds, preferredTimescale: 600)
+            ),
+            at: CMTime(value: CMTimeValue(frameIndex), timescale: CMTimeScale(outputFrameRate))
+        )
+        var didAppendVideo = false
+        defer {
+            if let audioClip {
+                if didAppendVideo {
+                    audio.commit(audioClip)
+                } else {
+                    audio.discard(audioClip)
+                }
+            }
+        }
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: thumbnailMaxPixelSize, height: thumbnailMaxPixelSize)
@@ -1178,6 +1228,7 @@ final class PortraitVideoExportService {
             )
         }
 
+        didAppendVideo = true
         return frameCount
     }
 

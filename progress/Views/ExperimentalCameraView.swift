@@ -43,6 +43,7 @@ struct ExperimentalCameraView: View {
     @ObservedObject private var alignmentGuideStore = AlignmentGuideStore.shared
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(CameraPreferenceKey.livePhotoCaptureEnabled) private var isLivePhotoCaptureEnabled = true
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
 
@@ -61,6 +62,7 @@ struct ExperimentalCameraView: View {
     @State private var captureFeedbackStage: CaptureFeedbackStage?
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
+    @State private var didPresentMockCapture = false
     private let processInfo = ProcessInfo.processInfo
 
     private var guideInteractionDisabled: Bool {
@@ -68,7 +70,7 @@ struct ExperimentalCameraView: View {
     }
 
     private var controlsDisabled: Bool {
-        guideInteractionDisabled || isEditingGuides
+        guideInteractionDisabled || isEditingGuides || (!usesMockCapture && !cameraService.isReadyForCapture)
     }
 
     private var usesMockCapture: Bool {
@@ -169,15 +171,26 @@ struct ExperimentalCameraView: View {
                     }
             )
         }
-        .task {
+        .task(id: cameraSessionRequest) {
+            guard !cameraSessionRequest.paused else {
+                cameraService.stopSession()
+                return
+            }
             if usesMockCapture {
-                presentMockCapturePreview()
+                if !didPresentMockCapture {
+                    didPresentMockCapture = true
+                    presentMockCapturePreview()
+                }
                 return
             }
 
             await cameraService.checkAuthorization()
+            guard !Task.isCancelled else { return }
             if cameraService.isAuthorized {
-                cameraService.setupCamera()
+                await cameraService.setupCamera()
+                guard !Task.isCancelled else { return }
+                await cameraService.configureLivePhotoAudio(enabled: isLivePhotoCaptureEnabled)
+                guard !Task.isCancelled else { return }
                 cameraService.startSession()
             }
 
@@ -220,6 +233,18 @@ struct ExperimentalCameraView: View {
                 captureFeedbackStage = .processingCapture
             }
         }
+    }
+
+    private struct CameraSessionRequest: Equatable {
+        let livePhotosEnabled: Bool
+        let paused: Bool
+    }
+
+    private var cameraSessionRequest: CameraSessionRequest {
+        CameraSessionRequest(
+            livePhotosEnabled: isLivePhotoCaptureEnabled,
+            paused: scenePhase == .background || showingCapturePreview
+        )
     }
 
     private var shouldShowLivePhotoToggle: Bool {
@@ -356,6 +381,15 @@ struct ExperimentalCameraView: View {
                     Circle()
                         .stroke(.white.opacity(shouldCaptureLivePhoto ? 0.44 : 0.16), lineWidth: 1)
                 )
+                .overlay(alignment: .bottomTrailing) {
+                    if shouldCaptureLivePhoto && cameraService.livePhotoAudioUnavailable {
+                        Image(systemName: "speaker.slash.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(3)
+                            .background(.black, in: Circle())
+                            .accessibilityHidden(true)
+                    }
+                }
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("experimentalCameraLivePhotoToggle")
@@ -378,6 +412,9 @@ struct ExperimentalCameraView: View {
     private var livePhotoToggleAccessibilityValue: String {
         guard cameraService.isLivePhotoCaptureSupported else {
             return "Unavailable"
+        }
+        if shouldCaptureLivePhoto && cameraService.livePhotoAudioUnavailable {
+            return "On, without sound. Enable microphone access in Settings to record sound."
         }
         return isLivePhotoCaptureEnabled ? "On" : "Off"
     }
@@ -506,9 +543,6 @@ struct ExperimentalCameraView: View {
         cameraService.capturedImage = nil
         cameraService.capturedImageData = nil
         cameraService.livePhotoCapture = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            cameraService.startSession()
-        }
     }
 
     private func dismissCapturePreview() {
