@@ -328,38 +328,6 @@ enum PhotoGridContextAction {
     case delete
 }
 
-final class PhotoThumbnailDataProvider {
-    private let context = PersistenceController.shared.makeBackgroundContext()
-
-    init() {
-        context.undoManager = nil
-        context.retainsRegisteredObjects = false
-    }
-
-    func thumbnailData(for objectID: NSManagedObjectID) async -> Data? {
-        let context = context
-        return await context.perform {
-            autoreleasepool {
-                let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
-                request.resultType = .dictionaryResultType
-                request.fetchLimit = 1
-                request.includesPendingChanges = false
-                request.predicate = NSPredicate(format: "SELF == %@", objectID)
-                request.propertiesToFetch = ["thumbnailData"]
-
-                return (try? context.fetch(request).first?["thumbnailData"] as? Data) ?? nil
-            }
-        }
-    }
-
-    func purge() async {
-        let context = context
-        await context.perform {
-            context.reset()
-        }
-    }
-}
-
 @MainActor
 protocol PhotoGridCollectionViewControllerDelegate: AnyObject {
     func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, frame: CGRect)
@@ -404,11 +372,15 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var isScrollMotionActive = false
     private var lastContentOffsetY: CGFloat = 0
     private var preheatDirection: ScrollPreheatDirection = .none
+    private var preheatWindowKey: PreheatWindowKey?
+    private var preheatCandidates: [NSManagedObjectID] = []
+    private var preheatRetainedIDs: Set<NSManagedObjectID> = []
+    private var preheatRefillTask: Task<Void, Never>?
     private var lastTopVisibleReportUptime: TimeInterval = 0
     private var lastVisibleThumbnailKickUptime: TimeInterval = 0
     private let thumbnailDataProvider = PhotoThumbnailDataProvider()
     private let maxInflightThumbnailTasks = 48
-    private let maxInflightThumbnailTasksDuringScroll = 22
+    private let maxInflightThumbnailTasksDuringScroll = 64
     private let maxNearVisiblePrefetchPerKick = 56
     private let maxCollectionPrefetchPerPass = 24
     private let nearVisiblePreheatWindowMultiplier: CGFloat = 2.0
@@ -416,9 +388,13 @@ final class PhotoGridCollectionViewController: UIViewController {
     private let visibleThumbnailKickInterval: TimeInterval = 0.04
     private let selectionAutoScrollEdgeDistance: CGFloat = 110
     private let selectionAutoScrollMaxSpeed: CGFloat = 900
-    private let minGridColumnCount = 2
-    private let maxGridColumnCount = 5
+    private let minGridColumnCount = GridPreferences.minColumnCount
+    private let maxGridColumnCount = GridPreferences.maxColumnCount
     private let gridSpacing: CGFloat = 2
+    private var thumbnailResolution: DecodedThumbnailCache.Resolution {
+        gridColumnCount == 1 ? .expanded : .grid
+    }
+
     private var gridColumnCount: Int = {
         let storedValue = UserDefaults.standard.integer(forKey: GridPreferences.columnCountKey)
         guard storedValue > 0 else { return GridPreferences.defaultColumnCount }
@@ -430,15 +406,25 @@ final class PhotoGridCollectionViewController: UIViewController {
         case deselect
     }
 
-    private enum ScrollPreheatDirection {
+    private enum ScrollPreheatDirection: Equatable {
         case up
         case down
         case none
     }
 
+    private struct PreheatWindowKey: Equatable {
+        let firstRow: Int
+        let lastRow: Int
+        let size: CGSize
+        let columns: Int
+        let changeToken: Int?
+        let direction: ScrollPreheatDirection
+        let isScrolling: Bool
+    }
+
     private enum GridPreferences {
         static let columnCountKey = "photo-grid-column-count"
-        static let minColumnCount = 2
+        static let minColumnCount = 1
         static let maxColumnCount = 5
         static let defaultColumnCount = 3
     }
@@ -458,7 +444,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     }
 
     private struct ThumbnailTaskRecord {
-        let role: ThumbnailLoadRole
+        var role: ThumbnailLoadRole
         let token: UUID
         let task: Task<Void, Never>
     }
@@ -532,6 +518,8 @@ final class PhotoGridCollectionViewController: UIViewController {
 
     isolated deinit {
         selectionAutoScrollDisplayLink?.invalidate()
+        preheatRefillTask?.cancel()
+        for record in thumbnailTasks.values { record.task.cancel() }
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -541,9 +529,7 @@ final class PhotoGridCollectionViewController: UIViewController {
 
         stopSelectionAutoScroll()
         cancelAllThumbnailTasks()
-        Task {
-            await thumbnailDataProvider.purge()
-        }
+        thumbnailDataProvider.purge()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -579,6 +565,7 @@ final class PhotoGridCollectionViewController: UIViewController {
 
         if didChangeItems {
             currentChangeToken = changeToken
+            thumbnailDataProvider.purge()
             self.items = items
             itemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.objectID, $0) })
             itemIndexByID = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($0.element.objectID, $0.offset) })
@@ -610,7 +597,7 @@ final class PhotoGridCollectionViewController: UIViewController {
                 isSelectionMode: self.isSelectionMode,
                 isSelected: self.selectedPhotoIDs.contains(objectID)
             )
-            self.prepareThumbnail(for: item, in: cell)
+            self.loadThumbnail(for: item, into: cell)
         }
 
         dataSource = UICollectionViewDiffableDataSource<UIKitPhotoGridSection, NSManagedObjectID>(
@@ -720,7 +707,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         animated: Bool
     ) {
         guard columnCount != gridColumnCount else { return }
+        let previousResolution = thumbnailResolution
         gridColumnCount = columnCount
+        if previousResolution != thumbnailResolution {
+            cancelAllThumbnailTasks()
+        }
 
         let updates = { [self] in
             updateLayoutItemSize()
@@ -743,6 +734,7 @@ final class PhotoGridCollectionViewController: UIViewController {
             UIView.performWithoutAnimation(updates)
         }
 
+        loadVisibleThumbnails()
         reportTopVisibleDate()
         reportFirstItemFrameIfAvailable()
     }
@@ -760,7 +752,11 @@ final class PhotoGridCollectionViewController: UIViewController {
             indexPath: indexPath,
             xRatio: (location.x - attributes.frame.minX) / attributes.frame.width,
             yRatio: (location.y - attributes.frame.minY) / attributes.frame.height,
-            locationInBounds: location
+            // Gesture locations are content coordinates; preserve the finger's viewport position.
+            locationInBounds: CGPoint(
+                x: location.x - collectionView.bounds.minX,
+                y: location.y - collectionView.bounds.minY
+            )
         )
     }
 
@@ -796,17 +792,17 @@ final class PhotoGridCollectionViewController: UIViewController {
     private func loadThumbnail(for item: UIKitPhotoGridItem, into cell: PhotoGridCollectionViewCell) {
         prepareThumbnail(for: item, in: cell)
 
-        guard DecodedThumbnailCache.shared.cachedImage(for: item.objectID) == nil else { return }
-        startThumbnailTask(for: item.objectID, role: .visible, cell: cell)
+        guard DecodedThumbnailCache.shared.cachedImage(for: item.objectID, resolution: thumbnailResolution) == nil else { return }
+        startThumbnailTask(for: item.objectID, role: .visible)
     }
 
     private func prefetchThumbnail(for item: UIKitPhotoGridItem) {
         let objectID = item.objectID
-        if DecodedThumbnailCache.shared.cachedImage(for: objectID) != nil { return }
+        if DecodedThumbnailCache.shared.cachedImage(for: objectID, resolution: thumbnailResolution) != nil { return }
         guard thumbnailTasks[objectID] == nil else { return }
         let maxInflight = isScrollMotionActive ? maxInflightThumbnailTasksDuringScroll : maxInflightThumbnailTasks
         guard activePrefetchThumbnailTaskCount < maxInflight else { return }
-        startThumbnailTask(for: objectID, role: .prefetch, cell: nil)
+        startThumbnailTask(for: objectID, role: .prefetch)
     }
 
     private var activePrefetchThumbnailTaskCount: Int {
@@ -817,56 +813,45 @@ final class PhotoGridCollectionViewController: UIViewController {
 
     private func startThumbnailTask(
         for objectID: NSManagedObjectID,
-        role: ThumbnailLoadRole,
-        cell: PhotoGridCollectionViewCell?
+        role: ThumbnailLoadRole
     ) {
-        if let existingRecord = thumbnailTasks[objectID] {
-            switch (existingRecord.role, role) {
-            case (.visible, _), (.prefetch, .prefetch):
-                return
-            case (.prefetch, .visible):
-                existingRecord.task.cancel()
-                thumbnailTasks[objectID] = nil
+        if var existingRecord = thumbnailTasks[objectID] {
+            if role == .visible {
+                existingRecord.role = .visible
+                thumbnailTasks[objectID] = existingRecord
+                DecodedThumbnailCache.shared.setPriority(.veryHigh, for: objectID, resolution: thumbnailResolution)
             }
-        }
-
-        let thumbnailDataProvider = thumbnailDataProvider
-        let token = UUID()
-        let task = Task.detached(priority: role.taskPriority) { [weak self, weak cell] in
-            guard !Task.isCancelled else {
-                await self?.finishThumbnailTask(for: objectID, token: token)
-                return
-            }
-
-            let data = await thumbnailDataProvider.thumbnailData(for: objectID)
-            guard !Task.isCancelled else {
-                await self?.finishThumbnailTask(for: objectID, token: token)
-                return
-            }
-
-            let image = await DecodedThumbnailCache.shared.image(for: objectID, data: data)
-            guard !Task.isCancelled else {
-                await self?.finishThumbnailTask(for: objectID, token: token)
-                return
-            }
-            await MainActor.run { [weak self, weak cell] in
-                guard let self else { return }
-                guard self.thumbnailTasks[objectID]?.token == token else { return }
-                if role == .visible, cell?.representedObjectID == objectID {
-                    cell?.setThumbnailImage(image)
-                }
-                self.thumbnailTasks[objectID] = nil
-            }
-        }
-
-        thumbnailTasks[objectID] = ThumbnailTaskRecord(role: role, token: token, task: task)
-    }
-
-    private func finishThumbnailTask(for objectID: NSManagedObjectID, token: UUID) {
-        guard thumbnailTasks[objectID]?.token == token else {
             return
         }
-        thumbnailTasks[objectID] = nil
+
+        // Read neighboring stored blobs together; concurrent cells share the same fetch.
+        let index = itemIndexByID[objectID] ?? 0
+        let lowerBound = (index / PhotoThumbnailDataProvider.batchSize) * PhotoThumbnailDataProvider.batchSize
+        let upperBound = min(lowerBound + PhotoThumbnailDataProvider.batchSize, currentItemIDs.count)
+        let nearbyIDs = Array(currentItemIDs[lowerBound..<upperBound])
+        let thumbnailDataProvider = thumbnailDataProvider
+        let token = UUID()
+        let resolution = thumbnailResolution
+        let task = Task(priority: role.taskPriority) { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            let data = await thumbnailDataProvider.thumbnailData(for: objectID, nearbyObjectIDs: nearbyIDs)
+            guard !Task.isCancelled else { return }
+
+            let priority: Operation.QueuePriority = self?.thumbnailTasks[objectID]?.role == .visible ? .veryHigh : .low
+            let image = await DecodedThumbnailCache.shared.image(for: objectID, data: data, priority: priority, resolution: resolution)
+            guard !Task.isCancelled, let self,
+                  self.thumbnailTasks[objectID]?.token == token else { return }
+            self.thumbnailTasks[objectID] = nil
+
+            // Resolve the current cell, including cells reused while a prefetch was running.
+            if let indexPath = self.dataSource.indexPath(for: objectID),
+               let cell = self.collectionView.cellForItem(at: indexPath) as? PhotoGridCollectionViewCell,
+               cell.representedObjectID == objectID {
+                cell.setThumbnailImage(image)
+            }
+            if image != nil { self.schedulePrefetchRefill() }
+        }
+        thumbnailTasks[objectID] = ThumbnailTaskRecord(role: role, token: token, task: task)
     }
 
     private func cancelThumbnailTask(for objectID: NSManagedObjectID?, roles: Set<ThumbnailLoadRole>) {
@@ -877,6 +862,11 @@ final class PhotoGridCollectionViewController: UIViewController {
     }
 
     private func cancelAllThumbnailTasks() {
+        preheatRefillTask?.cancel()
+        preheatRefillTask = nil
+        preheatWindowKey = nil
+        preheatCandidates.removeAll()
+        preheatRetainedIDs.removeAll()
         for record in thumbnailTasks.values {
             record.task.cancel()
         }
@@ -887,9 +877,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private func handleMemoryWarning() {
         cancelAllThumbnailTasks()
         DecodedThumbnailCache.shared.removeAllImages()
-        Task {
-            await thumbnailDataProvider.purge()
-        }
+        thumbnailDataProvider.purge()
         collectionView.reloadData()
     }
 
@@ -915,10 +903,58 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
     }
 
+    private func schedulePrefetchRefill() {
+        guard !isScrollMotionActive, view.window != nil, preheatRefillTask == nil else { return }
+        preheatRefillTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(40)) } catch { return }
+            guard let self else { return }
+            self.preheatRefillTask = nil
+            self.prefetchNearVisibleThumbnails()
+        }
+    }
+
     private func prefetchNearVisibleThumbnails() {
         let bounds = collectionView.bounds
-        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard bounds.width > 0, bounds.height > 0,
+              let layout = collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return }
+        let rowHeight = max(layout.itemSize.height + layout.minimumLineSpacing, 1)
+        let key = PreheatWindowKey(
+            firstRow: Int(floor(bounds.minY / rowHeight)),
+            lastRow: Int(floor(bounds.maxY / rowHeight)),
+            size: bounds.size, columns: gridColumnCount, changeToken: currentChangeToken,
+            direction: preheatDirection, isScrolling: isScrollMotionActive
+        )
+        // Sorting/layout queries only when a row, direction, layout, or snapshot changes.
+        if preheatWindowKey != key {
+            rebuildPreheatWindow(in: bounds)
+            preheatWindowKey = key
+        }
 
+        for objectID in Array(thumbnailTasks.keys) where !preheatRetainedIDs.contains(objectID) {
+            cancelThumbnailTask(for: objectID, roles: [.visible, .prefetch])
+        }
+        let visibleIDs = Set(collectionView.visibleCells.compactMap {
+            ($0 as? PhotoGridCollectionViewCell)?.representedObjectID
+        })
+        for objectID in Array(thumbnailTasks.keys) where !visibleIDs.contains(objectID) {
+            guard var record = thumbnailTasks[objectID], record.role == .visible else { continue }
+            record.role = .prefetch
+            thumbnailTasks[objectID] = record
+            DecodedThumbnailCache.shared.setPriority(.low, for: objectID, resolution: thumbnailResolution)
+        }
+
+        let limit = isScrollMotionActive ? maxInflightThumbnailTasksDuringScroll : maxInflightThumbnailTasks
+        var availableSlots = min(maxNearVisiblePrefetchPerKick, max(0, limit - activePrefetchThumbnailTaskCount))
+        for objectID in preheatCandidates {
+            guard availableSlots > 0 else { break }
+            guard !visibleIDs.contains(objectID), thumbnailTasks[objectID] == nil,
+                  DecodedThumbnailCache.shared.cachedImage(for: objectID, resolution: thumbnailResolution) == nil else { continue }
+            startThumbnailTask(for: objectID, role: .prefetch)
+            availableSlots -= 1
+        }
+    }
+
+    private func rebuildPreheatWindow(in bounds: CGRect) {
         let forwardMultiplier: CGFloat = isScrollMotionActive ? 3.8 : 2.8
         let backwardMultiplier: CGFloat = 1.4
         let symmetricMultiplier: CGFloat = nearVisiblePreheatWindowMultiplier
@@ -944,6 +980,8 @@ final class PhotoGridCollectionViewController: UIViewController {
             height: bounds.height + topExtra + bottomExtra
         )
         guard let attributes = collectionView.collectionViewLayout.layoutAttributesForElements(in: preheatRect) else {
+            preheatCandidates = []
+            preheatRetainedIDs = []
             return
         }
 
@@ -976,16 +1014,16 @@ final class PhotoGridCollectionViewController: UIViewController {
             return (indexPath, isAhead, distance)
         }
 
-        for candidate in candidates
-            .sorted(by: { lhs, rhs in
-                if lhs.isAhead != rhs.isAhead {
-                    return lhs.isAhead && !rhs.isAhead
-                }
-                return lhs.distance < rhs.distance
-            })
-            .prefix(maxNearVisiblePrefetchPerKick) {
-            prefetchThumbnail(for: items[candidate.indexPath.item])
-        }
+        preheatRetainedIDs = Set(attributes.compactMap { attributes -> NSManagedObjectID? in
+            guard attributes.representedElementCategory == .cell,
+                  items.indices.contains(attributes.indexPath.item) else { return nil }
+            return items[attributes.indexPath.item].objectID
+        })
+        preheatCandidates = candidates.sorted { lhs, rhs in
+            if lhs.isAhead != rhs.isAhead { return lhs.isAhead && !rhs.isAhead }
+            return lhs.distance < rhs.distance
+        }.map { items[$0.indexPath.item].objectID }
+
     }
 
     private func reportFirstItemFrameIfAvailable() {
