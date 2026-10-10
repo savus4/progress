@@ -48,15 +48,36 @@ final class CloudKitService {
     private let systemCloudKitCacheDirectoryURL: URL
     private let stagingDirectoryURL: URL
     private let temporaryReadableAssetsDirectoryURL: URL
+    private let legacyAssetDirectoryURLs: [URL]
+    private let assetURLLoader: (@MainActor @Sendable (String) async throws -> URL)?
+    private let assetUploader: (@MainActor @Sendable (String, UUID, PhotoAssetRole) async throws -> Void)?
+    let uploadStateStore: LocalPhotoUploadStore
+    let pendingUploadManifestService: PendingUploadManifestService
     private let fileManager = FileManager.default
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudKitAsset")
 
-    private init() {
+    init(
+        stagingDirectoryURL: URL? = nil,
+        temporaryReadableAssetsDirectoryURL: URL? = nil,
+        legacyAssetDirectoryURLs: [URL]? = nil,
+        uploadStateStore: LocalPhotoUploadStore? = nil,
+        assetURLLoader: (@MainActor @Sendable (String) async throws -> URL)? = nil,
+        assetUploader: (@MainActor @Sendable (String, UUID, PhotoAssetRole) async throws -> Void)? = nil
+    ) {
         container = CKContainer(identifier: CloudKitConfiguration.containerIdentifier)
         privateDatabase = container.privateCloudDatabase
         systemCloudKitCacheDirectoryURL = Self.makeSystemCloudKitCacheDirectoryURL()
-        stagingDirectoryURL = Self.makeStagingDirectoryURL()
-        temporaryReadableAssetsDirectoryURL = Self.makeTemporaryReadableAssetsDirectoryURL()
+        self.stagingDirectoryURL = stagingDirectoryURL ?? Self.makeStagingDirectoryURL()
+        self.temporaryReadableAssetsDirectoryURL = temporaryReadableAssetsDirectoryURL ?? Self.makeTemporaryReadableAssetsDirectoryURL()
+        self.legacyAssetDirectoryURLs = legacyAssetDirectoryURLs ?? Self.makeLegacyAssetDirectoryURLs()
+        self.uploadStateStore = uploadStateStore ?? (stagingDirectoryURL.map {
+            LocalPhotoUploadStore(storageURL: $0.deletingLastPathComponent().appendingPathComponent("local-uploads.json"))
+        } ?? .shared)
+        pendingUploadManifestService = stagingDirectoryURL.map {
+            PendingUploadManifestService(storageURL: $0.deletingLastPathComponent().appendingPathComponent("pending-uploads.json"))
+        } ?? .shared
+        self.assetURLLoader = assetURLLoader
+        self.assetUploader = assetUploader
     }
 
     func saveImageAsset(_ image: UIImage) async throws -> String {
@@ -144,8 +165,30 @@ final class CloudKitService {
             return stableReadableURL(for: stagedURL, assetName: assetName)
         }
 
+        if let legacyURL = legacyAssetURL(named: assetName) {
+            do {
+                let staged = try await stageAssetFileAsync(from: legacyURL, named: assetName, includesInBackup: true)
+                return stableReadableURL(for: staged, assetName: assetName)
+            } catch {
+                logger.error("legacy-asset-staging: \(error.localizedDescription, privacy: .public)")
+                return stableReadableURL(for: legacyURL, assetName: assetName)
+            }
+        }
+
         if !forceRefetch, let readableURL = readableAssetURL(named: assetName) {
             return readableURL
+        }
+
+        if self === Self.shared {
+            try await PhotoStorageService.shared.recoverLegacyAssetIfNeeded(named: assetName)
+            if let stagedURL = stagedAssetURL(named: assetName) {
+                return stableReadableURL(for: stagedURL, assetName: assetName)
+            }
+        }
+
+        if let assetURLLoader {
+            let sourceURL = try await assetURLLoader(assetName)
+            return stableReadableURL(for: sourceURL, assetName: assetName)
         }
 
         if reportsTransferEvents {
@@ -274,7 +317,7 @@ final class CloudKitService {
         return fileManager.fileExists(atPath: stagedURL.path) || fileManager.fileExists(atPath: readableURL.path)
     }
 
-    func uploadStagedAsset(named assetName: String, photoID: UUID, role: PhotoAssetRole) async throws {
+    func uploadStagedAsset(named assetName: String, photoID: UUID, role: PhotoAssetRole, retainsStagedOriginal: Bool = false) async throws {
         guard let sourceURL = localAssetURLForUpload(named: assetName) else {
             logger.error("upload-staged-asset-missing name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public)")
             throw CloudKitError.assetNotFound
@@ -282,16 +325,20 @@ final class CloudKitService {
 
         let digest = try await PhotoAssetFileWorker.digestAndByteCount(at: sourceURL)
         logger.log("upload-staged-asset-start name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) bytes=\(digest.byteCount, privacy: .public) source=\(sourceURL.path(percentEncoded: false), privacy: .public)")
-        try await saveAssetFile(
-            sourceURL: sourceURL,
-            byteCount: digest.byteCount,
-            assetName: assetName,
-            photoID: photoID,
-            role: role,
-            checksum: digest.checksum
-        )
+        if let assetUploader {
+            try await assetUploader(assetName, photoID, role)
+        } else {
+            try await saveAssetFile(
+                sourceURL: sourceURL,
+                byteCount: digest.byteCount,
+                assetName: assetName,
+                photoID: photoID,
+                role: role,
+                checksum: digest.checksum
+            )
+        }
 
-        if sourceURL.deletingLastPathComponent() == stagingDirectoryURL {
+        if !retainsStagedOriginal, sourceURL.deletingLastPathComponent() == stagingDirectoryURL {
             try? fileManager.removeItem(at: sourceURL)
         }
         logger.log("upload-staged-asset-finished name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public)")
@@ -332,15 +379,43 @@ final class CloudKitService {
     }
 
     func deleteAsset(named assetName: String) {
-        let stagedURL = stagingFileURL(for: assetName)
-        if fileManager.fileExists(atPath: stagedURL.path) {
-            try? fileManager.removeItem(at: stagedURL)
+        try? uploadStateStore.remove(assetNames: [assetName])
+        for directory in legacyAssetDirectoryURLs {
+            try? fileManager.removeItem(at: directory.appendingPathComponent(assetName))
         }
+        removeStagedAsset(named: assetName)
 
         let readableURL = temporaryReadableURL(for: assetName)
         if fileManager.fileExists(atPath: readableURL.path) {
             try? fileManager.removeItem(at: readableURL)
         }
+    }
+
+    func removeStagedAsset(named assetName: String) {
+        let stagedURL = stagingFileURL(for: assetName)
+        if fileManager.fileExists(atPath: stagedURL.path) {
+            try? fileManager.removeItem(at: stagedURL)
+        }
+    }
+
+    func legacyAssetURL(named assetName: String) -> URL? {
+        legacyAssetDirectoryURLs.lazy.map { $0.appendingPathComponent(assetName) }
+            .first { fileManager.fileExists(atPath: $0.path) }
+    }
+
+    var legacyAssetDirectoryURLsSnapshot: [URL] { legacyAssetDirectoryURLs }
+
+    private static func makeLegacyAssetDirectoryURLs() -> [URL] {
+        let bundle = Bundle.main.bundleIdentifier ?? "progress"
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return [
+            support.appendingPathComponent(bundle).appendingPathComponent("Assets", isDirectory: true),
+            caches.appendingPathComponent(bundle).appendingPathComponent("AssetCache", isDirectory: true),
+            FileManager.default.temporaryDirectory
+        ]
     }
 
     func deleteRemoteAsset(named assetName: String) async {

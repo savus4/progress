@@ -58,7 +58,7 @@ private struct StoredPendingPhoto {
     let photoID: UUID
 }
 
-enum PhotoUploadState: String, Sendable {
+nonisolated enum PhotoUploadState: String, Codable, Sendable {
     case pending
     case uploading
     case uploaded
@@ -68,15 +68,8 @@ enum PhotoUploadState: String, Sendable {
 
 nonisolated extension DailyPhoto {
     var uploadState: PhotoUploadState {
-        get {
-            guard let rawValue = uploadStateRaw else {
-                return .uploaded
-            }
-            return PhotoUploadState(rawValue: rawValue) ?? .uploaded
-        }
-        set {
-            uploadStateRaw = newValue.rawValue
-        }
+        guard let id else { return .uploaded }
+        return LocalPhotoUploadStore.shared.entry(for: id)?.state ?? .uploaded
     }
 }
 
@@ -89,7 +82,9 @@ final class PhotoStorageService {
 
     private static let orphanedPendingUploadGracePeriod: TimeInterval = 7 * 24 * 60 * 60
 
-    private let cloudKitService = CloudKitService.shared
+    private let cloudKitService: CloudKitService
+    private let pendingUploadManifestService: PendingUploadManifestService
+    private let legacyRecoveryContext: NSManagedObjectContext?
     private let thumbnailService = ThumbnailService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoStorage")
     private let metadataSyncBatchLimit = 50
@@ -100,7 +95,11 @@ final class PhotoStorageService {
         return cache
     }()
 
-    private init() {}
+    init(cloudKitService: CloudKitService = .shared, legacyRecoveryContext: NSManagedObjectContext? = nil) {
+        self.cloudKitService = cloudKitService
+        pendingUploadManifestService = cloudKitService.pendingUploadManifestService
+        self.legacyRecoveryContext = legacyRecoveryContext
+    }
 
     func savePhoto(
         image: UIImage,
@@ -147,10 +146,10 @@ final class PhotoStorageService {
             fullImageAssetName: stillAssetName,
             livePhotoVideoAssetName: livePhotoVideoAssetName
         )
-        await PendingUploadManifestService.shared.record(manifestEntry)
-
         let objectID: NSManagedObjectID
         do {
+            try await pendingUploadManifestService.record(manifestEntry)
+            try cloudKitService.uploadStateStore.register(manifestEntry.localUpload)
             objectID = try await context.perform {
                 let photo = DailyPhoto(context: context)
                 photo.id = photoID
@@ -167,17 +166,20 @@ final class PhotoStorageService {
                 photo.setValue(nil, forKey: "livePhotoImageData")
                 photo.setValue(nil, forKey: "livePhotoVideoData")
                 photo.setValue(importFingerprint, forKey: "importFingerprint")
-                photo.uploadState = .pending
-                photo.uploadAttemptCount = 0
-                photo.uploadErrorMessage = nil
-                photo.uploadRetryAfter = nil
-
-                try context.save()
+                do {
+                    try context.save()
+                } catch {
+                    context.delete(photo)
+                    throw error
+                }
                 return photo.objectID
             }
-            await PendingUploadManifestService.shared.remove(photoID: photoID)
+            await pendingUploadManifestService.remove(photoID: photoID)
         } catch {
-            await PendingUploadManifestService.shared.remove(photoID: photoID)
+            // A handled failed save is retryable by the caller; it must not later
+            // resurrect a second capture from its manifest.
+            await pendingUploadManifestService.remove(photoID: photoID)
+            try? cloudKitService.uploadStateStore.remove(assetNames: manifestEntry.localUpload.assetNames)
             throw error
         }
 
@@ -315,7 +317,7 @@ final class PhotoStorageService {
                             }
                         }
                         for photoID in pendingManifestPhotoIDs {
-                            await PendingUploadManifestService.shared.remove(photoID: photoID)
+                            await pendingUploadManifestService.remove(photoID: photoID)
                         }
                         pendingInsertCount = 0
                         pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
@@ -327,7 +329,7 @@ final class PhotoStorageService {
                         failedCount += pendingInsertCount
                         pendingInsertCount = 0
                         for photoID in pendingManifestPhotoIDs {
-                            await PendingUploadManifestService.shared.remove(photoID: photoID)
+                            await pendingUploadManifestService.remove(photoID: photoID)
                         }
                         pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
                         await importContext.perform {
@@ -357,7 +359,7 @@ final class PhotoStorageService {
                     }
                 }
                 for photoID in pendingManifestPhotoIDs {
-                    await PendingUploadManifestService.shared.remove(photoID: photoID)
+                    await pendingUploadManifestService.remove(photoID: photoID)
                 }
                 pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
             }
@@ -368,7 +370,7 @@ final class PhotoStorageService {
             importedCount -= pendingInsertCount
             failedCount += pendingInsertCount
             for photoID in pendingManifestPhotoIDs {
-                await PendingUploadManifestService.shared.remove(photoID: photoID)
+                await pendingUploadManifestService.remove(photoID: photoID)
             }
             pendingManifestPhotoIDs.removeAll(keepingCapacity: true)
             await importContext.perform {
@@ -428,12 +430,18 @@ final class PhotoStorageService {
     @MainActor
     func loadFullImage(from photo: DailyPhoto) async throws -> UIImage {
         let snapshot = snapshot(for: photo)
-        return try await loadFullImage(named: snapshot.fullImageAssetName)
+        do {
+            let recovered = try await recoverLegacyOriginals(for: snapshot, context: photo.managedObjectContext)
+            return try await loadFullImage(named: recovered.fullImageAssetName)
+        } catch {
+            if let data = snapshot.fullImageData, let image = UIImage(data: data) { return image }
+            throw error
+        }
     }
 
     @MainActor
     func loadLivePhotoVideo(from photo: DailyPhoto) async throws -> URL {
-        let snapshot = snapshot(for: photo)
+        let snapshot = try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext)
         return try await loadLivePhotoVideo(named: snapshot.livePhotoVideoAssetName)
     }
 
@@ -535,7 +543,7 @@ final class PhotoStorageService {
 
     @MainActor
     func loadLivePhotoResources(from photo: DailyPhoto) async throws -> (imageURL: URL, videoURL: URL) {
-        let snapshot = snapshot(for: photo)
+        let snapshot = try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext)
         return try await loadLivePhotoResources(
             imageAssetName: snapshot.livePhotoImageAssetName,
             videoAssetName: snapshot.livePhotoVideoAssetName
@@ -631,28 +639,57 @@ final class PhotoStorageService {
     }
 
     func deleteAllPhotos(context: NSManagedObjectContext) async throws -> DeleteAllPhotosResult {
-        let existingPhotoCount = try await context.perform {
+        try await deleteAllPhotos(
+            context: context,
+            operations: DeleteAllPhotosOperations(
+                cancelPendingUploads: { await PhotoUploadService.shared.cancelPendingWork() },
+                waitUntilUploadsIdle: { await PhotoUploadService.shared.waitUntilIdle(timeout: .seconds(30)) },
+                isLocalModeActive: { ICloudAvailabilityMonitor.shared.isLocalModeActive },
+                waitForNextExportCompletion: {
+                    await CloudSyncMonitor.shared.waitForNextExportCompletion(timeout: .seconds(30))
+                },
+                deleteAssets: { await self.deleteAssets(named: $0) },
+                deleteAssetsAndWaitForRemoteCleanup: { await self.deleteAssetsAndWaitForRemoteCleanup(named: $0) }
+            )
+        )
+    }
+
+    func deleteAllPhotos(
+        context: NSManagedObjectContext,
+        operations: DeleteAllPhotosOperations
+    ) async throws -> DeleteAllPhotosResult {
+        // Freeze the user's deletion targets before upload draining can suspend.
+        // Captures saved while deletion is in progress belong to the next library.
+        let photoIDsToDelete = try await context.perform {
             let request = DailyPhoto.fetchRequest()
-            return try context.count(for: request)
+            let photos = try context.fetch(request)
+            let temporaryPhotos = photos.filter { $0.objectID.isTemporaryID }
+            if !temporaryPhotos.isEmpty {
+                try context.obtainPermanentIDs(for: temporaryPhotos)
+            }
+            return photos.map(\.objectID)
         }
 
-        guard existingPhotoCount > 0 else {
+        guard !photoIDsToDelete.isEmpty else {
             return DeleteAllPhotosResult(
                 deletedCount: 0,
                 cloudMetadataDeletionState: .confirmed,
                 pendingRemoteAssetDeletionCount: 0,
-                shouldRebuildPersistentStore: true,
+                shouldRebuildPersistentStore: false,
                 isDeferredUntilICloudAvailable: false
             )
         }
 
-        await PhotoUploadService.shared.cancelPendingWork()
-        let uploadsDrainedBeforeDeletion = await PhotoUploadService.shared.waitUntilIdle(timeout: .seconds(30))
+        await operations.cancelPendingUploads()
+        let uploadsDrainedBeforeDeletion = await operations.waitUntilUploadsIdle()
 
-        if ICloudAvailabilityMonitor.shared.isLocalModeActive {
+        if operations.isLocalModeActive() {
             let (assetNames, deletedCount) = try await context.perform {
-                let request = DailyPhoto.fetchRequest()
-                let photos = try context.fetch(request)
+                let photos = photoIDsToDelete.compactMap { objectID -> DailyPhoto? in
+                    guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto,
+                          !photo.isDeleted else { return nil }
+                    return photo
+                }
                 guard !photos.isEmpty else { return (Set<String>(), 0) }
 
                 let assetNames = Set(photos.flatMap(self.assetNames(for:)))
@@ -664,7 +701,7 @@ final class PhotoStorageService {
                 return (assetNames, photos.count)
             }
 
-            await deleteAssets(named: assetNames)
+            await operations.deleteAssets(assetNames)
 
             return DeleteAllPhotosResult(
                 deletedCount: deletedCount,
@@ -676,12 +713,15 @@ final class PhotoStorageService {
         }
 
         let exportWaitTask = Task { @MainActor in
-            await CloudSyncMonitor.shared.waitForNextExportCompletion(timeout: .seconds(30))
+            await operations.waitForNextExportCompletion()
         }
 
         let (assetNames, deletedCount) = try await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            let photos = try context.fetch(request)
+            let photos = photoIDsToDelete.compactMap { objectID -> DailyPhoto? in
+                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto,
+                      !photo.isDeleted else { return nil }
+                return photo
+            }
             guard !photos.isEmpty else { return (Set<String>(), 0) }
 
             let assetNames = Set(photos.flatMap(self.assetNames(for:)))
@@ -696,7 +736,9 @@ final class PhotoStorageService {
         let cloudMetadataDeletionState: DeleteAllPhotosResult.CloudMetadataDeletionState
         switch await exportWaitTask.value {
         case .completed:
-            cloudMetadataDeletionState = .confirmed
+            // Export events cover the whole store and may belong to an earlier
+            // transaction. They cannot acknowledge this deletion specifically.
+            cloudMetadataDeletionState = .pending
         case .failed(let message):
             cloudMetadataDeletionState = .failed(message)
         case .timedOut:
@@ -705,10 +747,10 @@ final class PhotoStorageService {
 
         let pendingRemoteAssetDeletionCount: Int
         if uploadsDrainedBeforeDeletion {
-            let pendingAssetNames = await deleteAssetsAndWaitForRemoteCleanup(named: assetNames)
+            let pendingAssetNames = await operations.deleteAssetsAndWaitForRemoteCleanup(assetNames)
             pendingRemoteAssetDeletionCount = pendingAssetNames.count
         } else {
-            await deleteAssets(named: assetNames)
+            await operations.deleteAssets(assetNames)
             pendingRemoteAssetDeletionCount = assetNames.count
         }
 
@@ -716,7 +758,8 @@ final class PhotoStorageService {
             deletedCount: deletedCount,
             cloudMetadataDeletionState: cloudMetadataDeletionState,
             pendingRemoteAssetDeletionCount: pendingRemoteAssetDeletionCount,
-            shouldRebuildPersistentStore: true,
+            // CloudKit still needs the store's deletion history to export tombstones.
+            shouldRebuildPersistentStore: false,
             isDeferredUntilICloudAvailable: false
         )
     }
@@ -799,11 +842,134 @@ final class PhotoStorageService {
     }
 
     func recoverPendingUploadsFromManifest(context: NSManagedObjectContext) async -> Int {
-        await PendingUploadManifestService.shared.recoverPendingUploads(
+        await pendingUploadManifestService.recoverPendingUploads(
             context: context,
             cloudKitService: cloudKitService,
             thumbnailService: thumbnailService
         )
+    }
+
+    /// Copies previous versions' original payloads without deleting the old bytes.
+    /// Each photo is processed separately so a large blob library is not loaded at once.
+    @discardableResult
+    func recoverLegacyOriginals(context: NSManagedObjectContext) async -> Int {
+        let objectIDs: [NSManagedObjectID] = (try? await context.perform {
+            let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
+            request.resultType = .managedObjectIDResultType
+            return try context.fetch(request)
+        }) ?? []
+        var recoveredCount = 0
+        for objectID in objectIDs {
+            guard !Task.isCancelled else { break }
+            guard let snapshot = try? await context.perform({
+                guard let photo = try context.existingObject(with: objectID) as? DailyPhoto else { return nil as PhotoSnapshot? }
+                return PhotoSnapshot(photo: photo)
+            }) else { continue }
+            if let id = snapshot.id, cloudKitService.uploadStateStore.entry(for: id)?.state == .uploaded { continue }
+            do {
+                _ = try await recoverLegacyOriginals(for: snapshot, context: context)
+                if let id = snapshot.id, cloudKitService.uploadStateStore.entry(for: id) != nil { recoveredCount += 1 }
+            } catch {
+                logger.error("legacy-original-recovery photo=\(snapshot.id?.uuidString ?? "nil", privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return recoveredCount
+    }
+
+    private func recoverLegacyOriginals(for original: PhotoSnapshot, context: NSManagedObjectContext?) async throws -> PhotoSnapshot {
+        var snapshot = original
+        let photoID = snapshot.id ?? UUID()
+        let wasUploaded = cloudKitService.uploadStateStore.entry(for: photoID)?.state == .uploaded
+        let existingNames = [snapshot.fullImageAssetName, snapshot.livePhotoImageAssetName, snapshot.livePhotoVideoAssetName].compactMap { $0 }
+        if snapshot.fullImageAssetName != nil,
+           cloudKitService.uploadStateStore.entry(for: photoID) != nil,
+           existingNames.allSatisfy({ cloudKitService.stagedAssetURL(named: $0) != nil }) { return snapshot }
+        let stillData = snapshot.fullImageData ?? (snapshot.fullImageAssetName == snapshot.livePhotoImageAssetName ? snapshot.livePhotoImageData : nil)
+        if snapshot.fullImageAssetName == nil, let stillData {
+            snapshot.fullImageAssetName = cloudKitService.makeAssetName(photoID: photoID, role: .still, fileExtension: await Self.imageFileExtension(for: stillData))
+        }
+        if snapshot.livePhotoImageAssetName == nil, let data = snapshot.livePhotoImageData {
+            snapshot.livePhotoImageAssetName = cloudKitService.makeAssetName(photoID: photoID, role: .livePhotoImage, fileExtension: await Self.imageFileExtension(for: data))
+        }
+        if snapshot.livePhotoVideoAssetName == nil, snapshot.livePhotoVideoData != nil {
+            snapshot.livePhotoVideoAssetName = cloudKitService.makeAssetName(photoID: photoID, role: .livePhotoVideo, fileExtension: "mov")
+        }
+
+        let assets = [
+            (snapshot.fullImageAssetName, stillData),
+            (snapshot.livePhotoImageAssetName, snapshot.livePhotoImageData),
+            (snapshot.livePhotoVideoAssetName, snapshot.livePhotoVideoData)
+        ]
+        for (name, data) in assets {
+            guard let name, cloudKitService.stagedAssetURL(named: name) == nil else { continue }
+            if let data {
+                _ = try await cloudKitService.stageAssetDataAsync(data, named: name, includesInBackup: true)
+            } else if let legacyURL = cloudKitService.legacyAssetURL(named: name) {
+                _ = try await cloudKitService.stageAssetFileAsync(from: legacyURL, named: name, includesInBackup: true)
+            }
+        }
+        guard let stillName = snapshot.fullImageAssetName,
+              assets.compactMap({ $0.0 }).allSatisfy({ cloudKitService.stagedAssetURL(named: $0) != nil }) else {
+            return original
+        }
+
+        if wasUploaded { return snapshot }
+
+        snapshot.id = photoID
+        let entry = PendingUploadManifestEntry(
+            photoID: photoID, captureDate: snapshot.captureDate ?? Date(), createdAt: snapshot.createdAt ?? Date(),
+            latitude: snapshot.latitude, longitude: snapshot.longitude,
+            fullImageAssetName: stillName, livePhotoVideoAssetName: snapshot.livePhotoVideoAssetName,
+            livePhotoImageAssetName: snapshot.livePhotoImageAssetName
+        )
+        try await pendingUploadManifestService.record(entry)
+        try cloudKitService.uploadStateStore.register(entry.localUpload)
+        if let context {
+            let objectID = snapshot.objectID
+            let updated = snapshot
+            try await context.perform {
+                guard let photo = try context.existingObject(with: objectID) as? DailyPhoto, !photo.isDeleted else { return }
+                if photo.id != updated.id || photo.fullImageAssetName != updated.fullImageAssetName ||
+                    photo.livePhotoImageAssetName != updated.livePhotoImageAssetName || photo.livePhotoVideoAssetName != updated.livePhotoVideoAssetName {
+                    photo.id = updated.id
+                    photo.fullImageAssetName = updated.fullImageAssetName
+                    photo.livePhotoImageAssetName = updated.livePhotoImageAssetName
+                    photo.livePhotoVideoAssetName = updated.livePhotoVideoAssetName
+                    try context.save()
+                }
+            }
+            await pendingUploadManifestService.remove(photoID: photoID)
+        }
+        return snapshot
+    }
+
+    /// Name-based readers include the pager, Photos saving, and video export.
+    func recoverLegacyAssetIfNeeded(named assetName: String) async throws {
+        guard cloudKitService.stagedAssetURL(named: assetName) == nil,
+              cloudKitService.legacyAssetURL(named: assetName) == nil else { return }
+        let context: NSManagedObjectContext
+        if let legacyRecoveryContext { context = legacyRecoveryContext }
+        else {
+            guard PersistenceController.shared.isLoaded else { return }
+            context = PersistenceController.shared.makeBackgroundContext()
+        }
+        let snapshot = try await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            request.fetchLimit = 1
+            request.predicate = NSPredicate(
+                format: "fullImageAssetName == %@ OR livePhotoImageAssetName == %@ OR livePhotoVideoAssetName == %@",
+                assetName, assetName, assetName
+            )
+            return try context.fetch(request).first.map(PhotoSnapshot.init)
+        }
+        guard let snapshot else { return }
+        do {
+            _ = try await recoverLegacyOriginals(for: snapshot, context: context)
+        } catch {
+            // A failed journal write must not hide originals successfully copied above.
+            if cloudKitService.stagedAssetURL(named: assetName) == nil { throw error }
+            logger.error("legacy-asset-journal: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func optimizeStoredThumbnailsIfNeeded(
@@ -887,8 +1053,7 @@ final class PhotoStorageService {
     }
 
     func countPhotosMissingSyncedPayloads(context: NSManagedObjectContext) async -> Int {
-        _ = context
-        return 0
+        await legacyMigrationCandidates(context: context).count
     }
 
     func backfillMissingSyncedPayloads(
@@ -897,20 +1062,56 @@ final class PhotoStorageService {
         maxPhotosPerRun: Int = 4,
         progress: (@MainActor @Sendable (Int) -> Void)? = nil
     ) async -> LegacyPayloadMigrationResult {
-        _ = context
-        _ = batchSize
-        _ = maxPhotosPerRun
-        if let progress {
-            await MainActor.run {
-                progress(0)
-            }
+        let candidates = await legacyMigrationCandidates(context: context)
+        var scanned = 0
+        var migrated = 0
+        var missing = 0
+        var failed = 0
+        for objectID in candidates.prefix(max(0, maxPhotosPerRun)) {
+            guard !Task.isCancelled else { break }
+            scanned += 1
+            do {
+                let snapshot = try await context.perform {
+                    guard let photo = try context.existingObject(with: objectID) as? DailyPhoto,
+                          !photo.isDeleted else { return nil as PhotoSnapshot? }
+                    return PhotoSnapshot(photo: photo)
+                }
+                guard let snapshot else { continue }
+                let recovered = try await recoverLegacyOriginals(for: snapshot, context: context)
+                if let id = recovered.id, cloudKitService.uploadStateStore.entry(for: id) != nil { migrated += 1 }
+                else { missing += 1 }
+            } catch { failed += 1 }
+            if let progress { progress(max(0, candidates.count - migrated)) }
+            if scanned.isMultiple(of: max(1, batchSize)) { await Task.yield() }
         }
-        return LegacyPayloadMigrationResult(scannedCount: 0, migratedCount: 0, missingAssetCount: 0, failedCount: 0)
+        if scanned == 0, let progress { progress(candidates.count) }
+        return LegacyPayloadMigrationResult(scannedCount: scanned, migratedCount: migrated, missingAssetCount: missing, failedCount: failed)
+    }
+
+    private func legacyMigrationCandidates(context: NSManagedObjectContext) async -> [NSManagedObjectID] {
+        let store = cloudKitService.uploadStateStore
+        let legacyDirectories = cloudKitService.legacyAssetDirectoryURLsSnapshot
+        return (try? await context.perform {
+            let request = DailyPhoto.fetchRequest()
+            request.fetchBatchSize = 50
+            return try context.fetch(request).compactMap { photo in
+                if let id = photo.id, store.entry(for: id) != nil { return nil }
+                let names = [photo.fullImageAssetName, photo.livePhotoImageAssetName, photo.livePhotoVideoAssetName].compactMap { $0 }
+                let hasLegacyFile = names.contains { name in
+                    legacyDirectories.contains { FileManager.default.fileExists(atPath: $0.appendingPathComponent(name).path) }
+                }
+                guard hasLegacyFile || photo.fullImageData != nil || photo.livePhotoImageData != nil || photo.livePhotoVideoData != nil else { return nil }
+                return photo.objectID
+            }
+        }) ?? []
     }
 
     @MainActor
     func prepareExportFiles(for photos: [DailyPhoto]) async throws -> [URL] {
-        let snapshots = photos.map(snapshot(for:))
+        var snapshots: [PhotoSnapshot] = []
+        for photo in photos {
+            snapshots.append(try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext))
+        }
         let exportRoot = try makeExportRootDirectory()
         var exportedDirectories: [URL] = []
 
@@ -939,7 +1140,7 @@ final class PhotoStorageService {
 
     @MainActor
     func prepareLivePhotoShareItemURLs(for photo: DailyPhoto) async throws -> [URL] {
-        let snapshot = snapshot(for: photo)
+        let snapshot = try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext)
         let resources = try await loadLivePhotoResources(
             imageAssetName: snapshot.livePhotoImageAssetName,
             videoAssetName: snapshot.livePhotoVideoAssetName
@@ -949,7 +1150,7 @@ final class PhotoStorageService {
 
     @MainActor
     func prepareStillPhotoShareURL(for photo: DailyPhoto) async throws -> URL {
-        let snapshot = snapshot(for: photo)
+        let snapshot = try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext)
         return try await prepareStillPhotoShareURL(fullImageAssetName: snapshot.fullImageAssetName)
     }
 
@@ -962,6 +1163,8 @@ final class PhotoStorageService {
         if let cachedImage = decodedFullImageCache.object(forKey: cacheKey as NSString) {
             return cachedImage
         }
+
+        try await recoverLegacyAssetIfNeeded(named: fullImageAssetName)
 
         let firstURL = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
 
@@ -980,6 +1183,7 @@ final class PhotoStorageService {
         guard let livePhotoVideoAssetName else {
             throw PhotoStorageError.noVideoAsset
         }
+        try await recoverLegacyAssetIfNeeded(named: livePhotoVideoAssetName)
         return try await cloudKitService.loadVideoAsset(named: livePhotoVideoAssetName)
     }
 
@@ -991,6 +1195,9 @@ final class PhotoStorageService {
               let videoAssetName else {
             throw PhotoStorageError.noLivePhotoAssets
         }
+
+        try await recoverLegacyAssetIfNeeded(named: imageAssetName)
+        try await recoverLegacyAssetIfNeeded(named: videoAssetName)
 
         var imageURL = try await cloudKitService.loadAssetURL(named: imageAssetName)
         var videoURL = try await cloudKitService.loadAssetURL(named: videoAssetName)
@@ -1031,6 +1238,7 @@ final class PhotoStorageService {
         guard let fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
+        try await recoverLegacyAssetIfNeeded(named: fullImageAssetName)
         return try await cloudKitService.loadAssetURL(named: fullImageAssetName)
     }
 
@@ -1353,9 +1561,9 @@ final class PhotoStorageService {
             fullImageAssetName: imageAssetName,
             livePhotoVideoAssetName: videoAssetName
         )
-        await PendingUploadManifestService.shared.record(manifestEntry)
-
         do {
+            try await pendingUploadManifestService.record(manifestEntry)
+            try cloudKitService.uploadStateStore.register(manifestEntry.localUpload)
             let objectID = try await context.perform {
                 let photo = DailyPhoto(context: context)
                 photo.id = photoID
@@ -1372,21 +1580,23 @@ final class PhotoStorageService {
                 photo.setValue(nil, forKey: "livePhotoImageData")
                 photo.setValue(nil, forKey: "livePhotoVideoData")
                 photo.setValue(importFingerprint, forKey: "importFingerprint")
-                photo.uploadState = .pending
-                photo.uploadAttemptCount = 0
-                photo.uploadErrorMessage = nil
-                photo.uploadRetryAfter = nil
                 if saveChanges {
-                    try context.save()
+                    do {
+                        try context.save()
+                    } catch {
+                        context.delete(photo)
+                        throw error
+                    }
                 }
                 return photo.objectID
             }
             if saveChanges {
-                await PendingUploadManifestService.shared.remove(photoID: photoID)
+                await pendingUploadManifestService.remove(photoID: photoID)
             }
             return StoredPendingPhoto(objectID: objectID, photoID: photoID)
         } catch {
-            await PendingUploadManifestService.shared.remove(photoID: photoID)
+            await pendingUploadManifestService.remove(photoID: photoID)
+            try? cloudKitService.uploadStateStore.remove(assetNames: manifestEntry.localUpload.assetNames)
             throw error
         }
     }
@@ -1404,27 +1614,39 @@ final class PhotoStorageService {
 
     @MainActor
     private func snapshot(for photo: DailyPhoto) -> PhotoSnapshot {
-        PhotoSnapshot(
-            id: photo.id,
-            captureDate: photo.captureDate,
-            latitude: photo.latitude,
-            longitude: photo.longitude,
-            fullImageAssetName: photo.fullImageAssetName,
-            livePhotoImageAssetName: photo.livePhotoImageAssetName,
-            livePhotoVideoAssetName: photo.livePhotoVideoAssetName
-        )
+        PhotoSnapshot(photo: photo)
     }
 
 }
 
-private struct PhotoSnapshot: Sendable {
-    let id: UUID?
+nonisolated private struct PhotoSnapshot: Sendable {
+    let objectID: NSManagedObjectID
+    var id: UUID?
+    let createdAt: Date?
     let captureDate: Date?
     let latitude: Double
     let longitude: Double
-    let fullImageAssetName: String?
-    let livePhotoImageAssetName: String?
-    let livePhotoVideoAssetName: String?
+    var fullImageAssetName: String?
+    var livePhotoImageAssetName: String?
+    var livePhotoVideoAssetName: String?
+    let fullImageData: Data?
+    let livePhotoImageData: Data?
+    let livePhotoVideoData: Data?
+
+    init(photo: DailyPhoto) {
+        objectID = photo.objectID
+        id = photo.id
+        createdAt = photo.createdAt
+        captureDate = photo.captureDate
+        latitude = photo.latitude
+        longitude = photo.longitude
+        fullImageAssetName = photo.fullImageAssetName
+        livePhotoImageAssetName = photo.livePhotoImageAssetName
+        livePhotoVideoAssetName = photo.livePhotoVideoAssetName
+        fullImageData = photo.fullImageData
+        livePhotoImageData = photo.livePhotoImageData
+        livePhotoVideoData = photo.livePhotoVideoData
+    }
 }
 
 private struct PhotoMetadataSyncCandidate: Sendable {
@@ -1457,6 +1679,15 @@ struct PendingUploadManifestEntry: Codable, Sendable {
     let longitude: Double
     let fullImageAssetName: String
     let livePhotoVideoAssetName: String?
+    var livePhotoImageAssetName: String? = nil
+
+    nonisolated var localUpload: LocalPhotoUpload {
+        LocalPhotoUpload(
+            photoID: photoID, stillAssetName: fullImageAssetName,
+            livePhotoImageAssetName: livePhotoImageAssetName ?? (livePhotoVideoAssetName == nil ? nil : fullImageAssetName),
+            videoAssetName: livePhotoVideoAssetName, createdAt: createdAt
+        )
+    }
 }
 
 actor PendingUploadManifestService {
@@ -1468,14 +1699,20 @@ actor PendingUploadManifestService {
     private var didLoadEntries = false
     private var entriesByPhotoID: [UUID: PendingUploadManifestEntry] = [:]
 
-    init() {
-        storageURL = Self.makeStorageURL()
+    init(storageURL: URL? = nil) {
+        self.storageURL = storageURL ?? Self.makeStorageURL()
     }
 
-    func record(_ entry: PendingUploadManifestEntry) {
+    func record(_ entry: PendingUploadManifestEntry) throws {
         loadEntriesIfNeeded()
+        let oldEntry = entriesByPhotoID[entry.photoID]
         entriesByPhotoID[entry.photoID] = entry
-        persistEntries()
+        do {
+            try persistEntriesThrowing()
+        } catch {
+            entriesByPhotoID[entry.photoID] = oldEntry
+            throw error
+        }
     }
 
     func remove(photoID: UUID) {
@@ -1553,18 +1790,16 @@ actor PendingUploadManifestService {
                     photo.longitude = entry.longitude
                     photo.thumbnailData = thumbnailData
                     photo.fullImageAssetName = entry.fullImageAssetName
-                    photo.livePhotoImageAssetName = entry.livePhotoVideoAssetName == nil ? nil : entry.fullImageAssetName
+                    photo.livePhotoImageAssetName = entry.livePhotoImageAssetName ?? (entry.livePhotoVideoAssetName == nil ? nil : entry.fullImageAssetName)
                     photo.livePhotoVideoAssetName = entry.livePhotoVideoAssetName
                     photo.setValue(nil, forKey: "fullImageData")
                     photo.setValue(nil, forKey: "livePhotoImageData")
                     photo.setValue(nil, forKey: "livePhotoVideoData")
                     photo.setValue(importFingerprint, forKey: "importFingerprint")
-                    photo.uploadState = .pending
-                    photo.uploadAttemptCount = 0
-                    photo.uploadErrorMessage = nil
-                    photo.uploadRetryAfter = nil
                     try context.save()
                 }
+                let store = cloudKitService.uploadStateStore
+                try store.register(entry.localUpload)
                 entriesByPhotoID.removeValue(forKey: entry.photoID)
                 recoveredCount += 1
                 logger.log("manifest-recovery-succeeded photo=\(entry.photoID.uuidString, privacy: .public)")
@@ -1606,6 +1841,14 @@ actor PendingUploadManifestService {
     }
 
     private func persistEntries() {
+        do {
+            try persistEntriesThrowing()
+        } catch {
+            logger.error("manifest-persist: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func persistEntriesThrowing() throws {
         let entries = entriesByPhotoID.values.sorted { $0.createdAt < $1.createdAt }
 
         if entries.isEmpty {
@@ -1613,12 +1856,9 @@ actor PendingUploadManifestService {
             return
         }
 
-        do {
-            let data = try JSONEncoder().encode(entries)
-            try data.write(to: storageURL, options: .atomic)
-        } catch {
-            logger.error("manifest-persist: \(error.localizedDescription, privacy: .public)")
-        }
+        let data = try JSONEncoder().encode(entries)
+        try FileManager.default.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: storageURL, options: .atomic)
     }
 
     private static func makeFingerprint(imageData: Data, videoURL: URL?) throws -> String {
@@ -1924,12 +2164,17 @@ actor RemoteAssetDeletionService {
     }
 }
 
-private struct PendingPhotoUpload {
+nonisolated private struct PendingPhotoUpload: Sendable {
     let objectID: NSManagedObjectID
     let photoID: UUID
     let stillAssetName: String
+    let livePhotoImageAssetName: String?
     let videoAssetName: String?
     let attemptCount: Int
+
+    var assetNames: Set<String> {
+        Set([stillAssetName, livePhotoImageAssetName, videoAssetName].compactMap { $0 })
+    }
 }
 
 private enum UploadFailureDisposition: Sendable {
@@ -1947,6 +2192,7 @@ actor PhotoUploadService {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
     private let pathMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "progress.photo-upload.monitor")
+    private let injectedCloudKitService: CloudKitService?
 
     private var didStart = false
     private var isProcessing = false
@@ -1954,6 +2200,10 @@ actor PhotoUploadService {
     private var activeUploadCount = 0
     private var idleWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     private var availabilityObserver: NSObjectProtocol?
+
+    init(cloudKitService: CloudKitService? = nil) {
+        injectedCloudKitService = cloudKitService
+    }
 
     nonisolated static func registerBackgroundTask() {
         let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
@@ -2177,7 +2427,7 @@ actor PhotoUploadService {
                 }
 
                 try await upload(candidate)
-                await markUploadCompleted(for: candidate.objectID)
+                try await markUploadCompleted(candidate)
                 processedCount += 1
                 await MainActor.run {
                     NotificationCenter.default.post(name: Self.didCompleteUploadNotification, object: candidate.objectID)
@@ -2185,7 +2435,7 @@ actor PhotoUploadService {
             } catch is CancellationError {
                 logger.error("upload-candidate-cancelled photo=\(candidate.photoID.uuidString, privacy: .public) attempt=\(candidate.attemptCount, privacy: .public)")
                 await markUploadFailure(
-                    for: candidate.objectID,
+                    for: candidate.photoID,
                     message: "Upload cancelled before completion.",
                     disposition: .retry(Date().addingTimeInterval(60))
                 )
@@ -2195,7 +2445,7 @@ actor PhotoUploadService {
                     await MainActor.run {
                         ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
                     }
-                    await deferUploadUntilICloudAvailable(for: candidate.objectID)
+                    await deferUploadUntilICloudAvailable(for: candidate.photoID)
                     break
                 }
 
@@ -2204,7 +2454,7 @@ actor PhotoUploadService {
                     "upload-candidate-failed photo=\(candidate.photoID.uuidString, privacy: .public) attempt=\(candidate.attemptCount, privacy: .public) error=\(self.describe(error), privacy: .public)"
                 )
                 await markUploadFailure(
-                    for: candidate.objectID,
+                    for: candidate.photoID,
                     message: self.describe(error),
                     disposition: disposition
                 )
@@ -2238,7 +2488,7 @@ actor PhotoUploadService {
     }
 
     private func upload(_ candidate: PendingPhotoUpload) async throws {
-        let cloudKitService = await MainActor.run { CloudKitService.shared }
+        let cloudKitService = await resolvedCloudKitService()
         logger.log(
             "upload-candidate-start photo=\(candidate.photoID.uuidString, privacy: .public) still=\(candidate.stillAssetName, privacy: .public) video=\(candidate.videoAssetName ?? "nil", privacy: .public) attempt=\(candidate.attemptCount, privacy: .public)"
         )
@@ -2249,6 +2499,16 @@ actor PhotoUploadService {
             photoID: candidate.photoID,
             role: .still
         )
+
+        if let liveImageName = candidate.livePhotoImageAssetName,
+           liveImageName != candidate.stillAssetName {
+            try await uploadOrReconcileRemoteAsset(
+                cloudKitService: cloudKitService,
+                named: liveImageName,
+                photoID: candidate.photoID,
+                role: .livePhotoImage
+            )
+        }
 
         if let videoAssetName = candidate.videoAssetName {
             try await uploadOrReconcileRemoteAsset(
@@ -2272,7 +2532,8 @@ actor PhotoUploadService {
             try await cloudKitService.uploadStagedAsset(
                 named: assetName,
                 photoID: photoID,
-                role: role
+                role: role,
+                retainsStagedOriginal: true
             )
         } catch let error as CloudKitError where error == .assetNotFound {
             if try await cloudKitService.remoteAssetExists(named: assetName) {
@@ -2285,223 +2546,191 @@ actor PhotoUploadService {
         }
     }
 
-    private func claimNextPendingUpload() async -> PendingPhotoUpload? {
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-        let now = Date()
+    func claimNextPendingUploadForTesting(in context: NSManagedObjectContext) async -> NSManagedObjectID? {
+        await claimNextPendingUpload(in: context)?.objectID
+    }
 
-        return try? await context.perform {
+    func uploadNextPendingPhotoForTesting(in context: NSManagedObjectContext) async throws -> Bool {
+        guard let candidate = await claimNextPendingUpload(in: context) else { return false }
+        do {
+            try await upload(candidate)
+            try await markUploadCompleted(candidate)
+            return true
+        } catch {
+            await markUploadFailure(
+                for: candidate.photoID, message: describe(error),
+                disposition: retryDisposition(for: error, attemptCount: candidate.attemptCount)
+            )
+            throw error
+        }
+    }
+
+    private func resolvedCloudKitService() async -> CloudKitService {
+        if let injectedCloudKitService { return injectedCloudKitService }
+        return await MainActor.run { CloudKitService.shared }
+    }
+
+    private func claimNextPendingUpload(in suppliedContext: NSManagedObjectContext? = nil) async -> PendingPhotoUpload? {
+        let cloud = await resolvedCloudKitService()
+        let store = cloud.uploadStateStore
+        let stagedNames = await cloud.storedPersistentAssetNames()
+        guard !stagedNames.isEmpty else { return nil }
+        let context: NSManagedObjectContext
+        if let suppliedContext { context = suppliedContext }
+        else { context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() } }
+
+        let candidates: [PendingPhotoUpload] = (try? await context.perform {
             let request = DailyPhoto.fetchRequest()
-            request.fetchLimit = 1
-            request.sortDescriptors = [
-                NSSortDescriptor(keyPath: \DailyPhoto.createdAt, ascending: true),
-                NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: true)
-            ]
-            request.predicate = NSPredicate(
-                format: """
-                fullImageAssetName != nil AND (
-                    uploadStateRaw == %@ OR
-                    uploadStateRaw == %@ OR
-                    (uploadStateRaw == %@ AND (uploadRetryAfter == nil OR uploadRetryAfter <= %@))
+            request.fetchBatchSize = 100
+            request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.createdAt, ascending: true)]
+            request.predicate = NSPredicate(format: "fullImageAssetName IN %@", Array(stagedNames))
+            return try context.fetch(request).compactMap { photo -> PendingPhotoUpload? in
+                guard let id = photo.id, let still = photo.fullImageAssetName,
+                      !photo.isDeleted, !photo.objectID.isTemporaryID else { return nil }
+                return PendingPhotoUpload(
+                    objectID: photo.objectID, photoID: id, stillAssetName: still,
+                    livePhotoImageAssetName: photo.livePhotoImageAssetName,
+                    videoAssetName: photo.livePhotoVideoAssetName, attemptCount: 0
                 )
-                """,
-                PhotoUploadState.pending.rawValue,
-                PhotoUploadState.uploading.rawValue,
-                PhotoUploadState.failed.rawValue,
-                now as NSDate
-            )
+            }
+        }) ?? []
 
-            guard let photo = try context.fetch(request).first,
-                  let photoID = photo.id,
-                  let stillAssetName = photo.fullImageAssetName else {
+        for candidate in candidates {
+            // Readable download caches are deliberately not proof of local ownership.
+            guard candidate.assetNames.isSubset(of: stagedNames) else { continue }
+            do {
+                try store.register(LocalPhotoUpload(
+                    photoID: candidate.photoID, stillAssetName: candidate.stillAssetName,
+                    livePhotoImageAssetName: candidate.livePhotoImageAssetName,
+                    videoAssetName: candidate.videoAssetName, createdAt: Date()
+                ))
+                guard let entry = store.entry(for: candidate.photoID) else { continue }
+                switch entry.state {
+                case .uploaded, .paused: continue
+                case .failed where (entry.retryAfter ?? .distantPast) > Date(): continue
+                default: break
+                }
+                guard entry.attemptCount < Int(Self.maxUploadAttemptCount) else {
+                    try store.update(photoID: entry.photoID) {
+                        $0.state = .paused
+                        $0.errorMessage = "Upload paused after too many retry attempts."
+                        $0.retryAfter = nil
+                    }
+                    continue
+                }
+                try store.update(photoID: entry.photoID) {
+                    $0.state = .uploading
+                    $0.attemptCount += 1
+                    $0.errorMessage = nil
+                    $0.retryAfter = nil
+                }
+                return PendingPhotoUpload(
+                    objectID: candidate.objectID, photoID: candidate.photoID,
+                    stillAssetName: candidate.stillAssetName,
+                    livePhotoImageAssetName: candidate.livePhotoImageAssetName,
+                    videoAssetName: candidate.videoAssetName, attemptCount: entry.attemptCount + 1
+                )
+            } catch {
+                logger.error("claim-local-upload: \(error.localizedDescription, privacy: .public)")
                 return nil
             }
+        }
+        return nil
+    }
 
-            if photo.uploadAttemptCount >= Self.maxUploadAttemptCount {
-                photo.uploadState = .paused
-                photo.uploadErrorMessage = "Upload paused after too many retry attempts."
-                photo.uploadRetryAfter = nil
-                try context.save()
-
-                self.logger.error(
-                    "claim-pending-upload-attempt-limit photo=\(photoID.uuidString, privacy: .public) still=\(stillAssetName, privacy: .public)"
-                )
-                return nil
-            }
-
-            photo.uploadState = .uploading
-            photo.uploadAttemptCount += 1
-            photo.uploadErrorMessage = nil
-            try context.save()
-
-            self.logger.log(
-                "claim-pending-upload photo=\(photoID.uuidString, privacy: .public) still=\(stillAssetName, privacy: .public) video=\(photo.livePhotoVideoAssetName ?? "nil", privacy: .public) attempt=\(photo.uploadAttemptCount, privacy: .public)"
-            )
-
-            return PendingPhotoUpload(
-                objectID: photo.objectID,
-                photoID: photoID,
-                stillAssetName: stillAssetName,
-                videoAssetName: photo.livePhotoVideoAssetName,
-                attemptCount: Int(photo.uploadAttemptCount)
-            )
+    private func markUploadCompleted(_ candidate: PendingPhotoUpload) async throws {
+        let cloud = await resolvedCloudKitService()
+        let store = cloud.uploadStateStore
+        guard store.entry(for: candidate.photoID) != nil else { return }
+        // Persist success before removing any original, including after partial Live uploads.
+        try store.update(photoID: candidate.photoID) {
+            $0.state = .uploaded
+            $0.errorMessage = nil
+            $0.retryAfter = nil
+        }
+        await MainActor.run {
+            for name in candidate.assetNames { cloud.removeStagedAsset(named: name) }
         }
     }
 
-    private func markUploadCompleted(for objectID: NSManagedObjectID) async {
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+    private func markUploadFailure(for photoID: UUID, message: String, disposition: UploadFailureDisposition) async {
+        let store = await resolvedCloudKitService().uploadStateStore
         do {
-            try await context.perform {
-                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
-                    return
-                }
-                photo.uploadState = .uploaded
-                photo.uploadErrorMessage = nil
-                photo.uploadRetryAfter = nil
-                photo.modifiedAt = Date()
-                try context.save()
-                self.logger.log("mark-uploaded photo=\(photo.id?.uuidString ?? "nil", privacy: .public)")
-            }
-        } catch {
-            logger.error("mark-uploaded: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func markUploadFailure(for objectID: NSManagedObjectID, message: String, disposition: UploadFailureDisposition) async {
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-        do {
-            try await context.perform {
-                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
-                    return
-                }
-
+            try store.update(photoID: photoID) {
                 switch disposition {
-                case .retry(let retryAfter):
-                    photo.uploadState = .failed
-                    photo.uploadRetryAfter = retryAfter
-                case .pause:
-                    photo.uploadState = .paused
-                    photo.uploadRetryAfter = nil
+                case .retry(let date): $0.state = .failed; $0.retryAfter = date
+                case .pause: $0.state = .paused; $0.retryAfter = nil
                 }
-
-                photo.uploadErrorMessage = message
-                try context.save()
-                self.logger.error(
-                    "mark-upload-failed photo=\(photo.id?.uuidString ?? "nil", privacy: .public) disposition=\(String(describing: disposition), privacy: .public) message=\(message, privacy: .public)"
-                )
+                $0.errorMessage = message
             }
         } catch {
-            logger.error("mark-upload-failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("mark-local-upload-failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func deferUploadUntilICloudAvailable(for objectID: NSManagedObjectID) async {
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-        do {
-            try await context.perform {
-                guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto else {
-                    return
-                }
-
-                photo.uploadState = .pending
-                photo.uploadErrorMessage = nil
-                photo.uploadRetryAfter = nil
-                try context.save()
-                self.logger.log("upload-deferred-until-icloud photo=\(photo.id?.uuidString ?? "nil", privacy: .public)")
-            }
-        } catch {
-            logger.error("upload-defer-until-icloud: \(error.localizedDescription, privacy: .public)")
+    private func deferUploadUntilICloudAvailable(for photoID: UUID) async {
+        let store = await resolvedCloudKitService().uploadStateStore
+        try? store.update(photoID: photoID) {
+            $0.state = .pending
+            $0.errorMessage = nil
+            $0.retryAfter = nil
         }
+    }
+
+    private func locallyOwnedUploads() async -> [LocalPhotoUpload] {
+        let cloud = await resolvedCloudKitService()
+        let store = cloud.uploadStateStore
+        let stagedNames = await cloud.storedPersistentAssetNames()
+        let entries = store.allEntries().filter { $0.state != .uploaded && $0.assetNames.isSubset(of: stagedNames) }
+        guard !entries.isEmpty else { return [] }
+        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
+        let ids: Set<UUID> = (try? await context.perform {
+            let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = ["id"]
+            request.predicate = NSPredicate(format: "id IN %@", entries.map { $0.photoID as NSUUID })
+            return Set(try context.fetch(request).compactMap { $0["id"] as? UUID })
+        }) ?? []
+        return entries.filter { ids.contains($0.photoID) }
     }
 
     private func pendingUploadCount() async -> Int {
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-        return (try? await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            request.predicate = NSPredicate(
-                format: "uploadStateRaw == %@ OR uploadStateRaw == %@ OR uploadStateRaw == %@",
-                PhotoUploadState.pending.rawValue,
-                PhotoUploadState.uploading.rawValue,
-                PhotoUploadState.failed.rawValue
-            )
-            return try context.count(for: request)
-        }) ?? 0
+        await locallyOwnedUploads().filter { $0.state != .paused }.count
     }
 
     func retryFailedUploads() async -> Int {
         guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return 0 }
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-
-        let resetCount = (try? await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            request.predicate = NSPredicate(
-                format: "uploadStateRaw == %@ OR uploadStateRaw == %@",
-                PhotoUploadState.failed.rawValue,
-                PhotoUploadState.paused.rawValue
-            )
-
-            let photos = try context.fetch(request)
-            guard !photos.isEmpty else { return 0 }
-
-            for photo in photos {
-                photo.uploadState = .pending
-                photo.uploadAttemptCount = 0
-                photo.uploadErrorMessage = nil
-                photo.uploadRetryAfter = nil
-            }
-
-            try context.save()
-            return photos.count
-        }) ?? 0
-
-        guard resetCount > 0 else { return 0 }
-        await enqueuePendingUploads(expeditingRetries: true, forceRetryExpedite: true)
+        let store = await resolvedCloudKitService().uploadStateStore
+        let entries = await locallyOwnedUploads().filter { $0.state == .failed || $0.state == .paused }
+        var resetCount = 0
+        for entry in entries {
+            do {
+                try store.update(photoID: entry.photoID) {
+                    $0.state = .pending
+                    $0.attemptCount = 0
+                    $0.errorMessage = nil
+                    $0.retryAfter = nil
+                }
+                resetCount += 1
+            } catch { logger.error("retry-local-upload: \(error.localizedDescription, privacy: .public)") }
+        }
+        if resetCount > 0 { await enqueuePendingUploads(expeditingRetries: true, forceRetryExpedite: true) }
         return resetCount
     }
 
     private func expediteRetryableUploadsIfPossible(force: Bool) async {
-        if !force {
-            guard pathMonitor.currentPath.status == .satisfied else { return }
-        }
-
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-        let expeditedCount = (try? await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            request.predicate = NSPredicate(
-                format: "uploadStateRaw == %@ AND uploadRetryAfter != nil",
-                PhotoUploadState.failed.rawValue
-            )
-
-            let photos = try context.fetch(request)
-            guard !photos.isEmpty else { return 0 }
-
-            for photo in photos {
-                photo.uploadState = .pending
-                photo.uploadRetryAfter = nil
+        if !force, pathMonitor.currentPath.status != .satisfied { return }
+        let store = await resolvedCloudKitService().uploadStateStore
+        for entry in await locallyOwnedUploads() where entry.state == .failed && entry.retryAfter != nil {
+            try? store.update(photoID: entry.photoID) {
+                $0.state = .pending
+                $0.retryAfter = nil
             }
-
-            try context.save()
-            return photos.count
-        }) ?? 0
-
-        if expeditedCount > 0 {
-            logger.log(
-                "expedite-retryable-uploads count=\(expeditedCount, privacy: .public) force=\(force, privacy: .public)"
-            )
         }
     }
 
     private func nextRetryDate() async -> Date? {
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-        return try? await context.perform {
-            let request = DailyPhoto.fetchRequest()
-            request.fetchLimit = 1
-            request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.uploadRetryAfter, ascending: true)]
-            request.predicate = NSPredicate(
-                format: "uploadStateRaw == %@ AND uploadRetryAfter != nil",
-                PhotoUploadState.failed.rawValue
-            )
-            return try context.fetch(request).first?.uploadRetryAfter
-        }
+        await locallyOwnedUploads().filter { $0.state == .failed }.compactMap(\.retryAfter).min()
     }
 
     private func retryDisposition(for error: Error, attemptCount: Int) -> UploadFailureDisposition {

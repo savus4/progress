@@ -159,6 +159,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                 let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "AppLifecycle")
                 logger.log("pending-upload-manifest-recovered count=\(recoveredCount, privacy: .public)")
             }
+            await PhotoStorageService.shared.recoverLegacyOriginals(context: context)
             await PhotoUploadService.shared.start()
             await RemoteAssetDeletionService.shared.start()
         }

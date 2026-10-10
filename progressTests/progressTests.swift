@@ -91,7 +91,9 @@ struct ProgressCoreFunctionalityTests {
             .init(id: UUID(), hour: -1, minute: -2),
             .init(id: UUID(), hour: 9, minute: 30),
             .init(id: UUID(), hour: 18, minute: 45),
-            .init(id: UUID(), hour: 22, minute: 0)
+            .init(id: UUID(), hour: 22, minute: 0),
+            .init(id: UUID(), hour: 23, minute: 10),
+            .init(id: UUID(), hour: 23, minute: 20)
         ]
         let encoded = try JSONEncoder().encode(persisted)
         UserDefaults.standard.set(encoded, forKey: key)
@@ -104,6 +106,8 @@ struct ProgressCoreFunctionalityTests {
         #expect(times[1].minute == 30)
         #expect(times[2].hour == 10)
         #expect(times[2].minute == 15)
+        #expect(times[6].hour == 23)
+        #expect(times[6].minute == 20)
     }
 
     @Test("Daily reminder notification payload recognition is strict")

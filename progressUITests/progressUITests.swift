@@ -55,6 +55,44 @@ final class progressUITests: XCTestCase {
     }
 
     @MainActor
+    func testFailedCaptureSaveKeepsPreviewAndCanRetry() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["UI_TEST_IN_MEMORY_STORE", "UI_TEST_MOCK_CAPTURE"]
+        app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
+        app.launchEnvironment["UI_TEST_MOCK_CAPTURE"] = "1"
+        app.launchEnvironment["UI_TEST_FAIL_FIRST_CAPTURE_SAVE"] = "1"
+        app.launch()
+
+        let openCameraButton = app.buttons["emptyStateCaptureButton"]
+        XCTAssertTrue(openCameraButton.waitForExistence(timeout: 5))
+        openCameraButton.tap()
+
+        let doneButton = app.buttons["capturePreviewDoneButton"]
+        XCTAssertTrue(doneButton.waitForExistence(timeout: 5))
+        doneButton.tap()
+
+        let saveError = app.alerts["Unable to Save Photo"]
+        XCTAssertTrue(saveError.waitForExistence(timeout: 5))
+        saveError.buttons["OK"].tap()
+
+        let preview = app.otherElements["capturePreviewOverlay"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 5))
+        XCTAssertTrue(doneButton.exists)
+        XCTAssertTrue(doneButton.isEnabled)
+        XCTAssertEqual(app.cells.matching(identifier: "photoGridItem").count, 0)
+
+        doneButton.tap()
+
+        let disappeared = NSPredicate(format: "exists == false")
+        expectation(for: disappeared, evaluatedWith: doneButton)
+        waitForExpectations(timeout: 5)
+
+        let gridItems = app.cells.matching(identifier: "photoGridItem")
+        XCTAssertTrue(gridItems.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(gridItems.count, 1)
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {

@@ -186,6 +186,11 @@ struct PhotoRouteMapView: View {
 
     private var ageLegend: some View {
         VStack(spacing: 6) {
+            Text("Year")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .fill(
                     LinearGradient(

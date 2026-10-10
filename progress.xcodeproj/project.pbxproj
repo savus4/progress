@@ -287,9 +287,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = progress/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Work in Progress";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "We need access to your camera to capture daily photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We save your location with each photo to remember where it was taken.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record sound with your Live Photos. If you decline, Live Photos will be captured without sound.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "We can save photos to your photo library if you choose.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "We need access to your photo library to import Live Photos you select.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -328,9 +330,11 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = progress/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Work in Progress";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
 				INFOPLIST_KEY_NSCameraUsageDescription = "We need access to your camera to capture daily photos.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "We save your location with each photo to remember where it was taken.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Record sound with your Live Photos. If you decline, Live Photos will be captured without sound.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "We can save photos to your photo library if you choose.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "We need access to your photo library to import Live Photos you select.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

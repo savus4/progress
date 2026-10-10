@@ -1,0 +1,9 @@
+{
+  "id" : "43e4cd21-a240-4551-91c6-e216de085d86",
+  "targets" : [
+    {
+      "id" : "98ED43E3-0B6D-43B7-98C2-2BDD4AF54927",
+      "name" : "progress-daily"
+    }
+  ]
+}

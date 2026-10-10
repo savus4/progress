@@ -51,6 +51,8 @@ struct ExperimentalCameraView: View {
 
     @State private var isEditingGuides = false
     @State private var isSaving = false
+    @State private var showingSaveError = false
+    @State private var saveErrorMessage = ""
     @State private var showingCapturePreview = false
     @State private var pendingCaptureImage: UIImage?
     @State private var pendingCaptureImageData: Data?
@@ -59,10 +61,14 @@ struct ExperimentalCameraView: View {
     @State private var pendingLivePhotoVideoURL: URL?
     @State private var isCapturing = false
     @State private var isAnimatingPreviewToGrid = false
+    @State private var previewDismissOffset: CGFloat = 0
     @State private var captureFeedbackStage: CaptureFeedbackStage?
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
     @State private var didPresentMockCapture = false
+    #if DEBUG
+    @State private var didInjectSaveFailure = false
+    #endif
     private let processInfo = ProcessInfo.processInfo
 
     private var guideInteractionDisabled: Bool {
@@ -147,12 +153,18 @@ struct ExperimentalCameraView: View {
                         isMirrored: isHirsModeEnabled,
                         isSaving: isSaving,
                         isAnimatingToGrid: isAnimatingPreviewToGrid,
+                        dismissOffset: previewDismissOffset,
                         targetFrameInGlobal: gridTargetFrameInGlobal,
                         onRetake: retakeCapture,
                         onDone: confirmSave,
-                        onDismiss: dismissCapturePreview
+                        onDismiss: dismissCapturePreview,
+                        onDragChanged: updatePreviewDrag,
+                        onDragCancelled: cancelPreviewDrag
                     )
-                    .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .identity))
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .move(edge: .bottom)
+                    ))
                     .zIndex(2)
                 }
             }
@@ -163,11 +175,8 @@ struct ExperimentalCameraView: View {
                         guard !isEditingGuides else { return }
                         guard value.translation.height > 100 else { return }
 
-                        if showingCapturePreview {
-                            dismissCapturePreview()
-                        } else {
-                            dismiss()
-                        }
+                        guard !showingCapturePreview else { return }
+                        dismiss()
                     }
             )
         }
@@ -232,6 +241,11 @@ struct ExperimentalCameraView: View {
             if !showingCapturePreview {
                 captureFeedbackStage = .processingCapture
             }
+        }
+        .alert("Unable to Save Photo", isPresented: $showingSaveError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Your capture is still available. Try saving again.\n\n\(saveErrorMessage)")
         }
     }
 
@@ -524,8 +538,19 @@ struct ExperimentalCameraView: View {
     }
 
     private func retakeCapture() {
+        guard showingCapturePreview, !isSaving else { return }
         isAnimatingPreviewToGrid = false
         captureFeedbackStage = nil
+        resumeCameraForPreviewDismissal()
+        withAnimation(.easeOut(duration: 0.32)) {
+            showingCapturePreview = false
+        } completion: {
+            clearPendingCapture()
+            previewDismissOffset = 0
+        }
+    }
+
+    private func clearPendingCapture() {
         pendingCaptureImage = nil
         pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
@@ -537,12 +562,31 @@ struct ExperimentalCameraView: View {
         }
         pendingLivePhotoImageURL = nil
         pendingLivePhotoVideoURL = nil
-        withAnimation(.easeInOut(duration: 0.22)) {
-            showingCapturePreview = false
-        }
         cameraService.capturedImage = nil
         cameraService.capturedImageData = nil
         cameraService.livePhotoCapture = nil
+    }
+
+    private func resumeCameraForPreviewDismissal() {
+        guard !usesMockCapture, scenePhase != .background, cameraService.isAuthorized else { return }
+        cameraService.startSession()
+    }
+
+    private func updatePreviewDrag(_ translation: CGFloat) {
+        let offset = max(translation, 0)
+        if offset > 0, previewDismissOffset == 0 {
+            resumeCameraForPreviewDismissal()
+        }
+        previewDismissOffset = offset
+    }
+
+    private func cancelPreviewDrag() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            previewDismissOffset = 0
+        }
+        if !usesMockCapture {
+            cameraService.stopSession()
+        }
     }
 
     private func dismissCapturePreview() {
@@ -587,49 +631,36 @@ struct ExperimentalCameraView: View {
     }
 
     private func confirmSave() {
-        guard let image = pendingCaptureImage else { return }
+        guard showingCapturePreview, !isSaving, !isAnimatingPreviewToGrid,
+              let image = pendingCaptureImage else { return }
+
+        let imageData = pendingCaptureImageData
+        let livePhotoImageData = pendingLivePhotoImageData
+        let videoURL = pendingLivePhotoVideoURL
+        isSaving = true
 
         Task {
-            await savePhoto(
-                image: image,
-                imageData: pendingCaptureImageData,
-                livePhotoImageData: pendingLivePhotoImageData,
-                videoURL: pendingLivePhotoVideoURL
-            )
-
-            await MainActor.run {
+            defer { isSaving = false }
+            do {
+                try await savePhoto(
+                    image: image,
+                    imageData: imageData,
+                    livePhotoImageData: livePhotoImageData,
+                    videoURL: videoURL
+                )
                 isAnimatingPreviewToGrid = true
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
-                    pendingCaptureImage = nil
-                    pendingCaptureImageData = nil
-                    pendingLivePhotoImageData = nil
-                    if let pendingLivePhotoImageURL {
-                        try? FileManager.default.removeItem(at: pendingLivePhotoImageURL)
-                    }
-                    if let pendingLivePhotoVideoURL {
-                        try? FileManager.default.removeItem(at: pendingLivePhotoVideoURL)
-                    }
-                    pendingLivePhotoImageURL = nil
-                    pendingLivePhotoVideoURL = nil
-                    isAnimatingPreviewToGrid = false
-                    dismiss()
-                }
+                try? await Task.sleep(for: .milliseconds(420))
+                clearPendingCapture()
+                isAnimatingPreviewToGrid = false
+                dismiss()
+            } catch {
+                saveErrorMessage = error.localizedDescription
+                showingSaveError = true
             }
         }
     }
 
-    private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async {
-        isSaving = true
-        defer {
-            isSaving = false
-            Task { @MainActor in
-                cameraService.capturedImage = nil
-                cameraService.capturedImageData = nil
-                cameraService.livePhotoCapture = nil
-            }
-        }
-
+    private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async throws {
         let location: (latitude: Double, longitude: Double)?
         if let currentLocation = locationService.currentLocation {
             location = (currentLocation.coordinate.latitude, currentLocation.coordinate.longitude)
@@ -640,6 +671,14 @@ struct ExperimentalCameraView: View {
         let clock = ContinuousClock()
         let saveStartedAt = clock.now
         do {
+            #if DEBUG
+            if usesMockCapture,
+               processInfo.environment["UI_TEST_FAIL_FIRST_CAPTURE_SAVE"] == "1",
+               !didInjectSaveFailure {
+                didInjectSaveFailure = true
+                throw CocoaError(.fileWriteOutOfSpace)
+            }
+            #endif
             _ = try await PhotoStorageService.shared.savePhoto(
                 image: image,
                 imageData: imageData,
@@ -650,8 +689,8 @@ struct ExperimentalCameraView: View {
             )
             try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
         } catch {
-            print("Error saving photo: \(error.localizedDescription)")
             try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
+            throw error
         }
     }
 
@@ -700,12 +739,21 @@ struct ExperimentalCapturePreviewOverlay: View {
     let isMirrored: Bool
     let isSaving: Bool
     let isAnimatingToGrid: Bool
+    let dismissOffset: CGFloat
     let targetFrameInGlobal: CGRect?
     let onRetake: () -> Void
     let onDone: () -> Void
     let onDismiss: () -> Void
+    let onDragChanged: (CGFloat) -> Void
+    let onDragCancelled: () -> Void
     @State private var previewImageFrameInOverlay: CGRect = .zero
     @State private var animatedFrameInOverlay: CGRect = .zero
+
+    private var previewTitle: String {
+        livePhotoImageURL != nil && livePhotoVideoURL != nil
+            ? "Live Photo Preview"
+            : "Photo Preview"
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -738,7 +786,6 @@ struct ExperimentalCapturePreviewOverlay: View {
 
             ZStack(alignment: .topLeading) {
                 Color.black
-                    .opacity(0.94)
                     .ignoresSafeArea()
 
                 if !isAnimatingToGrid {
@@ -748,7 +795,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                             .frame(width: 46, height: 5)
                             .padding(.top, 14)
 
-                        Text("Live Photo Preview")
+                        Text(previewTitle)
                             .font(.headline)
                             .foregroundStyle(.white.opacity(0.92))
 
@@ -868,12 +915,19 @@ struct ExperimentalCapturePreviewOverlay: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("capturePreviewOverlay")
         .accessibilityValue(isMirrored ? "Mirrored" : "Original")
+        .offset(y: dismissOffset)
         .gesture(
             DragGesture(minimumDistance: 20)
+                .onChanged { value in
+                    guard !isSaving, !isAnimatingToGrid else { return }
+                    onDragChanged(value.translation.height)
+                }
                 .onEnded { value in
-                    guard !isAnimatingToGrid else { return }
+                    guard !isSaving, !isAnimatingToGrid else { return }
                     if value.translation.height > 100 {
                         onDismiss()
+                    } else {
+                        onDragCancelled()
                     }
                 }
         )

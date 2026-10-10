@@ -49,6 +49,7 @@ final class CloudSyncMonitor: ObservableObject {
     private var observer: NSObjectProtocol?
     private var iCloudAvailabilityObserver: NSObjectProtocol?
     private var uploadObserver: NSObjectProtocol?
+    private var localUploadObserver: NSObjectProtocol?
     private var uploadProcessingObserver: NSObjectProtocol?
     private var contextSaveObserver: NSObjectProtocol?
     private var remoteStoreChangeObserver: NSObjectProtocol?
@@ -108,6 +109,14 @@ final class CloudSyncMonitor: ObservableObject {
             }
         }
 
+        localUploadObserver = NotificationCenter.default.addObserver(
+            forName: LocalPhotoUploadStore.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.scheduleUploadStatusRefresh() }
+        }
+
         contextSaveObserver = NotificationCenter.default.addObserver(
             forName: .NSManagedObjectContextDidSave,
             object: nil,
@@ -163,6 +172,9 @@ final class CloudSyncMonitor: ObservableObject {
         }
         if let uploadObserver {
             NotificationCenter.default.removeObserver(uploadObserver)
+        }
+        if let localUploadObserver {
+            NotificationCenter.default.removeObserver(localUploadObserver)
         }
         if let uploadProcessingObserver {
             NotificationCenter.default.removeObserver(uploadProcessingObserver)
@@ -421,72 +433,26 @@ final class CloudSyncMonitor: ObservableObject {
 
     func refreshUploadStatus() async {
         updateICloudAvailability()
-        let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
-
-        do {
-            let counts = try await context.perform {
-                let states = [
-                    PhotoUploadState.pending.rawValue,
-                    PhotoUploadState.uploading.rawValue,
-                    PhotoUploadState.failed.rawValue,
-                    PhotoUploadState.paused.rawValue
-                ]
-
-                // In-memory preview and UI-test stores do not support GROUP BY.
-                // Count each state without materializing photo objects instead.
-                if context.persistentStoreCoordinator?.persistentStores.contains(where: {
-                    $0.type != NSSQLiteStoreType
-                }) == true {
-                    let counts = try states.map { state in
-                        let request = NSFetchRequest<NSFetchRequestResult>(entityName: "DailyPhoto")
-                        request.predicate = NSPredicate(format: "uploadStateRaw == %@", state)
-                        return try context.count(for: request)
-                    }
-                    return (counts[0], counts[1], counts[2], counts[3])
-                }
-
-                let countExpression = NSExpressionDescription()
-                countExpression.name = "count"
-                countExpression.expression = NSExpression(
-                    forFunction: "count:",
-                    arguments: [NSExpression(forKeyPath: "uploadStateRaw")]
-                )
-                countExpression.expressionResultType = .integer64AttributeType
-
+        let context = PersistenceController.shared.makeBackgroundContext()
+        let stagedNames = CloudKitService.shared.storedPersistentAssetNames()
+        let entries = LocalPhotoUploadStore.shared.allEntries().filter {
+            $0.state != .uploaded && $0.assetNames.isSubset(of: stagedNames)
+        }
+        var counts: [PhotoUploadState: Int] = [:]
+        if !entries.isEmpty {
+            let ids: Set<UUID> = (try? await context.perform {
                 let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
                 request.resultType = .dictionaryResultType
-                request.propertiesToFetch = ["uploadStateRaw", countExpression]
-                request.propertiesToGroupBy = ["uploadStateRaw"]
-                request.predicate = NSPredicate(format: "uploadStateRaw IN %@", states)
-
-                let rows = try context.fetch(request)
-                var countsByState: [String: Int] = [:]
-
-                for row in rows {
-                    guard let state = row["uploadStateRaw"] as? String else { continue }
-                    if let count = row["count"] as? NSNumber {
-                        countsByState[state] = count.intValue
-                    }
-                }
-
-                return (
-                    countsByState[PhotoUploadState.pending.rawValue] ?? 0,
-                    countsByState[PhotoUploadState.uploading.rawValue] ?? 0,
-                    countsByState[PhotoUploadState.failed.rawValue] ?? 0,
-                    countsByState[PhotoUploadState.paused.rawValue] ?? 0
-                )
-            }
-
-            pendingUploadCount = counts.0
-            uploadingAssetCount = counts.1
-            failedUploadCount = counts.2
-            pausedUploadCount = counts.3
-        } catch {
-            pendingUploadCount = 0
-            uploadingAssetCount = 0
-            failedUploadCount = 0
-            pausedUploadCount = 0
+                request.propertiesToFetch = ["id"]
+                request.predicate = NSPredicate(format: "id IN %@", entries.map { $0.photoID as NSUUID })
+                return Set(try context.fetch(request).compactMap { $0["id"] as? UUID })
+            }) ?? []
+            for entry in entries where ids.contains(entry.photoID) { counts[entry.state, default: 0] += 1 }
         }
+        pendingUploadCount = counts[.pending] ?? 0
+        uploadingAssetCount = counts[.uploading] ?? 0
+        failedUploadCount = counts[.failed] ?? 0
+        pausedUploadCount = counts[.paused] ?? 0
     }
 
     var activeDownloadAssetNamesSnapshot: Set<String> {

@@ -47,6 +47,32 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     private var filter: PhotoGridFilter = .all
     private var photosByID: [NSManagedObjectID: DailyPhoto] = [:]
     private(set) var itemsSnapshot: [UIKitPhotoGridItem] = []
+    private var localUploadObserver: NSObjectProtocol?
+    private var uploadSnapshotRefreshTask: Task<Void, Never>?
+
+    override init() {
+        super.init()
+        localUploadObserver = NotificationCenter.default.addObserver(
+            forName: LocalPhotoUploadStore.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.uploadSnapshotRefreshTask?.cancel()
+                self.uploadSnapshotRefreshTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(50))
+                    guard !Task.isCancelled, let self, let controller = self.fetchedResultsController else { return }
+                    self.rebuildSnapshot(from: controller.fetchedObjects ?? [])
+                }
+            }
+        }
+    }
+
+    isolated deinit {
+        uploadSnapshotRefreshTask?.cancel()
+        if let localUploadObserver { NotificationCenter.default.removeObserver(localUploadObserver) }
+    }
 
     var hasAnyPhotos: Bool {
         totalPhotoCount > 0

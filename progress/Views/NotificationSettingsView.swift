@@ -105,7 +105,7 @@ struct NotificationSettingsView: View {
                     .disabled(reminderTimes.count >= DailyReminderNotificationService.maxRemindersPerDay)
 
                     if reminderTimes.count >= DailyReminderNotificationService.maxRemindersPerDay {
-                        Text("You can select up to five reminders per day.")
+                        Text("You can select up to \(DailyReminderNotificationService.maxRemindersPerDay) reminders per day.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -401,7 +401,7 @@ struct NotificationSettingsView: View {
     private func addReminder() {
         guard reminderTimes.count < DailyReminderNotificationService.maxRemindersPerDay else { return }
 
-        let defaultHourCandidates = [9, 12, 15, 18, 21]
+        let defaultHourCandidates = [9, 12, 15, 18, 21, 22, 23]
         let index = min(reminderTimes.count, defaultHourCandidates.count - 1)
         let newReminder = DailyReminderTime(hour: defaultHourCandidates[index], minute: 0)
 

@@ -331,14 +331,17 @@ struct SettingsMaintenanceView: View {
 
         Task { @MainActor in
             do {
-                let result = try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
-                await PhotoStorageService.shared.purgeOrphanedAssets(
-                    context: viewContext,
-                    ignoreGracePeriod: true
+                let result = try await DeleteAllPhotosMaintenance.perform(
+                    deletePhotos: {
+                        try await PhotoStorageService.shared.deleteAllPhotos(context: viewContext)
+                    },
+                    purgeOrphanedAssets: { ignoreGracePeriod in
+                        await PhotoStorageService.shared.purgeOrphanedAssets(
+                            context: viewContext,
+                            ignoreGracePeriod: ignoreGracePeriod
+                        )
+                    }
                 )
-                if result.shouldRebuildPersistentStore {
-                    try await PersistenceController.shared.rebuildPersistentStore()
-                }
                 deleteAllStatusMessage = deleteAllStatusMessage(for: result)
                 await configureDeleteRange()
                 await refreshTotalPhotoCount()
@@ -396,4 +399,18 @@ struct SettingsMaintenanceView: View {
         formatter.timeStyle = .none
         return formatter
     }()
+}
+
+@MainActor
+enum DeleteAllPhotosMaintenance {
+    static func perform(
+        deletePhotos: () async throws -> DeleteAllPhotosResult,
+        purgeOrphanedAssets: (Bool) async -> Void
+    ) async throws -> DeleteAllPhotosResult {
+        let result = try await deletePhotos()
+        // Deleted photos already had their assets removed explicitly. Keep the
+        // grace period for new captures that have staged bytes but no saved row yet.
+        await purgeOrphanedAssets(false)
+        return result
+    }
 }
