@@ -149,6 +149,14 @@ final class PhotoImportCoordinator: ObservableObject {
         return fetchResult.firstObject
     }
 
+    private func libraryMetadata(for asset: PHAsset) -> ImportedPhotoLibraryMetadata {
+        let coordinate = asset.location?.coordinate
+        return ImportedPhotoLibraryMetadata(
+            creationDate: asset.creationDate,
+            location: coordinate.map { (latitude: $0.latitude, longitude: $0.longitude) }
+        )
+    }
+
     private func loadLivePhotoImportResources(for asset: PHAsset) async throws -> (imageData: Data, videoURL: URL)? {
         guard asset.mediaSubtypes.contains(.photoLive) else { return nil }
 
@@ -169,6 +177,7 @@ final class PhotoImportCoordinator: ObservableObject {
     }
 
     private func loadStillPhotoImportPayload(for asset: PHAsset) async throws -> ImportedPhotoPayload? {
+        let metadata = libraryMetadata(for: asset)
         let resources = PHAssetResource.assetResources(for: asset)
         guard let imageResource = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto }) else {
             return try await loadStillPhotoImportPayloadViaImageManager(for: asset)
@@ -181,7 +190,7 @@ final class PhotoImportCoordinator: ObservableObject {
             }
 
             let imageData = try Data(contentsOf: imageURL)
-            return ImportedPhotoPayload(imageData: imageData)
+            return ImportedPhotoPayload(imageData: imageData, libraryMetadata: metadata)
         } catch {
             if isTransientCloudImportError(error) {
                 return try await loadStillPhotoImportPayloadViaImageManager(for: asset)
@@ -192,12 +201,14 @@ final class PhotoImportCoordinator: ObservableObject {
 
     private func loadImportPayload(for asset: PHAsset, preserveLivePhotos: Bool) async throws -> ImportedPhotoPayload? {
         guard asset.mediaType == .image else { return nil }
+        let metadata = libraryMetadata(for: asset)
 
         if preserveLivePhotos,
            let livePhotoImport = try await loadLivePhotoImportResources(for: asset) {
             return ImportedPhotoPayload(
                 imageData: livePhotoImport.imageData,
-                livePhotoVideoURL: livePhotoImport.videoURL
+                livePhotoVideoURL: livePhotoImport.videoURL,
+                libraryMetadata: metadata
             )
         }
 
@@ -206,13 +217,15 @@ final class PhotoImportCoordinator: ObservableObject {
 
     private func loadAlbumImportPayload(for asset: PHAsset, preserveLivePhotos: Bool) async throws -> ImportedPhotoPayload? {
         guard asset.mediaType == .image else { return nil }
+        let metadata = libraryMetadata(for: asset)
 
         if preserveLivePhotos {
             do {
                 if let livePhotoImport = try await loadLivePhotoImportResources(for: asset) {
                     return ImportedPhotoPayload(
                         imageData: livePhotoImport.imageData,
-                        livePhotoVideoURL: livePhotoImport.videoURL
+                        livePhotoVideoURL: livePhotoImport.videoURL,
+                        libraryMetadata: metadata
                     )
                 }
             } catch {
@@ -231,7 +244,9 @@ final class PhotoImportCoordinator: ObservableObject {
     }
 
     private func loadImportPayload(for item: PhotosPickerItem, preserveLivePhotos: Bool) async throws -> ImportedPhotoPayload? {
-        if let asset = photoAsset(for: item),
+        let asset = photoAsset(for: item)
+        let metadata = asset.map { libraryMetadata(for: $0) }
+        if let asset,
            let payload = try await loadImportPayload(for: asset, preserveLivePhotos: preserveLivePhotos) {
             return payload
         }
@@ -245,7 +260,7 @@ final class PhotoImportCoordinator: ObservableObject {
         }
 
         let imageData = try Data(contentsOf: importedFile.fileURL)
-        return ImportedPhotoPayload(imageData: imageData)
+        return ImportedPhotoPayload(imageData: imageData, libraryMetadata: metadata)
     }
 
     private func writeResourceToTemporaryFile(_ resource: PHAssetResource) async throws -> URL {
@@ -290,6 +305,7 @@ final class PhotoImportCoordinator: ObservableObject {
     }
 
     private func loadStillPhotoImportPayloadViaImageManager(for asset: PHAsset) async throws -> ImportedPhotoPayload? {
+        let metadata = libraryMetadata(for: asset)
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .highQualityFormat
@@ -314,7 +330,7 @@ final class PhotoImportCoordinator: ObservableObject {
                     return
                 }
 
-                continuation.resume(returning: ImportedPhotoPayload(imageData: data))
+                continuation.resume(returning: ImportedPhotoPayload(imageData: data, libraryMetadata: metadata))
             }
         }
     }

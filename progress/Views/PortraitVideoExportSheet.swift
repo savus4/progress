@@ -20,7 +20,7 @@ struct PortraitVideoExportSheet: View {
     @State private var endDate: Date
     @State private var progress: PortraitVideoExportProgress?
     @State private var exportTask: Task<Void, Never>?
-    @State private var exportedVideoURL: URL?
+    @State private var exportedVideo = PortraitVideoExportedVideo()
     @State private var failedPhotos: [PortraitVideoExportFailedPhoto] = []
     @State private var isShowingFilesExporter = false
     @State private var isShowingFailedPhotos = false
@@ -139,13 +139,11 @@ struct PortraitVideoExportSheet: View {
                     break
                 }
             }
-            .sheet(isPresented: $isShowingFilesExporter, onDismiss: {
-                cleanupExportedVideo()
-                progress = nil
-            }) {
+            .sheet(isPresented: $isShowingFilesExporter) {
                 if let exportedVideoURL {
                     ExportDocumentPicker(urls: [exportedVideoURL]) { didExport in
-                        if didExport {
+                        if exportedVideo.filesExporterDidComplete(didExport: didExport) {
+                            progress = nil
                             showStatus("Saved to Files.", success: true)
                         }
                     }
@@ -1101,9 +1099,12 @@ struct PortraitVideoExportSheet: View {
     }
 
     private func cleanupExportedVideo() {
-        guard let exportedVideoURL else { return }
-        try? FileManager.default.removeItem(at: exportedVideoURL)
-        self.exportedVideoURL = nil
+        exportedVideo.discard()
+    }
+
+    private var exportedVideoURL: URL? {
+        get { exportedVideo.url }
+        nonmutating set { exportedVideo.url = newValue }
     }
 
     nonisolated private func saveVideoToPhotoLibrary(_ url: URL) async throws {

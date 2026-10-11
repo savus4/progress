@@ -307,6 +307,7 @@ struct PhotoGridView: View {
                             Image(systemName: "gearshape")
                                 .font(.title3)
                         }
+                        .accessibilityLabel("Settings")
                     }
                 }
             }
@@ -360,6 +361,9 @@ struct PhotoGridView: View {
             dataController.setFilter(newValue)
         }
         .onChange(of: dataController.changeToken) { _, _ in
+            if pendingDetailDismissObjectID != nil, dataController.isEmpty {
+                finalizePhotoDetailDismissal()
+            }
             scheduleMetadataSyncIfNeeded()
         }
         .onChange(of: photoDetailPresentation?.id) { _, newValue in
@@ -433,6 +437,10 @@ struct PhotoGridView: View {
             finalizePhotoDetailDismissal()
             return
         }
+        guard dataController.hasAnyPhotos, !dataController.isEmpty else {
+            finalizePhotoDetailDismissal()
+            return
+        }
 
         pendingDetailDismissObjectID = objectID
         gridCenteringRequest = PhotoGridCenteringRequest(objectID: objectID, token: UUID())
@@ -447,6 +455,8 @@ struct PhotoGridView: View {
     }
 
     private func finalizePhotoDetailDismissal() {
+        pendingDetailDismissObjectID = nil
+        gridCenteringRequest = nil
         activePhotoDetailObjectID = nil
         photoDetailPresentation = nil
     }

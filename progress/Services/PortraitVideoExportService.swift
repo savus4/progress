@@ -431,23 +431,35 @@ nonisolated enum PortraitVideoExportQuality: String, CaseIterable, Identifiable,
 final class PortraitVideoExportService {
     static let shared = PortraitVideoExportService()
     nonisolated private static let livePhotoVideoTailDuration: TimeInterval = 1.5
-    nonisolated private static let pausedSessionStorageKey = "portraitVideoPausedExportSession"
-    nonisolated private static let pausedSessionStagingStorageKey = "portraitVideoPausedExportSessionStaging"
     nonisolated private static let checkpointPhotoInterval = 5
     nonisolated private static let prefetchPhotoWindowSize = 30
     nonisolated private static let maximumConcurrentPrefetchDownloads = 6
 
-    private let cloudKitService = CloudKitService.shared
+    private let cloudKitService: CloudKitService
+    nonisolated private let exportDirectoryURL: URL
+    nonisolated private let pausedSessionStorageKey: String
+    nonisolated private let pausedSessionStagingStorageKey: String
     private let outputSize = CGSize(width: 1080, height: 1620)
     private let thumbnailMaxPixelSize = 3240
     private let maximumPhotoAttempts = 3
 
-    private init() {}
+    init(
+        cloudKitService: CloudKitService = .shared,
+        exportDirectoryURL: URL? = nil,
+        pausedSessionStorageKey: String = "portraitVideoPausedExportSession",
+        pausedSessionStagingStorageKey: String = "portraitVideoPausedExportSessionStaging"
+    ) {
+        self.cloudKitService = cloudKitService
+        self.exportDirectoryURL = exportDirectoryURL ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("portrait_video_exports", isDirectory: true)
+        self.pausedSessionStorageKey = pausedSessionStorageKey
+        self.pausedSessionStagingStorageKey = pausedSessionStagingStorageKey
+    }
 
     nonisolated func pausedSession() -> PortraitVideoExportPausedSession? {
         let defaults = UserDefaults.standard
-        guard let data = defaults.data(forKey: Self.pausedSessionStorageKey) ??
-            defaults.data(forKey: Self.pausedSessionStagingStorageKey) else {
+        guard let data = defaults.data(forKey: pausedSessionStorageKey) ??
+            defaults.data(forKey: pausedSessionStagingStorageKey) else {
             return nil
         }
 
@@ -456,8 +468,8 @@ final class PortraitVideoExportService {
 
     nonisolated func discardPausedSession(_ session: PortraitVideoExportPausedSession? = nil) {
         let sessionToDiscard = session ?? pausedSession()
-        UserDefaults.standard.removeObject(forKey: Self.pausedSessionStorageKey)
-        UserDefaults.standard.removeObject(forKey: Self.pausedSessionStagingStorageKey)
+        UserDefaults.standard.removeObject(forKey: pausedSessionStorageKey)
+        UserDefaults.standard.removeObject(forKey: pausedSessionStagingStorageKey)
 
         if let sessionToDiscard {
             try? FileManager.default.removeItem(at: pausedExportDirectoryURL(for: sessionToDiscard.id))
@@ -712,6 +724,10 @@ final class PortraitVideoExportService {
                 cancelSegment(segmentWriter)
             }
             hasOpenSegmentWriter = false
+            // The finished tail now belongs to the checkpoint as well. Keep its
+            // progress and failures together with the segment files on cancellation.
+            lastStoredCompletedPhotoCount = completedPhotoCount
+            lastStoredFailedPhotos = failedPhotos
 
             guard !segmentFileNames.isEmpty else {
                 throw PortraitVideoExportError.noFramesWritten(failedPhotos)
@@ -726,6 +742,20 @@ final class PortraitVideoExportService {
                     totalWorkUnitCount: workEstimate.totalWorkUnitCount
                 )
             )
+
+            try Task.checkCancellation()
+            if await shouldPause() {
+                await assetPrefetcher.cancelAndDiscardOutstanding()
+                return try storePausedSession(
+                    id: sessionID,
+                    createdAt: createdAt,
+                    configuration: configuration,
+                    photoIDs: photoIDs,
+                    completedPhotoCount: completedPhotoCount,
+                    segmentFileNames: segmentFileNames,
+                    failedPhotos: failedPhotos
+                )
+            }
 
             workEstimate.saveCalibration()
             let outputURL = try makeOutputURL()
@@ -901,9 +931,9 @@ final class PortraitVideoExportService {
         )
         let data = try JSONEncoder().encode(session)
         let defaults = UserDefaults.standard
-        defaults.set(data, forKey: Self.pausedSessionStagingStorageKey)
-        defaults.set(data, forKey: Self.pausedSessionStorageKey)
-        defaults.removeObject(forKey: Self.pausedSessionStagingStorageKey)
+        defaults.set(data, forKey: pausedSessionStagingStorageKey)
+        defaults.set(data, forKey: pausedSessionStorageKey)
+        defaults.removeObject(forKey: pausedSessionStagingStorageKey)
         return session
     }
 
@@ -1468,8 +1498,7 @@ final class PortraitVideoExportService {
     }
 
     nonisolated private func temporaryExportDirectoryURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("portrait_video_exports", isDirectory: true)
+        exportDirectoryURL
     }
 
     nonisolated private func pausedExportDirectoryURL(for id: UUID) -> URL {

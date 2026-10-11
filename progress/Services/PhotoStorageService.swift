@@ -9,13 +9,25 @@ import UniformTypeIdentifiers
 import CryptoKit
 import os
 
+nonisolated struct ImportedPhotoLibraryMetadata: Sendable {
+    let creationDate: Date?
+    let location: (latitude: Double, longitude: Double)?
+
+    init(creationDate: Date? = nil, location: (latitude: Double, longitude: Double)? = nil) {
+        self.creationDate = creationDate
+        self.location = location
+    }
+}
+
 struct ImportedPhotoPayload: Sendable {
     let imageData: Data
     let livePhotoVideoURL: URL?
+    let libraryMetadata: ImportedPhotoLibraryMetadata?
 
-    init(imageData: Data, livePhotoVideoURL: URL? = nil) {
+    init(imageData: Data, livePhotoVideoURL: URL? = nil, libraryMetadata: ImportedPhotoLibraryMetadata? = nil) {
         self.imageData = imageData
         self.livePhotoVideoURL = livePhotoVideoURL
+        self.libraryMetadata = libraryMetadata
     }
 }
 
@@ -198,12 +210,14 @@ final class PhotoStorageService {
 
     func saveImportedPhoto(
         imageData: Data,
+        libraryMetadata: ImportedPhotoLibraryMetadata? = nil,
         context: NSManagedObjectContext,
         enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: nil,
+            libraryMetadata: libraryMetadata,
             context: context
         )
         if enqueuesPendingUpload {
@@ -217,12 +231,14 @@ final class PhotoStorageService {
     func saveImportedLivePhoto(
         imageData: Data,
         videoURL: URL,
+        libraryMetadata: ImportedPhotoLibraryMetadata? = nil,
         context: NSManagedObjectContext,
         enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: videoURL,
+            libraryMetadata: libraryMetadata,
             context: context
         )
         if enqueuesPendingUpload {
@@ -300,6 +316,7 @@ final class PhotoStorageService {
                 let storedPhoto = try await makeImportedPhoto(
                     imageData: payload.imageData,
                     livePhotoVideoURL: payload.livePhotoVideoURL,
+                    libraryMetadata: payload.libraryMetadata,
                     context: importContext,
                     saveChanges: false
                 )
@@ -1528,6 +1545,7 @@ final class PhotoStorageService {
     private func makeImportedPhoto(
         imageData: Data,
         livePhotoVideoURL: URL?,
+        libraryMetadata: ImportedPhotoLibraryMetadata? = nil,
         context: NSManagedObjectContext,
         saveChanges: Bool = true
     ) async throws -> StoredPendingPhoto {
@@ -1552,12 +1570,14 @@ final class PhotoStorageService {
             videoAssetName = nil
         }
         let createdAt = Date()
+        let captureDate = exifMetadata?.captureDate ?? libraryMetadata?.creationDate ?? createdAt
+        let location = exifMetadata?.location ?? libraryMetadata?.location
         let manifestEntry = PendingUploadManifestEntry(
             photoID: photoID,
-            captureDate: exifMetadata?.captureDate ?? createdAt,
+            captureDate: captureDate,
             createdAt: createdAt,
-            latitude: exifMetadata?.location?.latitude ?? 0,
-            longitude: exifMetadata?.location?.longitude ?? 0,
+            latitude: location?.latitude ?? 0,
+            longitude: location?.longitude ?? 0,
             fullImageAssetName: imageAssetName,
             livePhotoVideoAssetName: videoAssetName
         )

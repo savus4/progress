@@ -1,8 +1,8 @@
 # Checked bug review
 
-Reviewed 2026-10-08 against the current working tree at `c1cbe22`, including the existing uncommitted changes. Four agents reviewed the app and bundled plugin; the primary reviewer independently checked every entry. Application source was not changed during the initial review. The follow-up below records the requested P1 fixes.
+Reviewed 2026-10-08 against the current working tree at `c1cbe22`, including the existing uncommitted changes. Four agents reviewed the app and bundled plugin; the primary reviewer independently checked every entry. Application source was not changed during the initial review. The follow-up sections below record the requested P1 and selected P2 fixes.
 
-**23 verified findings: all 5 P1 issues are now fixed and regression-tested; 18 P2 issues remain open.** P1 means serious loss or failure requiring prompt attention; P2 means a reproducible functional defect. Source-verified cloud/device failures are distinguished from simulator reproductions below.
+**23 verified findings: all 5 P1 issues and P2 issues 8, 11, 13, 15, 16, and 18 are fixed and regression-tested; 12 P2 issues remain open.** P1 means serious loss or failure requiring prompt attention; P2 means a reproducible functional defect. Source-verified cloud/device failures are distinguished from simulator reproductions below.
 
 ## P1 fixes and verification — 2026-10-09
 
@@ -26,7 +26,32 @@ Release archive: **succeeded**, version **0.6.2 (9)**, bundle `me.riepl.progress
 
 App Store Connect upload: **attempted through `xcodebuild -exportArchive`, but blocked before upload**. Xcode reported `Failed to Use Accounts` because its saved Apple accounts lack valid `Xcode-Token` credentials. No API key was found in the standard command-line locations or relevant environment configuration. Upload log: `/private/tmp/progress-p1-appstore-upload.log`. No computer-use tools were used. The archive and export-options plist (`/private/tmp/progress-appstore-export-options.plist`) are ready for retry after access is restored.
 
+## Selected P2 fixes and verification — 2026-10-11
+
+Fixed the requested findings **8, 11, 13, 15, 16, and 18**. Each reported bug had a failing regression before its behavior was changed. The primary reviewer checked the changes and test results; another agent independently reviewed each implementation.
+
+| Finding | Resolution | Regression evidence |
+| --- | --- | --- |
+| 8. Last filtered favorite cannot close | Dismiss directly when the filtered UIKit grid is absent. Clear pending centering state on dismissal, including a grid that becomes empty while closing. | The Hearted UI test first remained on Back after unhearting the only photo. It now closes, shows the empty filter, and returns to All Photos with the original still present. Favorite Live uses the same corrected empty-grid path, verified by source review. |
+| 11. Imported library metadata lost | Snapshot Photos-library date and coordinates into Sendable values before async work. Carry them through still, Live, private, album, and fallback paths. Missing EXIF fields use library metadata independently; EXIF retains precedence. | Missing/partial EXIF imports first lost date/location in single and batch paths. Still, Live, batch Live, partial/full EXIF, duplicate-first metadata, and absent-metadata controls now pass. Manifest and Core Data use the same resolved values; image/video fingerprints are unchanged. |
+| 13. Finishing pause duplicates the tail | Advance the cancellation checkpoint count and failures together with the finished tail segment, before final assembly. Pause/cancel at finishing retains consistent files and progress. | The original checkpoint reported 5 completed photos while retaining the final segment, and repeated resumes increased video duration. Three finishing pause/resume cycles now retain the same segment names and count 8; the final output has exactly 8 decoded frames and the expected 8/30-second duration. |
+| 15. Files cancellation deletes the video | Keep generated file ownership on cancellation or dismissal without a delegate callback. Release it only on successful export or explicit discard; remove unconditional picker-dismissal cleanup. | Cancellation first removed the URL and bytes. Actual picker-delegate cancellation and dismissal-without-callback controls now retain both; success and explicit discard still delete the temporary file. |
+| 16. Save A marks B saved | Record completed saves by photo object ID within the detail presentation. Update selection explicitly on paging and deletion, including when the numeric index stays unchanged. | A controlled pending save first marked B saved and forgot A on reselection. The same async helper used by the view now keeps B unsaved and A saved. Failed-save retry, independent successes, reselection, and deletion-style selection controls pass. |
+| 18. Reminder edits after Storage return lost | Replace the one-time save flag with full reminder-value snapshots and load initial values once. Persist submitted preferences synchronously; serialize only notification scheduling in the shared service across Settings instances. | The original UI workflow added a reminder after Storage return, then reopened Settings with zero reminders. It now retains that reminder and also persists deletion after another Storage visit. A controlled pending-scheduling regression first exposed stale preference reads; granted/denied permission cases now see later edits immediately and finish scheduling in submission order without overwriting newer preferences. |
+
+Final validation across the final full run and the corrected reminder UI repeat: **74 distinct tests passed, 4 skipped, no unresolved failures** (78 distinct tests). This covers the full unit suite and five UI checks: filtered-favorite dismissal, reminder add/delete persistence, normal capture save, failed-save retry, and paging. The reminder UI check passed **twice consecutively**. The four existing CloudKit tests require `RUN_CLOUDKIT_TESTS=1` and an authenticated simulator and remain skipped.
+
+The full run's only failure was a reminder-test interaction before its persistence assertion: XCTest reported an offscreen Add Time button as hittable and tapped above the Settings navigation bar. The recorded test confirmed the misplaced tap. The test now scrolls the Notifications controls fully into view and waits for the new row; both repeated runs passed. Application source was unchanged for this harness correction.
+
+Regression sources: [photo-detail save state](/Users/simonriepl/Developer/progress/progressTests/PhotoDetailLibrarySaveStateTests.swift), [filtered favorite UI](/Users/simonriepl/Developer/progress/progressUITests/PhotoDetailRegressionUITests.swift), [import metadata](/Users/simonriepl/Developer/progress/progressTests/Services/PhotoImportLibraryMetadataTests.swift), [video recovery and file ownership](/Users/simonriepl/Developer/progress/progressTests/PortraitVideoExportRecoveryTests.swift), [pending reminder scheduling](/Users/simonriepl/Developer/progress/progressTests/Services/DailyReminderPersistenceTests.swift), and [reminder navigation UI](/Users/simonriepl/Developer/progress/progressUITests/ReminderSettingsUITests.swift).
+
+Evidence bundles in `/private/tmp`: `progress-six-red-1.xcresult` (11/13/15), `progress-six-red-2.xcresult` (8/16), `progress-reminder-red-3.xcresult` (18), `progress-reminder-queue-red.xcresult` (pending scheduling), `progress-six-full-green-final.xcresult` (all final unit tests and four other UI checks), and `progress-reminder-ui-green-viewport.xcresult` (two successful reminder UI repeats).
+
+The release archive recorded in the P1 section predates these P2 fixes. A fresh release archive is required before uploading this updated source; no new upload was attempted in this follow-up.
+
 ## Checked findings
+
+The entries below describe the original reviewed behavior. See the dated fix tables for resolved issues.
 
 ### 1. [P1] Legacy originals become inaccessible after upgrading
 

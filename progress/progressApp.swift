@@ -19,6 +19,11 @@ struct progressApp: App {
 
     init() {
         loadRocketSimConnect()
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment["UI_TEST_RESET_REMINDERS"] == "1" {
+            UserDefaults.standard.removeObject(forKey: "dailyPhotoReminderTimes")
+        }
+        #endif
     }
 
     var body: some Scene {

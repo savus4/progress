@@ -312,7 +312,7 @@ struct PhotoDetailView: View {
     @State private var sharePresentation: ActivityPresentation?
     @State private var actionError: PhotoDetailActionError?
     @State private var isPerformingAction = false
-    @State private var hasSavedCurrentItemToLibrary = false
+    @State private var librarySaveState: PhotoDetailLibrarySaveState
     @State private var deleteTransition: PhotoDetailDeleteTransition?
 
     init(
@@ -327,6 +327,9 @@ struct PhotoDetailView: View {
         self.onShowOnMap = onShowOnMap
         _detailItems = State(initialValue: items)
         _selectedIndex = State(initialValue: initialIndex)
+        _librarySaveState = State(initialValue: PhotoDetailLibrarySaveState(
+            initialObjectID: items.indices.contains(initialIndex) ? items[initialIndex].objectID : nil
+        ))
     }
 
     var body: some View {
@@ -375,7 +378,7 @@ struct PhotoDetailView: View {
             onCurrentItemChanged(currentItem?.objectID)
         }
         .onChange(of: selectedIndex) { _, _ in
-            hasSavedCurrentItemToLibrary = false
+            librarySaveState.selectPhoto(currentItem?.objectID)
             onCurrentItemChanged(currentItem?.objectID)
         }
         .task(id: currentItem?.objectID) {
@@ -396,6 +399,10 @@ struct PhotoDetailView: View {
     private var currentItem: PhotoDetailItem? {
         guard detailItems.indices.contains(selectedIndex) else { return nil }
         return detailItems[selectedIndex]
+    }
+
+    private var hasSavedCurrentItemToLibrary: Bool {
+        librarySaveState.hasSavedCurrentPhoto
     }
 
     private func clampSelectedIndex() {
@@ -550,9 +557,7 @@ struct PhotoDetailView: View {
             defer { isPerformingAction = false }
 
             do {
-                let saveItem = PhotoLibrarySaveItem(item: currentItem)
-                try await PhotoLibrarySaveService.shared.save(saveItem)
-                hasSavedCurrentItemToLibrary = true
+                try await librarySaveState.save(currentItem)
             } catch let error as PhotoLibrarySaveError {
                 actionError = PhotoDetailActionError(message: error.localizedDescription)
             } catch {
@@ -672,7 +677,7 @@ struct PhotoDetailView: View {
         let nextIndex = min(transition.resultIndexAfterRemoval, detailItems.count - 1)
         withAnimation(.easeInOut(duration: 0.18)) {
             selectedIndex = nextIndex
-            hasSavedCurrentItemToLibrary = false
+            librarySaveState.selectPhoto(detailItems[nextIndex].objectID)
         }
         onCurrentItemChanged(detailItems[nextIndex].objectID)
     }

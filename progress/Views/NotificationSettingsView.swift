@@ -11,7 +11,8 @@ struct NotificationSettingsView: View {
 
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
-    @State private var didPersistChanges = false
+    @State private var hasLoadedReminderTimes = false
+    @State private var lastSubmittedReminderTimes: [DailyReminderTime]?
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var selectedPrivatePhotoItems: [PhotosPickerItem] = []
     @State private var showingAlbumImportSheet = false
@@ -213,7 +214,10 @@ struct NotificationSettingsView: View {
                 }
             }
             .task {
-                reminderTimes = notificationService.loadReminderTimes()
+                if !hasLoadedReminderTimes {
+                    reminderTimes = notificationService.loadReminderTimes()
+                    hasLoadedReminderTimes = true
+                }
                 authorizationStatus = await notificationService.authorizationStatus()
                 await cloudSyncMonitor.refreshUploadStatus()
             }
@@ -417,11 +421,14 @@ struct NotificationSettingsView: View {
     }
 
     private func persistChangesIfNeeded() {
-        guard !didPersistChanges else { return }
-        didPersistChanges = true
+        guard hasLoadedReminderTimes else { return }
+        let timesToPersist = reminderTimes
+        guard lastSubmittedReminderTimes != timesToPersist else { return }
+        lastSubmittedReminderTimes = timesToPersist
+        let update = notificationService.submitReminderTimes(timesToPersist)
 
         Task {
-            _ = await notificationService.updateReminderTimes(reminderTimes)
+            _ = await update.value
             authorizationStatus = await notificationService.authorizationStatus()
         }
     }

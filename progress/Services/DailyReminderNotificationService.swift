@@ -45,11 +45,20 @@ final class DailyReminderNotificationService {
 
     private let reminderTimesKey = "dailyPhotoReminderTimes"
     private let center = UNUserNotificationCenter.current()
+    private let defaults: UserDefaults
+    private let scheduleReminders: (@MainActor ([DailyReminderTime]) async -> Bool)?
+    private var reminderUpdateTask: Task<Bool, Never>?
 
-    private init() {}
+    init(
+        defaults: UserDefaults = .standard,
+        scheduleReminders: (@MainActor ([DailyReminderTime]) async -> Bool)? = nil
+    ) {
+        self.defaults = defaults
+        self.scheduleReminders = scheduleReminders
+    }
 
     func loadReminderTimes() -> [DailyReminderTime] {
-        guard let data = UserDefaults.standard.data(forKey: reminderTimesKey) else {
+        guard let data = defaults.data(forKey: reminderTimesKey) else {
             return []
         }
 
@@ -61,9 +70,29 @@ final class DailyReminderNotificationService {
     }
 
     @discardableResult
-    func updateReminderTimes(_ times: [DailyReminderTime]) async -> Bool {
+    func submitReminderTimes(_ times: [DailyReminderTime]) -> Task<Bool, Never> {
         let sanitizedTimes = sanitizeReminderTimes(times)
+        // A newly opened Settings sheet must immediately see the latest edits,
+        // even if an earlier permission request or notification update is pending.
         persistReminderTimes(sanitizedTimes)
+        let previousUpdate = reminderUpdateTask
+        let update = Task {
+            _ = await previousUpdate?.value
+            return await scheduleReminderNotifications(sanitizedTimes)
+        }
+        reminderUpdateTask = update
+        return update
+    }
+
+    @discardableResult
+    func updateReminderTimes(_ times: [DailyReminderTime]) async -> Bool {
+        await submitReminderTimes(times).value
+    }
+
+    private func scheduleReminderNotifications(_ sanitizedTimes: [DailyReminderTime]) async -> Bool {
+        if let scheduleReminders {
+            return await scheduleReminders(sanitizedTimes)
+        }
 
         await clearReminderNotifications()
 
@@ -123,7 +152,7 @@ final class DailyReminderNotificationService {
 
     private func persistReminderTimes(_ times: [DailyReminderTime]) {
         guard let data = try? JSONEncoder().encode(times) else { return }
-        UserDefaults.standard.set(data, forKey: reminderTimesKey)
+        defaults.set(data, forKey: reminderTimesKey)
     }
 
     private func sanitizeReminderTimes(_ times: [DailyReminderTime]) -> [DailyReminderTime] {
