@@ -1255,6 +1255,11 @@ private struct PhotoDetailPageView: View {
     @State private var didFailLivePhotoLoading = false
     @State private var livePhotoResources: LivePhotoResources?
     @State private var representedObjectID: NSManagedObjectID?
+    @State private var network = PhotoNetworkMonitor.shared
+    @State private var downloadFailure: PhotoDownloadFailure?
+    @State private var didLoadFullImage = false
+    @State private var retryVersion = 0
+    @State private var loadRequestID = UUID()
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1279,9 +1284,14 @@ private struct PhotoDetailPageView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background(Color.black)
                     }
-                } else {
+                } else if isLoadingMedia {
                     ProgressView()
                         .tint(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundStyle(.white.opacity(0.5))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -1298,10 +1308,22 @@ private struct PhotoDetailPageView: View {
             .padding(.top, topChromeClearance)
             .padding(.trailing, 16)
         }
-        .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
+        .overlay(alignment: .bottom) {
+            if isCurrentPage, let downloadFailure {
+                PhotoDownloadFailureView(
+                    failure: downloadFailure,
+                    isLiveMotion: hasLivePhoto && didLoadFullImage,
+                    canRetry: network.state != .offline,
+                    retry: { retryVersion += 1 }
+                )
+                .padding(.horizontal, 24)
+                .padding(.bottom, 100)
+            }
+        }
+        .task(id: loadingTaskKey) {
             await loadImage()
         }
-        .task(id: PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage)) {
+        .task(id: loadingTaskKey) {
             await revealLoadingIndicatorIfNeeded()
         }
     }
@@ -1309,6 +1331,8 @@ private struct PhotoDetailPageView: View {
     @MainActor
     private func loadImage() async {
         let objectID = item.objectID
+        let requestID = UUID()
+        loadRequestID = requestID
         if representedObjectID != objectID {
             representedObjectID = objectID
             displayedImage = nil
@@ -1317,56 +1341,52 @@ private struct PhotoDetailPageView: View {
         isLoadingMedia = true
         shouldShowLoadingIndicator = false
         didFailLivePhotoLoading = false
+        downloadFailure = nil
+        didLoadFullImage = false
         livePhotoResources = nil
 
         if let cachedThumbnail = DecodedThumbnailCache.shared.cachedImage(for: objectID) {
             displayedImage = cachedThumbnail
         } else if displayedImage == nil {
             let thumbnailData = await Self.thumbnailDataProvider.thumbnailData(for: objectID)
-            guard !Task.isCancelled, representedObjectID == objectID else { return }
+            guard !Task.isCancelled, loadRequestID == requestID, representedObjectID == objectID else { return }
 
             if let decodedThumbnail = await DecodedThumbnailCache.shared.image(
                 for: objectID,
                 data: thumbnailData
             ) {
-                guard !Task.isCancelled, representedObjectID == objectID else { return }
+                guard !Task.isCancelled, loadRequestID == requestID, representedObjectID == objectID else { return }
                 displayedImage = decodedThumbnail
             }
         }
 
-        guard let fullImage = try? await PhotoStorageService.shared.loadFullImage(named: item.fullImageAssetName) else {
+        do {
+            let fullImage = try await PhotoStorageService.shared.loadFullImage(named: item.fullImageAssetName)
+            guard !Task.isCancelled, loadRequestID == requestID, representedObjectID == objectID else { return }
+            displayedImage = fullImage
+            didLoadFullImage = true
+
+            guard isCurrentPage else { isLoadingMedia = false; return }
+            if let fullName = item.fullImageAssetName {
+                await CloudKitService.shared.recordPhotoAccess(named: fullName)
+            }
+            guard !Task.isCancelled, loadRequestID == requestID, representedObjectID == objectID else { return }
+            guard hasLivePhoto else { isLoadingMedia = false; return }
+
+            let resources = try await PhotoStorageService.shared.loadLivePhotoResources(
+                imageAssetName: item.livePhotoImageAssetName,
+                videoAssetName: item.livePhotoVideoAssetName
+            )
+            guard !Task.isCancelled, loadRequestID == requestID, representedObjectID == objectID else { return }
+            livePhotoResources = LivePhotoResources(imageURL: resources.imageURL, videoURL: resources.videoURL)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled, loadRequestID == requestID, representedObjectID == objectID else { return }
+            downloadFailure = PhotoDownloadFailure(error)
             didFailLivePhotoLoading = hasLivePhoto
             isLoadingMedia = false
-            return
         }
-        guard !Task.isCancelled, representedObjectID == objectID else { return }
-
-        displayedImage = fullImage
-
-        guard isCurrentPage else {
-            isLoadingMedia = false
-            return
-        }
-
-        guard hasLivePhoto else {
-            isLoadingMedia = false
-            return
-        }
-
-        guard let resources = try? await PhotoStorageService.shared.loadLivePhotoResources(
-            imageAssetName: item.livePhotoImageAssetName,
-            videoAssetName: item.livePhotoVideoAssetName
-        ) else {
-            didFailLivePhotoLoading = true
-            isLoadingMedia = false
-            return
-        }
-        guard !Task.isCancelled, representedObjectID == objectID else { return }
-
-        livePhotoResources = LivePhotoResources(
-            imageURL: resources.imageURL,
-            videoURL: resources.videoURL
-        )
     }
 
     @MainActor
@@ -1394,6 +1414,10 @@ private struct PhotoDetailPageView: View {
         item.livePhotoImageAssetName != nil && item.livePhotoVideoAssetName != nil
     }
 
+    private var loadingTaskKey: PhotoDetailPageTaskKey {
+        PhotoDetailPageTaskKey(objectID: item.objectID, isCurrentPage: isCurrentPage, networkState: isCurrentPage ? network.state : .checking, retryVersion: retryVersion)
+    }
+
     private var shouldShowLivePhotoStatusIndicator: Bool {
         true
     }
@@ -1402,6 +1426,8 @@ private struct PhotoDetailPageView: View {
 private struct PhotoDetailPageTaskKey: Hashable {
     let objectID: NSManagedObjectID
     let isCurrentPage: Bool
+    let networkState: PhotoNetworkState
+    let retryVersion: Int
 }
 
 private struct LivePhotoResources {

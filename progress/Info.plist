@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>me.riepl.progress.photo-upload</string>
+		<string>me.riepl.progress.photo-offline</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

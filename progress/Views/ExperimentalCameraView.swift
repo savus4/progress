@@ -53,6 +53,7 @@ struct ExperimentalCameraView: View {
     @State private var isSaving = false
     @State private var showingSaveError = false
     @State private var saveErrorMessage = ""
+    @State private var showingCaptureError = false
     @State private var showingCapturePreview = false
     @State private var pendingCaptureImage: UIImage?
     @State private var pendingCaptureImageData: Data?
@@ -209,8 +210,11 @@ struct ExperimentalCameraView: View {
         }
         .onDisappear {
             cameraService.stopSession()
+            if !isSaving { clearPendingCapture() }
         }
+        .interactiveDismissDisabled(isSaving || isCapturing)
         .onChange(of: cameraService.captureCompleted) { _, _ in
+            isCapturing = false
             captureFeedbackStage = nil
             if let capture = cameraService.livePhotoCapture {
                 pendingCaptureImage = capture.image
@@ -238,9 +242,20 @@ struct ExperimentalCameraView: View {
         }
         .onChange(of: cameraService.captureFinished) { _, _ in
             isCapturing = false
-            if !showingCapturePreview {
+            if !showingCapturePreview, cameraService.captureErrorMessage == nil {
                 captureFeedbackStage = .processingCapture
             }
+        }
+        .onChange(of: cameraService.captureErrorMessage) { _, message in
+            guard message != nil else { return }
+            isCapturing = false
+            captureFeedbackStage = nil
+            showingCaptureError = true
+        }
+        .alert("Unable to Take Photo", isPresented: $showingCaptureError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(cameraService.captureErrorMessage ?? "Please try again.")
         }
         .alert("Unable to Save Photo", isPresented: $showingSaveError) {
             Button("OK", role: .cancel) {}
@@ -484,7 +499,7 @@ struct ExperimentalCameraView: View {
     }
 
     private func capturePhoto() {
-        guard !showingCapturePreview else { return }
+        guard !controlsDisabled else { return }
 
         if usesMockCapture {
             presentMockCapturePreview()
@@ -562,9 +577,7 @@ struct ExperimentalCameraView: View {
         }
         pendingLivePhotoImageURL = nil
         pendingLivePhotoVideoURL = nil
-        cameraService.capturedImage = nil
-        cameraService.capturedImageData = nil
-        cameraService.livePhotoCapture = nil
+        cameraService.discardCapture()
     }
 
     private func resumeCameraForPreviewDismissal() {

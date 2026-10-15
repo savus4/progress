@@ -4,6 +4,12 @@ import CoreData
 struct SettingsMaintenanceView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
+    @State private var offlineCoordinator = PhotoOfflineCoordinator.shared
+    @AppStorage(PhotoOfflineSettings.keepAllKey) private var keepAllPhotos = false
+    @AppStorage(PhotoOfflineSettings.keepHeartedKey) private var keepHeartedPhotos = false
+    @AppStorage(PhotoOfflineSettings.cellularKey) private var allowCellularDownloads = false
+    @AppStorage(PhotoOfflineSettings.recentPhotosKey) private var keepRecentPhotos = false
+    @AppStorage(PhotoOfflineSettings.recentLimitKey) private var recentPhotoLimitBytes = PhotoOfflineSettings.defaultLimitBytes
 
     @State private var localAssetStorageUsage = LocalPhotoAssetStorageUsage.empty
     @State private var isLoadingLocalAssetStorageUsage = false
@@ -22,41 +28,58 @@ struct SettingsMaintenanceView: View {
 
     var body: some View {
         Form {
-            Section("Storage") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text(cloudSyncMonitor.isICloudUnavailable ? "Local Originals" : "System CloudKit Cache")
-                        Spacer()
-                        Text(PhotoAssetCacheSettings.formattedByteCount(primaryStorageUsageBytes))
-                            .foregroundStyle(.secondary)
+            Section("Offline Photos") {
+                Toggle("Keep All Photos on Device", isOn: $keepAllPhotos)
+                    .accessibilityIdentifier("keepAllPhotosOnDeviceToggle")
+                Toggle("Keep Hearted Photos on Device", isOn: $keepHeartedPhotos)
+                    .disabled(keepAllPhotos)
+                    .accessibilityIdentifier("keepHeartedPhotosOnDeviceToggle")
+                Toggle("Keep Recently Opened Photos", isOn: $keepRecentPhotos)
+                    .disabled(keepAllPhotos)
+                    .accessibilityIdentifier("keepRecentPhotosOnDeviceToggle")
+                if keepRecentPhotos {
+                    NavigationLink {
+                        PhotoStorageLimitView(limitBytes: $recentPhotoLimitBytes)
+                    } label: {
+                        LabeledContent("Storage Limit", value: ByteCountFormatter.string(fromByteCount: PhotoOfflineSettings.recentLimitBytes(), countStyle: .decimal))
                     }
-
-                    Text(cloudSyncMonitor.isICloudUnavailable
-                         ? "Full-resolution originals stay on this device and are included in device backup until iCloud sync resumes."
-                         : "Fetched originals live in CloudKit's system-managed cache. Pending Uploads stay local until iCloud has a copy.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    Text("Cached")
-                    Spacer()
-                    if isLoadingLocalAssetStorageUsage {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text(storageUsageDescription)
-                            .foregroundStyle(.secondary)
+                    .disabled(keepAllPhotos)
+                    .accessibilityIdentifier("recentPhotoStorageLimitRow")
+                    if !keepAllPhotos {
+                        LabeledContent("Recent Photos", value: ByteCountFormatter.string(fromByteCount: offlineCoordinator.recentPhotoBytes, countStyle: .decimal))
                     }
                 }
 
-                if localAssetStorageUsage.pendingUploadBytes > 0 {
-                    Text(cloudSyncMonitor.isICloudUnavailable
-                         ? "Local originals use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) and are included in device backup."
-                         : "Pending uploads use \(PhotoAssetCacheSettings.formattedByteCount(localAssetStorageUsage.pendingUploadBytes)) until iCloud has a copy.")
+                if keepAllPhotos || keepHeartedPhotos || keepRecentPhotos {
+                    LabeledContent("Available Offline", value: "\(offlineCoordinator.availablePhotoCount) of \(offlineCoordinator.selectedPhotoCount) photos")
+                    LabeledContent("Offline Originals", value: ByteCountFormatter.string(fromByteCount: offlineCoordinator.offlineBytes, countStyle: .decimal))
+                    LabeledContent("Still to Download", value: offlineCoordinator.remainingDownloadBytes.map {
+                        ByteCountFormatter.string(fromByteCount: $0, countStyle: .decimal)
+                    } ?? "Calculating…")
+                    if offlineCoordinator.isDownloading { ProgressView().controlSize(.small) }
+                    Text(offlineCoordinator.statusMessage)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    Button("Retry Downloads") { offlineCoordinator.requestReconciliation(delay: .zero) }
+                        .disabled(offlineCoordinator.isDownloading || !offlineCoordinator.hasMissingPhotos)
+                    Button("Recheck Storage") {
+                        offlineCoordinator.requestReconciliation(delay: .zero)
+                        refreshLocalAssetStorageUsage()
+                    }
                 }
+
+                Toggle("Allow Cellular Downloads", isOn: $allowCellularDownloads)
+                    .accessibilityIdentifier("allowCellularOfflineDownloadsToggle")
+            }
+
+            Section("Storage") {
+                PhotoStorageBarView(
+                    usage: localAssetStorageUsage,
+                    heartedBytes: offlineCoordinator.heartedPhotoBytes,
+                    recentBytes: offlineCoordinator.recentPhotoBytes,
+                    recentLimitBytes: keepRecentPhotos && !keepAllPhotos ? PhotoOfflineSettings.recentLimitBytes() : nil
+                )
+                if isLoadingLocalAssetStorageUsage { ProgressView().controlSize(.small) }
 
                 Button {
                     refreshLocalAssetStorageUsage()
@@ -145,7 +168,14 @@ struct SettingsMaintenanceView: View {
         }
         .navigationTitle("Storage Management")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: [keepAllPhotos, keepHeartedPhotos, allowCellularDownloads, keepRecentPhotos]) { _, _ in
+            offlineCoordinator.preferencesDidChange()
+        }
+        .onChange(of: recentPhotoLimitBytes) { _, _ in offlineCoordinator.preferencesDidChange() }
+        .onChange(of: offlineCoordinator.offlineBytes) { _, _ in refreshLocalAssetStorageUsage() }
+        .onChange(of: [cloudSyncMonitor.pendingUploadCount, cloudSyncMonitor.uploadingAssetCount, cloudSyncMonitor.downloadingAssetCount]) { _, _ in refreshLocalAssetStorageUsage() }
         .task {
+            offlineCoordinator.start()
             refreshLocalAssetStorageUsage()
             await configureDeleteRange()
             await refreshTotalPhotoCount()
@@ -178,16 +208,6 @@ struct SettingsMaintenanceView: View {
                  ? "This will permanently delete every photo from Work in Progress on this device. iCloud cleanup will resume automatically when iCloud is enabled."
                  : "This will permanently delete every photo from Work in Progress on this device and remove the matching records and stored assets from iCloud.")
         }
-    }
-
-    private var storageUsageDescription: String {
-        PhotoAssetCacheSettings.formattedByteCount(primaryStorageUsageBytes)
-    }
-
-    private var primaryStorageUsageBytes: Int {
-        cloudSyncMonitor.isICloudUnavailable
-            ? localAssetStorageUsage.pendingUploadBytes
-            : localAssetStorageUsage.cachedFullResolutionBytes
     }
 
     private var deleteRangeStartBinding: Binding<Date> {

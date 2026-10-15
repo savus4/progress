@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import UserNotifications
 @testable import progress
 
 @MainActor
@@ -15,15 +16,15 @@ struct DailyReminderPersistenceTests {
             startedContinuation.finish()
             releaseContinuation.finish()
         }
-        var schedulingOrder: [[DailyReminderTime]] = []
-        let service = DailyReminderNotificationService(defaults: defaults) { times in
-            schedulingOrder.append(times)
+        var schedulingOrder: [[DateComponents]] = []
+        let service = DailyReminderNotificationService(defaults: defaults) { requests in
+            schedulingOrder.append(requests.compactMap { ($0.trigger as? UNCalendarNotificationTrigger)?.dateComponents })
             if schedulingOrder.count == 1 {
                 startedContinuation.yield(())
                 var releaseIterator = release.makeAsyncIterator()
                 await releaseIterator.next()
             }
-            return times.isEmpty || isAuthorized
+            return requests.isEmpty || isAuthorized
         }
         let first = [DailyReminderTime(hour: 9, minute: 0)]
         let second = [DailyReminderTime(hour: 12, minute: 15)]
@@ -38,13 +39,13 @@ struct DailyReminderPersistenceTests {
         #expect(service.loadReminderTimes() == second)
         let latestUpdate = service.submitReminderTimes(latest)
         #expect(service.loadReminderTimes() == latest)
-        #expect(schedulingOrder == [first])
+        #expect(schedulingOrder == [first.map(\.triggerDateComponents)])
 
         releaseContinuation.yield(())
         #expect(await firstUpdate.value == isAuthorized)
         #expect(await secondUpdate.value == isAuthorized)
         #expect(await latestUpdate.value)
         #expect(service.loadReminderTimes() == latest)
-        #expect(schedulingOrder == [first, second, latest])
+        #expect(schedulingOrder == [first, second, latest].map { $0.map(\.triggerDateComponents) })
     }
 }

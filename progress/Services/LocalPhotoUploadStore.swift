@@ -11,9 +11,14 @@ nonisolated struct LocalPhotoUpload: Codable, Equatable, Sendable {
     var attemptCount: Int = 0
     var errorMessage: String?
     var retryAfter: Date?
+    var failureReason: PhotoUploadFailureReason?
 
     var assetNames: Set<String> {
         Set([stillAssetName, livePhotoImageAssetName, videoAssetName].compactMap { $0 })
+    }
+
+    var needsAssetRecovery: Bool {
+        failureReason == .missingUploadAsset || PhotoUploadFailureReason.isLegacyMissingAssetError(errorMessage)
     }
 }
 

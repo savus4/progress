@@ -19,6 +19,9 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     @Published var captureFinished: Int = 0
     @Published var sensorAspectRatio: CGFloat
     @Published var isLivePhotoCaptureSupported = false
+    @Published private(set) var captureErrorMessage: String?
+    private var captureInFlight = false
+    private var captureGeneration = UUID()
     
     nonisolated(unsafe) let session = AVCaptureSession()
     nonisolated(unsafe) private let photoOutput = AVCapturePhotoOutput()
@@ -26,10 +29,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         label: "me.riepl.progress.camera-session",
         qos: .userInitiated
     )
-    nonisolated(unsafe) private var livePhotoCompanionMovieURL: URL?
-    nonisolated(unsafe) private var isCapturingLivePhoto = false
-    nonisolated(unsafe) private var capturedPhotoData: Data?
-    nonisolated(unsafe) private var capturedStillImage: UIImage?
+    nonisolated(unsafe) private var captureState: CameraCaptureState?
     private let processInfo = ProcessInfo.processInfo
     nonisolated static let defaultPortraitPhotoAspectRatio: CGFloat = 3.0 / 4.0
     
@@ -186,6 +186,10 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
+        guard !captureInFlight else { return }
+        captureInFlight = true
+        captureErrorMessage = nil
+        captureGeneration = UUID()
         if usesMockCapture {
             simulateMockCapture(location: location)
             return
@@ -198,17 +202,20 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         let locationSnapshot = location.map {
             CameraLocation(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
         }
+        let generation = captureGeneration
         sessionQueue.async { [weak self] in
             self?.capturePhotoOnSessionQueue(
                 withLivePhoto: withLivePhoto,
-                location: locationSnapshot
+                location: locationSnapshot,
+                generation: generation
             )
         }
     }
 
     nonisolated private func capturePhotoOnSessionQueue(
         withLivePhoto: Bool,
-        location: CameraLocation?
+        location: CameraLocation?,
+        generation: UUID
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
 
@@ -225,13 +232,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             ]
         }
 
-        capturedPhotoData = nil
-        capturedStillImage = nil
-
-        #if targetEnvironment(simulator)
-        livePhotoCompanionMovieURL = nil
-        isCapturingLivePhoto = false
-        #else
+        #if !targetEnvironment(simulator)
         let shouldCaptureLivePhoto = withLivePhoto && photoOutput.isLivePhotoCaptureSupported
 
         if shouldCaptureLivePhoto {
@@ -243,14 +244,13 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             if let preferredLivePhotoCodec = Self.preferredCodec(from: photoOutput.availableLivePhotoVideoCodecTypes) {
                 settings.livePhotoVideoCodecType = preferredLivePhotoCodec
             }
-            livePhotoCompanionMovieURL = livePhotoMovieFilePath
-            isCapturingLivePhoto = true
-        } else {
-            livePhotoCompanionMovieURL = nil
-            isCapturingLivePhoto = false
         }
         #endif
 
+        captureState = CameraCaptureState(
+            captureID: settings.uniqueID, generation: generation,
+            requestedMovieURL: settings.livePhotoMovieFileURL
+        )
         settings.photoQualityPrioritization = .quality
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -259,10 +259,6 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         capturedImage = nil
         capturedImageData = nil
         livePhotoCapture = nil
-        capturedPhotoData = nil
-        capturedStillImage = nil
-        livePhotoCompanionMovieURL = nil
-        isCapturingLivePhoto = false
 
         let size = CGSize(width: 1200, height: 1600)
         let renderer = UIGraphicsImageRenderer(size: size)
@@ -282,17 +278,31 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             text.draw(in: rect, withAttributes: attributes)
         }
 
-        guard let data = image.jpegData(compressionQuality: 0.95) else { return }
-        capturedPhotoData = data
-        capturedStillImage = image
+        guard let data = image.jpegData(compressionQuality: 0.95) else {
+            captureInFlight = false
+            captureErrorMessage = "The camera didn’t return a photo."
+            captureFinished += 1
+            return
+        }
+        let generation = captureGeneration
 
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(100))
+            guard self.captureGeneration == generation else { return }
+            self.captureInFlight = false
             self.capturedImage = image
             self.capturedImageData = data
             self.captureFinished += 1
             self.captureCompleted += 1
         }
+    }
+
+    func discardCapture() {
+        captureGeneration = UUID()
+        if let videoURL = livePhotoCapture?.videoURL { try? FileManager.default.removeItem(at: videoURL) }
+        capturedImage = nil
+        capturedImageData = nil
+        livePhotoCapture = nil
     }
 
     private var usesMockCapture: Bool {
@@ -360,58 +370,60 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
 
     nonisolated private func handleProcessedPhoto(_ photo: AVCapturePhoto, error: Error?) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
-        guard error == nil,
-              let imageData = photo.fileDataRepresentation(),
-              let image = UIImage(data: imageData) else {
-            print("Error capturing photo: \(error?.localizedDescription ?? "Unknown error")")
-            return
-        }
-        
-        // Keep still data/image immediately for Live Photo pairing callback.
-        capturedPhotoData = imageData
-        capturedStillImage = image
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.capturedImage = image
-            self.capturedImageData = imageData
-            
-            // If not capturing Live Photo, trigger save immediately
-            if !self.isCapturingLivePhoto {
-                self.captureCompleted += 1
-            }
-        }
+        captureState?.recordPhoto(
+            data: error == nil ? photo.fileDataRepresentation() : nil,
+            captureID: photo.resolvedSettings.uniqueID, errorMessage: error?.localizedDescription
+        )
     }
     
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingLivePhotoToMovieFileAt outputFileURL: URL, duration: CMTime, photoDisplayTime: CMTime, resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
         sessionQueue.async { [weak self] in
-            self?.handleProcessedLivePhoto(at: outputFileURL, error: error)
+            self?.handleProcessedLivePhoto(at: outputFileURL, captureID: resolvedSettings.uniqueID, error: error)
         }
     }
 
-    nonisolated private func handleProcessedLivePhoto(at outputFileURL: URL, error: Error?) {
+    nonisolated private func handleProcessedLivePhoto(at outputFileURL: URL, captureID: Int64, error: Error?) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
-        guard error == nil else {
-            print("Error processing Live Photo video: \(error?.localizedDescription ?? "Unknown error")")
+        guard captureState?.captureID == captureID else {
+            try? FileManager.default.removeItem(at: outputFileURL)
             return
         }
-        
-        // Store the video URL with the paired still image.
-        if let image = capturedStillImage {
-            let stillData = capturedPhotoData ?? (image.jpegData(compressionQuality: 1.0) ?? Data())
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.capturedImage = image
-                self.capturedImageData = stillData
-                self.livePhotoCapture = (image: image, imageData: stillData, videoURL: outputFileURL)
-                self.captureCompleted += 1
-            }
-        }
+        captureState?.recordVideo(at: outputFileURL, captureID: captureID, errorMessage: error?.localizedDescription)
     }
 
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        sessionQueue.async { [weak self] in
+            self?.finishCapture(captureID: resolvedSettings.uniqueID, error: error)
+        }
+    }
+
+    nonisolated private func finishCapture(captureID: Int64, error: Error?) {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard var state = captureState,
+              let completion = state.finish(captureID: captureID, errorMessage: error?.localizedDescription) else { return }
+        captureState = nil
+        let image = completion.imageData.flatMap { UIImage(data: $0) }
+        if image == nil || completion.videoURL == nil, let movieURL = state.requestedMovieURL {
+            try? FileManager.default.removeItem(at: movieURL)
+        }
+        let generation = state.generation
         Task { @MainActor [weak self] in
-            self?.captureFinished += 1
+            self?.captureInFlight = false
+            guard let self, self.captureGeneration == generation else {
+                if let videoURL = completion.videoURL { try? FileManager.default.removeItem(at: videoURL) }
+                return
+            }
+            if let image, let data = completion.imageData {
+                self.capturedImage = image
+                self.capturedImageData = data
+                if let videoURL = completion.videoURL {
+                    self.livePhotoCapture = (image: image, imageData: data, videoURL: videoURL)
+                }
+                self.captureCompleted += 1
+            } else {
+                self.captureErrorMessage = completion.errorMessage ?? "The captured photo couldn’t be read. Please try again."
+            }
+            self.captureFinished += 1
         }
     }
 }

@@ -20,6 +20,7 @@ enum CloudKitConfiguration {
 final class CloudKitService {
     static let shared = CloudKitService()
     static let assetTransferDidChangeNotification = Notification.Name("CloudKitService.assetTransferDidChange")
+    static let photoAccessDidChangeNotification = Notification.Name("CloudKitService.photoAccessDidChange")
 
     enum AssetTransferKind: String {
         case download
@@ -46,11 +47,20 @@ final class CloudKitService {
     private let container: CKContainer
     private let privateDatabase: CKDatabase
     private let systemCloudKitCacheDirectoryURL: URL
-    private let stagingDirectoryURL: URL
-    private let temporaryReadableAssetsDirectoryURL: URL
+    nonisolated private let stagingDirectoryURL: URL
+    nonisolated private let temporaryReadableAssetsDirectoryURL: URL
     private let legacyAssetDirectoryURLs: [URL]
     private let assetURLLoader: (@MainActor @Sendable (String) async throws -> URL)?
     private let assetUploader: (@MainActor @Sendable (String, UUID, PhotoAssetRole) async throws -> Void)?
+    private let remoteAssetExistenceChecker: (@MainActor @Sendable (String) async throws -> Bool)?
+    private let assetMetadataLoader: (@MainActor @Sendable (String) async throws -> PhotoAssetMetadata)?
+    private let network: PhotoNetworkMonitor?
+    nonisolated let offlineStore: PhotoOfflineStore
+    let offlineSettingsDefaults: UserDefaults
+    private var offlineDeletionTasks: [String: Task<Void, Never>] = [:]
+    private var deletedAssetNames: Set<String> = []
+    private var activeAssetUploads: [String: Int] = [:]
+    private var assetUploadWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     let uploadStateStore: LocalPhotoUploadStore
     let pendingUploadManifestService: PendingUploadManifestService
     private let fileManager = FileManager.default
@@ -62,7 +72,12 @@ final class CloudKitService {
         legacyAssetDirectoryURLs: [URL]? = nil,
         uploadStateStore: LocalPhotoUploadStore? = nil,
         assetURLLoader: (@MainActor @Sendable (String) async throws -> URL)? = nil,
-        assetUploader: (@MainActor @Sendable (String, UUID, PhotoAssetRole) async throws -> Void)? = nil
+        assetUploader: (@MainActor @Sendable (String, UUID, PhotoAssetRole) async throws -> Void)? = nil,
+        remoteAssetExistenceChecker: (@MainActor @Sendable (String) async throws -> Bool)? = nil,
+        offlineStore: PhotoOfflineStore? = nil,
+        offlineSettingsDefaults: UserDefaults = .standard,
+        assetMetadataLoader: (@MainActor @Sendable (String) async throws -> PhotoAssetMetadata)? = nil,
+        networkMonitor: PhotoNetworkMonitor? = nil
     ) {
         container = CKContainer(identifier: CloudKitConfiguration.containerIdentifier)
         privateDatabase = container.privateCloudDatabase
@@ -78,6 +93,13 @@ final class CloudKitService {
         } ?? .shared
         self.assetURLLoader = assetURLLoader
         self.assetUploader = assetUploader
+        self.remoteAssetExistenceChecker = remoteAssetExistenceChecker
+        self.assetMetadataLoader = assetMetadataLoader
+        network = networkMonitor ?? (assetURLLoader == nil ? .shared : nil)
+        self.offlineSettingsDefaults = offlineSettingsDefaults
+        self.offlineStore = offlineStore ?? PhotoOfflineStore(directoryURL: stagingDirectoryURL.map {
+            $0.deletingLastPathComponent().appendingPathComponent("OfflinePhotoOriginals", isDirectory: true)
+        } ?? PhotoOfflineStore.defaultDirectoryURL)
     }
 
     func saveImageAsset(_ image: UIImage) async throws -> String {
@@ -159,10 +181,17 @@ final class CloudKitService {
     func loadAssetURL(
         named assetName: String,
         reportsTransferEvents: Bool = true,
-        forceRefetch: Bool = false
+        forceRefetch: Bool = false,
+        allowsCellularAccess: Bool = true
     ) async throws -> URL {
+        try Task.checkCancellation()
+        guard !deletedAssetNames.contains(assetName) else { throw CloudKitError.assetNotFound }
         if let stagedURL = stagedAssetURL(named: assetName) {
             return stableReadableURL(for: stagedURL, assetName: assetName)
+        }
+
+        if !forceRefetch, let offlineURL = try await offlineStore.assetURL(named: assetName) {
+            return stableReadableURL(for: offlineURL, assetName: assetName)
         }
 
         if let legacyURL = legacyAssetURL(named: assetName) {
@@ -187,7 +216,14 @@ final class CloudKitService {
         }
 
         if let assetURLLoader {
-            let sourceURL = try await assetURLLoader(assetName)
+            let sourceURL: URL = try await PhotoAssetDownload.run(network: network) { request in
+                let work = Task {
+                    do { request.finish(.success(try await assetURLLoader(assetName))) }
+                    catch { request.finish(.failure(error)) }
+                }
+                return { work.cancel() }
+            }
+            try Task.checkCancellation()
             return stableReadableURL(for: sourceURL, assetName: assetName)
         }
 
@@ -203,7 +239,8 @@ final class CloudKitService {
         let recordID = CKRecord.ID(recordName: assetName)
         let results: [CKRecord.ID: Result<CKRecord, Error>]
         do {
-            results = try await privateDatabase.records(for: [recordID], desiredKeys: nil)
+            let record = try await fetchAssetRecord(named: assetName, desiredKeys: nil, allowsCellularAccess: allowsCellularAccess)
+            results = [recordID: .success(record)]
         } catch {
             if reportsTransferEvents {
                 postAssetTransferChange(kind: .download, phase: .failed, assetName: assetName)
@@ -243,6 +280,104 @@ final class CloudKitService {
         return stableReadableURL(for: stagedURL, assetName: assetName)
     }
 
+    func offlineAssetMetadata(named assetName: String, allowsCellularAccess: Bool) async throws -> PhotoAssetMetadata {
+        if let assetMetadataLoader {
+            return try await PhotoAssetDownload.run(network: network) { request in
+                let work = Task {
+                    do { request.finish(.success(try await assetMetadataLoader(assetName))) }
+                    catch { request.finish(.failure(error)) }
+                }
+                return { work.cancel() }
+            }
+        }
+        let record = try await fetchAssetRecord(
+            named: assetName, desiredKeys: [RecordKey.byteCount, RecordKey.checksum],
+            allowsCellularAccess: allowsCellularAccess
+        )
+        guard let count = record[RecordKey.byteCount] as? NSNumber, count.int64Value >= 0 else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return PhotoAssetMetadata(byteCount: count.int64Value, checksum: record[RecordKey.checksum] as? String)
+    }
+
+    func offlineAssetMetadata(named assetNames: [String], allowsCellularAccess: Bool) async throws -> [String: Result<PhotoAssetMetadata, any Error>] {
+        if assetMetadataLoader != nil {
+            var results: [String: Result<PhotoAssetMetadata, any Error>] = [:]
+            for name in assetNames {
+                try Task.checkCancellation()
+                do { results[name] = .success(try await offlineAssetMetadata(named: name, allowsCellularAccess: allowsCellularAccess)) }
+                catch { results[name] = .failure(error) }
+            }
+            return results
+        }
+        let operation = CKFetchRecordsOperation(recordIDs: assetNames.map { CKRecord.ID(recordName: $0) })
+        operation.desiredKeys = [RecordKey.byteCount, RecordKey.checksum]
+        operation.configuration.allowsCellularAccess = allowsCellularAccess
+        operation.configuration.qualityOfService = .utility
+        operation.configuration.timeoutIntervalForRequest = 15
+        operation.configuration.timeoutIntervalForResource = 30
+        return try await PhotoAssetDownload.run(network: network) { request in
+            let completion = CloudKitAssetMetadataFetchOperation(request)
+            operation.perRecordResultBlock = { id, result in completion.record(id.recordName, result: result) }
+            operation.fetchRecordsResultBlock = { result in completion.finish(result) }
+            privateDatabase.add(operation)
+            return { operation.cancel() }
+        }
+    }
+
+    private func fetchAssetRecord(named assetName: String, desiredKeys: [String]?, allowsCellularAccess: Bool) async throws -> CKRecord {
+        let operation = CKFetchRecordsOperation(recordIDs: [CKRecord.ID(recordName: assetName)])
+        operation.desiredKeys = desiredKeys
+        operation.configuration.allowsCellularAccess = allowsCellularAccess
+        operation.configuration.timeoutIntervalForRequest = 15
+        operation.configuration.timeoutIntervalForResource = 30
+        return try await PhotoAssetDownload.run(network: network) { request in
+            operation.perRecordResultBlock = { _, result in request.finish(result) }
+            operation.fetchRecordsResultBlock = { result in
+                if case .failure(let error) = result { request.finish(.failure(error)) }
+            }
+            privateDatabase.add(operation)
+            return { operation.cancel() }
+        }
+    }
+
+    func finishUploadedOriginals(assetNames: Set<String>, retaining: Bool) async throws {
+        for name in assetNames {
+            guard !deletedAssetNames.contains(name), let source = stagedAssetURL(named: name) else { continue }
+            if retaining {
+                try await offlineStore.retain(from: source, named: name, movingOriginal: true)
+            }
+            removeStagedAsset(named: name)
+        }
+    }
+
+    func recordPhotoAccess(named fullImageAssetName: String) async {
+        guard PhotoOfflineSettings.keepsRecentPhotos(in: offlineSettingsDefaults) else { return }
+        do {
+            try await offlineStore.recordAccess(to: fullImageAssetName)
+            NotificationCenter.default.post(name: Self.photoAccessDidChangeNotification, object: self)
+        } catch {
+            logger.error("recent-photo-access: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func localAssetMetadata(named names: Set<String>) async throws -> [String: PhotoAssetMetadata] {
+        var metadata = try await offlineStore.assetMetadata()
+        let urls = names.subtracting(metadata.keys).reduce(into: [String: URL]()) { result, name in
+            result[name] = stagedAssetURL(named: name) ?? readableAssetURL(named: name)
+        }
+        metadata.merge(await PhotoLocalAssetMetadata.read(from: urls)) { stored, _ in stored }
+        return metadata
+    }
+
+    func releaseOfflineCopies(except names: Set<String>) async throws {
+        let removed = try await offlineStore.assetNames().subtracting(names)
+        try await offlineStore.removeUnselected(keeping: names)
+        // Readable URLs can be hard links to persistent originals. Remove both
+        // links when evicting so the storage is actually reclaimed.
+        for name in removed { try? fileManager.removeItem(at: temporaryReadableURL(for: name)) }
+    }
+
     private func postAssetTransferChange(kind: AssetTransferKind, phase: AssetTransferPhase, assetName: String) {
         NotificationCenter.default.post(
             name: Self.assetTransferDidChangeNotification,
@@ -256,6 +391,7 @@ final class CloudKitService {
     }
 
     func stageAssetData(_ data: Data, named assetName: String, includesInBackup: Bool = false) throws -> URL {
+        deletedAssetNames.remove(assetName)
         let fileURL = stagingFileURL(for: assetName)
         try ensureDirectoryExists(at: stagingDirectoryURL)
         try data.write(to: fileURL, options: .atomic)
@@ -266,12 +402,19 @@ final class CloudKitService {
     }
 
     func stageAssetFile(from sourceURL: URL, named assetName: String, includesInBackup: Bool = false) throws -> URL {
+        deletedAssetNames.remove(assetName)
         let destinationURL = stagingFileURL(for: assetName)
         try ensureDirectoryExists(at: stagingDirectoryURL)
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
+        if sourceURL.standardizedFileURL != destinationURL.standardizedFileURL {
+            let temporaryURL = stagingDirectoryURL.appendingPathComponent(".\(UUID().uuidString).staging")
+            defer { try? fileManager.removeItem(at: temporaryURL) }
+            try fileManager.copyItem(at: sourceURL, to: temporaryURL)
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                _ = try fileManager.replaceItemAt(destinationURL, withItemAt: temporaryURL)
+            } else {
+                try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+            }
         }
-        try fileManager.copyItem(at: sourceURL, to: destinationURL)
         if includesInBackup {
             try markIncludedInBackup(destinationURL)
         }
@@ -283,7 +426,8 @@ final class CloudKitService {
         named assetName: String,
         includesInBackup: Bool = false
     ) async throws -> URL {
-        try await PhotoAssetFileWorker.stage(
+        deletedAssetNames.remove(assetName)
+        return try await PhotoAssetFileWorker.stage(
             data: data,
             at: stagingFileURL(for: assetName),
             includesInBackup: includesInBackup
@@ -295,7 +439,8 @@ final class CloudKitService {
         named assetName: String,
         includesInBackup: Bool = false
     ) async throws -> URL {
-        try await PhotoAssetFileWorker.stage(
+        deletedAssetNames.remove(assetName)
+        return try await PhotoAssetFileWorker.stage(
             file: sourceURL,
             at: stagingFileURL(for: assetName),
             includesInBackup: includesInBackup
@@ -310,20 +455,59 @@ final class CloudKitService {
         return stagedURL
     }
 
+    func restoreStagedUploadAsset(named assetName: String, photoID: UUID) async throws -> Bool {
+        guard !deletedAssetNames.contains(assetName),
+              let entry = uploadStateStore.entry(for: photoID), entry.state != .uploaded,
+              entry.assetNames.contains(assetName) else { return false }
+        if stagedAssetURL(named: assetName) != nil { return true }
+
+        let offlineURL = try await offlineStore.assetURL(named: assetName)
+        guard let source = offlineURL ?? readableAssetURL(named: assetName) ?? legacyAssetURL(named: assetName) else {
+            return false
+        }
+        try Task.checkCancellation()
+        _ = try await PhotoAssetFileWorker.stage(
+            file: source, at: stagingFileURL(for: assetName), includesInBackup: true
+        )
+        guard !deletedAssetNames.contains(assetName),
+              let current = uploadStateStore.entry(for: photoID), current.state != .uploaded,
+              current.assetNames.contains(assetName) else {
+            removeStagedAsset(named: assetName)
+            throw CancellationError()
+        }
+        logger.log("upload-asset-restored photo=\(photoID.uuidString, privacy: .public) name=\(assetName, privacy: .public)")
+        return true
+    }
+
     nonisolated func isAssetAvailableForImmediateRead(named assetName: String) -> Bool {
         let fileManager = FileManager.default
-        let stagedURL = Self.makeStagingDirectoryURL().appendingPathComponent(assetName)
-        let readableURL = Self.makeTemporaryReadableAssetsDirectoryURL().appendingPathComponent(assetName)
+        let stagedURL = stagingDirectoryURL.appendingPathComponent(assetName)
+        let readableURL = temporaryReadableAssetsDirectoryURL.appendingPathComponent(assetName)
+        let offlineURL = offlineStore.directoryURL.appendingPathComponent(assetName)
         return fileManager.fileExists(atPath: stagedURL.path) || fileManager.fileExists(atPath: readableURL.path)
+            || fileManager.fileExists(atPath: offlineURL.path)
     }
 
     func uploadStagedAsset(named assetName: String, photoID: UUID, role: PhotoAssetRole, retainsStagedOriginal: Bool = false) async throws {
+        try Task.checkCancellation()
+        guard !deletedAssetNames.contains(assetName) else { throw CancellationError() }
+        activeAssetUploads[assetName, default: 0] += 1
+        defer {
+            activeAssetUploads[assetName, default: 0] -= 1
+            if activeAssetUploads[assetName] == 0 {
+                activeAssetUploads.removeValue(forKey: assetName)
+                if deletedAssetNames.contains(assetName) { removeStagedAsset(named: assetName) }
+                for waiter in assetUploadWaiters.removeValue(forKey: assetName) ?? [] { waiter.resume() }
+            }
+        }
         guard let sourceURL = localAssetURLForUpload(named: assetName) else {
             logger.error("upload-staged-asset-missing name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public)")
             throw CloudKitError.assetNotFound
         }
 
         let digest = try await PhotoAssetFileWorker.digestAndByteCount(at: sourceURL)
+        try Task.checkCancellation()
+        guard !deletedAssetNames.contains(assetName) else { throw CancellationError() }
         logger.log("upload-staged-asset-start name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) bytes=\(digest.byteCount, privacy: .public) source=\(sourceURL.path(percentEncoded: false), privacy: .public)")
         if let assetUploader {
             try await assetUploader(assetName, photoID, role)
@@ -345,6 +529,9 @@ final class CloudKitService {
     }
 
     func remoteAssetExists(named assetName: String) async throws -> Bool {
+        if let remoteAssetExistenceChecker {
+            return try await remoteAssetExistenceChecker(assetName)
+        }
         let recordID = CKRecord.ID(recordName: assetName)
 
         do {
@@ -379,15 +566,32 @@ final class CloudKitService {
     }
 
     func deleteAsset(named assetName: String) {
+        deletedAssetNames.insert(assetName)
+        let store = offlineStore
+        offlineDeletionTasks[assetName] = Task {
+            do { try await store.remove(named: assetName) }
+            catch { logger.error("offline-asset-delete: \(error.localizedDescription, privacy: .public)") }
+        }
         try? uploadStateStore.remove(assetNames: [assetName])
         for directory in legacyAssetDirectoryURLs {
             try? fileManager.removeItem(at: directory.appendingPathComponent(assetName))
         }
-        removeStagedAsset(named: assetName)
+        if activeAssetUploads[assetName] == nil { removeStagedAsset(named: assetName) }
 
         let readableURL = temporaryReadableURL(for: assetName)
         if fileManager.fileExists(atPath: readableURL.path) {
             try? fileManager.removeItem(at: readableURL)
+        }
+    }
+
+    func deleteAssetAndWait(named assetName: String) async {
+        deleteAsset(named: assetName)
+        await offlineDeletionTasks[assetName]?.value
+        offlineDeletionTasks.removeValue(forKey: assetName)
+        if activeAssetUploads[assetName] != nil {
+            await withCheckedContinuation { continuation in
+                assetUploadWaiters[assetName, default: []].append(continuation)
+            }
         }
     }
 
@@ -419,7 +623,7 @@ final class CloudKitService {
     }
 
     func deleteRemoteAsset(named assetName: String) async {
-        deleteAsset(named: assetName)
+        await deleteAssetAndWait(named: assetName)
         try? await deleteRemoteAssetRecord(named: assetName)
     }
 
@@ -578,7 +782,9 @@ final class CloudKitService {
         }
     }
 
-    func deleteAllLocalAssets() {
+    func deleteAllLocalAssets() async {
+        try? await offlineStore.removeUnselected(keeping: [])
+        try? await offlineStore.removeAccessRecords(except: [])
         deleteContents(of: systemCloudKitCacheDirectoryURL)
         deleteContents(of: stagingDirectoryURL)
         deleteContents(of: temporaryReadableAssetsDirectoryURL)
@@ -607,12 +813,13 @@ final class CloudKitService {
 
         return LocalPhotoAssetStorageUsage(
             cachedFullResolutionBytes: usage.cachedFullResolutionBytes,
-            pendingUploadBytes: usage.pendingUploadBytes
+            pendingUploadBytes: usage.pendingUploadBytes,
+            offlineOriginalBytes: Int((try? await offlineStore.byteCount()) ?? 0)
         )
     }
 
-    func localAssetDirectoryURLs() -> (cache: URL, staging: URL) {
-        (systemCloudKitCacheDirectoryURL, stagingDirectoryURL)
+    func localAssetDirectoryURLs() -> (cache: URL, staging: URL, offline: URL) {
+        (systemCloudKitCacheDirectoryURL, stagingDirectoryURL, offlineStore.directoryURL)
     }
 
     private func saveAssetData(
@@ -660,13 +867,7 @@ final class CloudKitService {
                 atomically: true
             )
 
-            if case .failure(let error) = results.saveResults[recordID] {
-                logger.error("save-asset-file-result-failed name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) error=\(Self.describe(error), privacy: .public)")
-                await MainActor.run {
-                    ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
-                }
-                throw cloudKitError(for: error)
-            }
+            try Self.validateAssetSaveResult(results.saveResults[recordID])
         } catch {
             logger.error("save-asset-file-threw name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public) error=\(Self.describe(error), privacy: .public)")
             await MainActor.run {
@@ -676,12 +877,18 @@ final class CloudKitService {
         }
     }
 
+    static func validateAssetSaveResult(_ result: Result<CKRecord, any Error>?) throws {
+        guard let result else { throw CloudKitError.uploadFailed }
+        _ = try result.get()
+    }
+
     private func localAssetURLForUpload(named assetName: String) -> URL? {
         stagedAssetURL(named: assetName)
     }
 
     private func stableReadableURL(for sourceURL: URL, assetName: String) -> URL {
         let temporaryURL = temporaryReadableURL(for: assetName)
+        guard sourceURL.standardizedFileURL != temporaryURL.standardizedFileURL else { return sourceURL }
         do {
             try ensureDirectoryExists(at: temporaryURL.deletingLastPathComponent())
             if fileManager.fileExists(atPath: temporaryURL.path) {

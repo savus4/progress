@@ -1,0 +1,5 @@
+schemaVersion: 1
+sessionDefaults:
+  simulatorName: iPhone 18 Pro
+  simulatorId: 7236EAE6-931D-4265-A419-2AD530374609
+  simulatorPlatform: iOS Simulator

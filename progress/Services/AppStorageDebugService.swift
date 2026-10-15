@@ -85,6 +85,7 @@ final class AppStorageDebugService {
                 temporaryDirectory: temporaryDirectory,
                 assetCacheDirectory: assetDirectories.cache,
                 pendingUploadDirectory: assetDirectories.staging,
+                offlineOriginalDirectory: assetDirectories.offline,
                 storeURL: storeURL
             )
         }.value
@@ -128,6 +129,7 @@ final class AppStorageDebugService {
         temporaryDirectory: URL,
         assetCacheDirectory: URL,
         pendingUploadDirectory: URL,
+        offlineOriginalDirectory: URL,
         storeURL: URL?
     ) -> (
         container: DirectoryMeasurement,
@@ -147,6 +149,7 @@ final class AppStorageDebugService {
         let cachesMeasurement = cachesDirectory.map(measure)
         let assetCacheMeasurement = measure(assetCacheDirectory)
         let pendingUploadMeasurement = measure(pendingUploadDirectory)
+        let offlineOriginalMeasurement = measure(offlineOriginalDirectory)
         let systemCloudKitCacheDirectory = cachesDirectory?.appendingPathComponent("CloudKit", isDirectory: true)
         let coreDataMeasurement = storeURL.map(coreDataMeasurement)
         let coreDataItems = storeURL.map(coreDataItems) ?? []
@@ -208,24 +211,32 @@ final class AppStorageDebugService {
             )
         )
 
+        knownItems.append(item(
+            id: "offline-originals", title: "Offline Originals",
+            detail: "Cloud-backed originals kept on this device, excluded from device backup and cache cleanup.",
+            url: offlineOriginalDirectory, measurement: offlineOriginalMeasurement
+        ))
+
         if let applicationSupportDirectory, let applicationSupportMeasurement {
             let knownApplicationSupportBytes = [
                 coreDataMeasurement,
-                pendingUploadMeasurement
+                pendingUploadMeasurement,
+                offlineOriginalMeasurement
             ].compactMap(\.self).reduce(0) { $0 + $1.allocatedBytes }
             let knownApplicationSupportLogicalBytes = [
                 coreDataMeasurement,
-                pendingUploadMeasurement
+                pendingUploadMeasurement,
+                offlineOriginalMeasurement
             ].compactMap(\.self).reduce(0) { $0 + $1.logicalBytes }
             knownItems.append(
                 item(
                     id: "application-support-other",
                     title: "Other Application Support",
-                    detail: "Application Support minus Core Data and pending uploads.",
+                    detail: "Application Support minus Core Data, pending uploads, and offline originals.",
                     url: applicationSupportDirectory,
                     allocatedBytes: max(applicationSupportMeasurement.allocatedBytes - knownApplicationSupportBytes, 0),
                     logicalBytes: max(applicationSupportMeasurement.logicalBytes - knownApplicationSupportLogicalBytes, 0),
-                    fileCount: max(applicationSupportMeasurement.fileCount - (coreDataMeasurement?.fileCount ?? 0) - pendingUploadMeasurement.fileCount, 0)
+                    fileCount: max(applicationSupportMeasurement.fileCount - (coreDataMeasurement?.fileCount ?? 0) - pendingUploadMeasurement.fileCount - offlineOriginalMeasurement.fileCount, 0)
                 )
             )
         }

@@ -1,4 +1,6 @@
 import Foundation
+import CoreData
+import UIKit
 import UserNotifications
 
 struct DailyReminderTime: Codable, Identifiable, Hashable {
@@ -38,23 +40,66 @@ final class DailyReminderNotificationService {
     static let shared = DailyReminderNotificationService()
 
     static let maxRemindersPerDay = 7
+    static let maxPendingReminders = 64
+    static let skipAfterPhotoKey = "dailyPhotoRemindersSkipAfterPhoto"
     static let notificationUserInfoDestinationKey = "destination"
     static let notificationUserInfoSourceKey = "source"
     static let notificationCameraDestinationValue = "camera"
     static let notificationSourceValue = "daily-photo-reminder"
 
     private let reminderTimesKey = "dailyPhotoReminderTimes"
-    private let center = UNUserNotificationCenter.current()
     private let defaults: UserDefaults
-    private let scheduleReminders: (@MainActor ([DailyReminderTime]) async -> Bool)?
+    private let scheduleReminders: (@MainActor ([UNNotificationRequest]) async -> Bool)?
     private var reminderUpdateTask: Task<Bool, Never>?
+    private var photoContext: NSManagedObjectContext?
+    private var observers: [NSObjectProtocol] = []
+    private var lastScheduledState: DailyReminderScheduleState?
 
     init(
         defaults: UserDefaults = .standard,
-        scheduleReminders: (@MainActor ([DailyReminderTime]) async -> Bool)? = nil
+        context: NSManagedObjectContext? = nil,
+        scheduleReminders: (@MainActor ([UNNotificationRequest]) async -> Bool)? = nil
     ) {
         self.defaults = defaults
+        self.photoContext = context
         self.scheduleReminders = scheduleReminders
+    }
+
+    var skipsRemindersAfterPhoto: Bool {
+        defaults.object(forKey: Self.skipAfterPhotoKey) as? Bool ?? true
+    }
+
+    func start(context: NSManagedObjectContext) {
+        guard photoContext == nil else { return }
+        photoContext = context
+        let names: [Notification.Name] = [
+            .NSManagedObjectContextDidSave,
+            .NSPersistentStoreRemoteChange,
+            UIApplication.didBecomeActiveNotification,
+            UIApplication.significantTimeChangeNotification,
+            .NSCalendarDayChanged
+        ]
+        for name in names {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refreshReminders()
+                }
+            })
+        }
+        refreshReminders()
+    }
+
+    @discardableResult
+    func setSkipsRemindersAfterPhoto(_ enabled: Bool) -> Task<Bool, Never> {
+        defaults.set(enabled, forKey: Self.skipAfterPhotoKey)
+        return refreshReminders()
+    }
+
+    @discardableResult
+    func refreshReminders() -> Task<Bool, Never> {
+        let times = loadReminderTimes()
+        guard !times.isEmpty else { return Task { true } }
+        return enqueueReminderUpdate(times, requestsAuthorization: false)
     }
 
     func loadReminderTimes() -> [DailyReminderTime] {
@@ -75,10 +120,14 @@ final class DailyReminderNotificationService {
         // A newly opened Settings sheet must immediately see the latest edits,
         // even if an earlier permission request or notification update is pending.
         persistReminderTimes(sanitizedTimes)
+        return enqueueReminderUpdate(sanitizedTimes, requestsAuthorization: true)
+    }
+
+    private func enqueueReminderUpdate(_ times: [DailyReminderTime], requestsAuthorization: Bool) -> Task<Bool, Never> {
         let previousUpdate = reminderUpdateTask
         let update = Task {
             _ = await previousUpdate?.value
-            return await scheduleReminderNotifications(sanitizedTimes)
+            return await scheduleReminderNotifications(times, requestsAuthorization: requestsAuthorization)
         }
         reminderUpdateTask = update
         return update
@@ -89,53 +138,132 @@ final class DailyReminderNotificationService {
         await submitReminderTimes(times).value
     }
 
-    private func scheduleReminderNotifications(_ sanitizedTimes: [DailyReminderTime]) async -> Bool {
-        if let scheduleReminders {
-            return await scheduleReminders(sanitizedTimes)
-        }
-
-        await clearReminderNotifications()
-
-        guard !sanitizedTimes.isEmpty else {
-            return true
-        }
-
+    private func scheduleReminderNotifications(_ sanitizedTimes: [DailyReminderTime], requestsAuthorization: Bool) async -> Bool {
         do {
-            let isAuthorized = try await ensureAuthorization()
-            guard isAuthorized else { return false }
-
-            for (index, reminderTime) in sanitizedTimes.enumerated() {
-                let content = UNMutableNotificationContent()
-                content.title = "Take today's \(Self.appDisplayName) photo"
-                content.body = "Open \(Self.appDisplayName) and capture your daily picture."
-                content.sound = .default
-                content.userInfo = [
-                    Self.notificationUserInfoDestinationKey: Self.notificationCameraDestinationValue,
-                    Self.notificationUserInfoSourceKey: Self.notificationSourceValue
-                ]
-
-                let trigger = UNCalendarNotificationTrigger(
-                    dateMatching: reminderTime.triggerDateComponents,
-                    repeats: true
-                )
-
-                let request = UNNotificationRequest(
-                    identifier: reminderIdentifier(for: index),
-                    content: content,
-                    trigger: trigger
-                )
-
-                try await add(request: request)
+            let now = Date()
+            let calendar = Calendar.current
+            let skipsAfterPhoto = skipsRemindersAfterPhoto
+            let hasPhotoToday = skipsAfterPhoto && !sanitizedTimes.isEmpty
+                ? try await self.hasPhotoToday(now: now, calendar: calendar)
+                : false
+            let state = DailyReminderScheduleState(
+                times: sanitizedTimes,
+                skippedDay: hasPhotoToday ? calendar.startOfDay(for: now) : nil,
+                timeZoneIdentifier: calendar.timeZone.identifier
+            )
+            guard state != lastScheduledState else { return true }
+            let requests = notificationRequests(for: sanitizedTimes, now: now, calendar: calendar, skippingToday: hasPhotoToday)
+            if let scheduleReminders {
+                let succeeded = await scheduleReminders(requests)
+                lastScheduledState = succeeded ? state : nil
+                return succeeded
+            }
+            guard !sanitizedTimes.isEmpty else {
+                await clearReminderNotifications()
+                lastScheduledState = state
+                return true
             }
 
+            let isAuthorized: Bool
+            if requestsAuthorization {
+                isAuthorized = try await ensureAuthorization()
+            } else {
+                let status = await Self.currentAuthorizationStatus()
+                isAuthorized = status == .authorized || status == .provisional || status == .ephemeral
+            }
+            guard isAuthorized else { return false }
+
+            await clearReminderNotifications()
+            lastScheduledState = nil
+            for request in requests {
+                guard let trigger = request.trigger as? UNCalendarNotificationTrigger else { return false }
+                try await Self.add(
+                    identifier: request.identifier,
+                    title: request.content.title,
+                    body: request.content.body,
+                    userInfo: request.content.userInfo as? [String: String] ?? [:],
+                    dateComponents: trigger.dateComponents,
+                    repeats: trigger.repeats
+                )
+            }
+
+            lastScheduledState = state
             return true
         } catch {
             return false
         }
     }
 
+    func notificationRequests(
+        for times: [DailyReminderTime],
+        now: Date,
+        calendar: Calendar = .current,
+        skippingToday: Bool
+    ) -> [UNNotificationRequest] {
+        let times = sanitizeReminderTimes(times)
+        guard !times.isEmpty else { return [] }
+        let content = UNMutableNotificationContent()
+        content.title = "Take today's \(Self.appDisplayName) photo"
+        content.body = "Open \(Self.appDisplayName) and capture your daily picture."
+        content.sound = .default
+        content.userInfo = [
+            Self.notificationUserInfoDestinationKey: Self.notificationCameraDestinationValue,
+            Self.notificationUserInfoSourceKey: Self.notificationSourceValue
+        ]
+
+        guard skippingToday else {
+            return times.enumerated().map { index, time in
+                UNNotificationRequest(
+                    identifier: reminderIdentifier(for: index),
+                    content: content,
+                    trigger: UNCalendarNotificationTrigger(dateMatching: time.triggerDateComponents, repeats: true)
+                )
+            }
+        }
+
+        var requests: [UNNotificationRequest] = []
+        var day = calendar.startOfDay(for: now)
+        while requests.count < Self.maxPendingReminders {
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = nextDay
+            for time in times {
+                guard requests.count < Self.maxPendingReminders else { break }
+                guard let date = calendar.date(bySettingHour: time.hour, minute: time.minute, second: 0, of: day) else { continue }
+                let components = calendar.dateComponents([.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second], from: date)
+                requests.append(UNNotificationRequest(
+                    identifier: reminderIdentifier(for: requests.count),
+                    content: content,
+                    trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                ))
+            }
+        }
+        return requests
+    }
+
+    func shouldSuppressReminder(userInfo: [AnyHashable: Any]) async -> Bool {
+        guard isDailyReminderNotification(userInfo: userInfo), skipsRemindersAfterPhoto else { return false }
+        return (try? await hasPhotoToday(now: Date(), calendar: .current)) ?? false
+    }
+
+    private func hasPhotoToday(now: Date, calendar: Calendar) async throws -> Bool {
+        guard let photoContext else { return false }
+        return try await Self.hasPhoto(on: now, calendar: calendar, context: photoContext)
+    }
+
+    static func hasPhoto(on date: Date, calendar: Calendar = .current, context: NSManagedObjectContext) async throws -> Bool {
+        let start = calendar.startOfDay(for: date)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return false }
+        return try await context.perform {
+            let request = NSFetchRequest<NSFetchRequestResult>(entityName: "DailyPhoto")
+            request.predicate = NSPredicate(format: "captureDate >= %@ AND captureDate < %@", start as NSDate, end as NSDate)
+            request.fetchLimit = 1
+            request.includesPendingChanges = false
+            return try context.count(for: request) > 0
+        }
+    }
+
     func authorizationStatus() async -> UNAuthorizationStatus {
-        await currentAuthorizationStatus()
+        await Self.currentAuthorizationStatus()
     }
 
     func isDailyReminderNotification(userInfo: [AnyHashable: Any]) -> Bool {
@@ -147,7 +275,9 @@ final class DailyReminderNotificationService {
     }
 
     func clearAllDeliveredNotifications() {
-        center.removeAllDeliveredNotifications()
+        Task {
+            await Self.removeDeliveredNotifications()
+        }
     }
 
     private func persistReminderTimes(_ times: [DailyReminderTime]) {
@@ -201,20 +331,31 @@ final class DailyReminderNotificationService {
     }
 
     private var reminderIdentifiers: [String] {
-        (0..<Self.maxRemindersPerDay).map(reminderIdentifier)
+        (0..<Self.maxPendingReminders).map(reminderIdentifier)
     }
 
     private func clearReminderNotifications() async {
-        center.removePendingNotificationRequests(withIdentifiers: reminderIdentifiers)
-        clearAllDeliveredNotifications()
+        await Self.removeReminderNotifications(withIdentifiers: reminderIdentifiers)
+    }
+
+    @concurrent
+    private static func removeReminderNotifications(withIdentifiers identifiers: [String]) async {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        center.removeAllDeliveredNotifications()
+    }
+
+    @concurrent
+    private static func removeDeliveredNotifications() async {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
 
     private func ensureAuthorization() async throws -> Bool {
-        switch await currentAuthorizationStatus() {
+        switch await Self.currentAuthorizationStatus() {
         case .authorized, .provisional, .ephemeral:
             return true
         case .notDetermined:
-            return try await requestAuthorization()
+            return try await Self.requestAuthorization()
         case .denied:
             return false
         @unknown default:
@@ -222,35 +363,35 @@ final class DailyReminderNotificationService {
         }
     }
 
-    private func currentAuthorizationStatus() async -> UNAuthorizationStatus {
-        await withCheckedContinuation { continuation in
-            center.getNotificationSettings { settings in
-                continuation.resume(returning: settings.authorizationStatus)
-            }
-        }
+    @concurrent
+    private static func currentAuthorizationStatus() async -> UNAuthorizationStatus {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
 
-    private func requestAuthorization() async throws -> Bool {
-        try await withCheckedThrowingContinuation { continuation in
-            center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: granted)
-                }
-            }
-        }
+    @concurrent
+    private static func requestAuthorization() async throws -> Bool {
+        try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
     }
 
-    private func add(request: UNNotificationRequest) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            center.add(request) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            }
-        }
+    @concurrent
+    private static func add(
+        identifier: String,
+        title: String,
+        body: String,
+        userInfo: [String: String],
+        dateComponents: DateComponents,
+        repeats: Bool
+    ) async throws {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.userInfo = userInfo
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: identifier,
+            content: content,
+            trigger: UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: repeats)
+        )
+        try await UNUserNotificationCenter.current().add(request)
     }
 }

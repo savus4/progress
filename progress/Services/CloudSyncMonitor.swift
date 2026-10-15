@@ -45,6 +45,10 @@ final class CloudSyncMonitor: ObservableObject {
     @Published private(set) var isMetadataImportActive = false
     @Published private(set) var isUploadProcessorActive = false
     @Published private(set) var isICloudUnavailable = false
+    @Published private(set) var quotaPausedUploadCount = 0
+    @Published private(set) var hasMetadataQuotaError = false
+    @Published private(set) var uploadStatusError: String?
+    var isICloudStorageFull: Bool { quotaPausedUploadCount > 0 || hasMetadataQuotaError }
 
     private var observer: NSObjectProtocol?
     private var iCloudAvailabilityObserver: NSObjectProtocol?
@@ -58,9 +62,23 @@ final class CloudSyncMonitor: ObservableObject {
     private var exportWaiters: [UUID: ExportWaiter] = [:]
     private var uploadStatusRefreshTask: Task<Void, Never>?
     private var metadataImportQuietTask: Task<Void, Never>?
+    private let uploadContext: NSManagedObjectContext?
+    private let uploadStore: LocalPhotoUploadStore
+    private let iCloudUnavailableProvider: @MainActor () -> Bool
+    private var uploadStatusRefreshID = UUID()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudSync")
 
-    private init() {
+    init(
+        context: NSManagedObjectContext? = nil,
+        uploadStore: LocalPhotoUploadStore = .shared,
+        iCloudUnavailableProvider: @escaping @MainActor () -> Bool = { ICloudAvailabilityMonitor.shared.isLocalModeActive },
+        observesChanges: Bool = true
+    ) {
+        self.uploadContext = context
+        self.uploadStore = uploadStore
+        self.iCloudUnavailableProvider = iCloudUnavailableProvider
+        guard observesChanges else { return }
+
         observer = NotificationCenter.default.addObserver(
             forName: NSPersistentCloudKitContainer.eventChangedNotification,
             object: nil,
@@ -195,7 +213,7 @@ final class CloudSyncMonitor: ObservableObject {
             return "internaldrive"
         }
 
-        if pausedUploadCount > 0 {
+        if pausedUploadCount > 0 || uploadStatusError != nil {
             return "exclamationmark.icloud"
         }
         if uploadingAssetCount > 0 || pendingUploadCount > 0 || failedUploadCount > 0 {
@@ -223,7 +241,7 @@ final class CloudSyncMonitor: ObservableObject {
             return false
         }
 
-        if pausedUploadCount > 0 {
+        if pausedUploadCount > 0 || uploadStatusError != nil {
             return true
         }
         if case .failed = syncState {
@@ -253,6 +271,12 @@ final class CloudSyncMonitor: ObservableObject {
     var statusTitle: String {
         if isICloudUnavailable {
             return "Stored on this device"
+        }
+
+        if isICloudStorageFull { return "iCloud storage is full" }
+
+        if uploadStatusError != nil {
+            return "Photo upload status is unavailable"
         }
 
         if isRunningMigration {
@@ -299,6 +323,14 @@ final class CloudSyncMonitor: ObservableObject {
             return "Full-resolution photos are included in this device backup. iCloud sync resumes automatically when enabled."
         }
 
+        if isICloudStorageFull {
+            return "New photos are stored on this device and have not uploaded. Manage storage in Settings → your name → iCloud, then retry uploads. Existing iCloud photos can still download when device space allows."
+        }
+
+        if uploadStatusError != nil {
+            return "This device couldn’t check pending photo uploads. Reopen Settings to try again."
+        }
+
         if isRunningMigration {
             return pendingMigrationCount > 0
                 ? "\(pendingMigrationCount) older photo\(pendingMigrationCount == 1 ? "" : "s") left to backfill."
@@ -306,7 +338,7 @@ final class CloudSyncMonitor: ObservableObject {
         }
 
         if pausedUploadCount > 0 {
-            return "\(pausedUploadCount) photo\(pausedUploadCount == 1 ? "" : "s") need manual retry after account, quota, or asset issues are resolved."
+            return "\(pausedUploadCount) photo\(pausedUploadCount == 1 ? "" : "s") couldn’t finish uploading. Missing-file errors are checked again automatically; other issues may need attention before retrying."
         }
 
         if let uploadDetail {
@@ -433,26 +465,44 @@ final class CloudSyncMonitor: ObservableObject {
 
     func refreshUploadStatus() async {
         updateICloudAvailability()
-        let context = PersistenceController.shared.makeBackgroundContext()
-        let stagedNames = CloudKitService.shared.storedPersistentAssetNames()
-        let entries = LocalPhotoUploadStore.shared.allEntries().filter {
-            $0.state != .uploaded && $0.assetNames.isSubset(of: stagedNames)
+        let refreshID = UUID()
+        uploadStatusRefreshID = refreshID
+        let context = uploadContext ?? PersistenceController.shared.makeBackgroundContext()
+        let entries = uploadStore.allEntries().filter { $0.state != .uploaded }
+
+        do {
+            let ids: Set<UUID>
+            if entries.isEmpty {
+                ids = []
+            } else {
+                ids = try await context.perform {
+                    let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
+                    request.resultType = .dictionaryResultType
+                    request.propertiesToFetch = ["id"]
+                    request.predicate = NSPredicate(format: "id IN %@", entries.map { $0.photoID as NSUUID })
+                    return Set(try context.fetch(request).compactMap { $0["id"] as? UUID })
+                }
+            }
+            guard uploadStatusRefreshID == refreshID, !Task.isCancelled else { return }
+
+            var counts: [PhotoUploadState: Int] = [:]
+            var quotaCount = 0
+            for entry in uploadStore.allEntries() where ids.contains(entry.photoID) && entry.state != .uploaded {
+                counts[entry.state, default: 0] += 1
+                if entry.state == .paused, entry.failureReason == .iCloudStorageFull { quotaCount += 1 }
+            }
+
+            pendingUploadCount = counts[.pending] ?? 0
+            uploadingAssetCount = counts[.uploading] ?? 0
+            failedUploadCount = counts[.failed] ?? 0
+            pausedUploadCount = counts[.paused] ?? 0
+            quotaPausedUploadCount = quotaCount
+            uploadStatusError = nil
+        } catch {
+            guard uploadStatusRefreshID == refreshID, !Task.isCancelled else { return }
+            uploadStatusError = error.localizedDescription
+            logger.error("upload-status-refresh: \(error.localizedDescription, privacy: .public)")
         }
-        var counts: [PhotoUploadState: Int] = [:]
-        if !entries.isEmpty {
-            let ids: Set<UUID> = (try? await context.perform {
-                let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
-                request.resultType = .dictionaryResultType
-                request.propertiesToFetch = ["id"]
-                request.predicate = NSPredicate(format: "id IN %@", entries.map { $0.photoID as NSUUID })
-                return Set(try context.fetch(request).compactMap { $0["id"] as? UUID })
-            }) ?? []
-            for entry in entries where ids.contains(entry.photoID) { counts[entry.state, default: 0] += 1 }
-        }
-        pendingUploadCount = counts[.pending] ?? 0
-        uploadingAssetCount = counts[.uploading] ?? 0
-        failedUploadCount = counts[.failed] ?? 0
-        pausedUploadCount = counts[.paused] ?? 0
     }
 
     var activeDownloadAssetNamesSnapshot: Set<String> {
@@ -507,6 +557,7 @@ final class CloudSyncMonitor: ObservableObject {
         if let endDate = event.endDate {
             if let error = event.error {
                 logCloudKitEventError(error, eventType: event.type)
+                if PhotoUploadFailureReason.classify(error) == .iCloudStorageFull { hasMetadataQuotaError = true }
                 if ICloudAvailabilityMonitor.isUnavailableCloudKitError(error) {
                     ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
                     syncState = .idle
@@ -517,6 +568,7 @@ final class CloudSyncMonitor: ObservableObject {
                     syncState = .failed(error.localizedDescription)
                 }
             } else {
+                if event.type == .export { hasMetadataQuotaError = false }
                 syncState = .idle
                 lastSyncDate = endDate
             }
@@ -526,7 +578,7 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     private func updateICloudAvailability() {
-        isICloudUnavailable = ICloudAvailabilityMonitor.shared.isLocalModeActive
+        isICloudUnavailable = iCloudUnavailableProvider()
         if isICloudUnavailable {
             if case .failed = syncState {
                 syncState = .idle

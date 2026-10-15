@@ -8,9 +8,10 @@ struct LocalPhotoAssetStorageUsage: Sendable, Equatable {
 
     let cachedFullResolutionBytes: Int
     let pendingUploadBytes: Int
+    var offlineOriginalBytes: Int = 0
 
     var totalBytes: Int {
-        cachedFullResolutionBytes + pendingUploadBytes
+        cachedFullResolutionBytes + pendingUploadBytes + offlineOriginalBytes
     }
 }
 

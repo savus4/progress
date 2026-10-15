@@ -12,10 +12,12 @@ final class ReminderSettingsUITests: XCTestCase {
         let settings = app.buttons["Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
+        openNotifications(app)
         XCTAssertTrue(app.buttons["Add Time"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(identifier: "Remove reminder").count, 0)
 
         visitStorageManagementAndReturn(app)
+        openNotifications(app)
 
         let addTime = app.buttons["Add Time"]
         for _ in 0..<5 where !addTime.isHittable { app.swipeDown() }
@@ -25,7 +27,7 @@ final class ReminderSettingsUITests: XCTestCase {
         for _ in 0..<5 where !addedReminder.isHittable { app.swipeDown() }
         XCTAssertTrue(addedReminder.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(app.buttons.matching(identifier: "Remove reminder").count, 1)
-        app.buttons["Close"].tap()
+        returnToSettings(app)
 
         // A clean simulator may ask permission after saving the first reminder.
         let permissionAlert = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.firstMatch
@@ -33,8 +35,10 @@ final class ReminderSettingsUITests: XCTestCase {
             let allow = permissionAlert.buttons["Allow"]
             if allow.exists { allow.tap() }
         }
+        app.buttons["Close"].tap()
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         settings.tap()
+        openNotifications(app)
         XCTAssertTrue(addTime.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Remove reminder"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(identifier: "Remove reminder").count, 1,
@@ -42,17 +46,21 @@ final class ReminderSettingsUITests: XCTestCase {
 
         // Also verify that a later edit can remove the saved reminder.
         visitStorageManagementAndReturn(app)
+        openNotifications(app)
         let removeReminder = app.buttons["Remove reminder"]
         for _ in 0..<5 where !removeReminder.isHittable { app.swipeDown() }
         removeReminder.tap()
+        returnToSettings(app)
         app.buttons["Close"].tap()
         settings.tap()
+        openNotifications(app)
         XCTAssertTrue(addTime.waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(identifier: "Remove reminder").count, 0)
     }
 
     @MainActor
     private func visitStorageManagementAndReturn(_ app: XCUIApplication) {
+        returnToSettings(app)
         let storage = app.buttons["Storage Management"]
         for _ in 0..<5 where !storage.isHittable { app.swipeUp() }
         XCTAssertTrue(storage.isHittable)
@@ -64,5 +72,55 @@ final class ReminderSettingsUITests: XCTestCase {
         // the Notifications section fully into view before editing its controls.
         app.swipeDown()
         app.swipeDown()
+    }
+
+    @MainActor
+    func testNotificationTogglePersistsAndImportOptionsHaveTheirOwnSubmenu() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
+        app.launchEnvironment["UI_TEST_RESET_REMINDERS"] = "1"
+        app.launch()
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+        XCTAssertTrue(app.buttons["notificationSettingsLink"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Add Time"].exists)
+        XCTAssertFalse(app.buttons["Import Photos"].exists)
+        openNotifications(app)
+
+        let toggle = app.switches["skipRemindersAfterPhotoToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "1")
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        XCTAssertEqual(toggle.value as? String, "0")
+        returnToSettings(app)
+        app.buttons["Close"].tap()
+        settings.tap()
+        openNotifications(app)
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0")
+        returnToSettings(app)
+
+        app.buttons["importSettingsLink"].tap()
+        XCTAssertTrue(app.navigationBars["Import"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Import Photos"].exists)
+        XCTAssertTrue(app.buttons["Import Album"].exists)
+        XCTAssertTrue(app.buttons["Import Privately (No Live Photos)"].exists)
+    }
+
+    @MainActor
+    private func openNotifications(_ app: XCUIApplication) {
+        let notifications = app.buttons["notificationSettingsLink"]
+        XCTAssertTrue(notifications.waitForExistence(timeout: 5))
+        notifications.tap()
+        XCTAssertTrue(app.navigationBars["Notifications"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    private func returnToSettings(_ app: XCUIApplication) {
+        let back = app.navigationBars["Notifications"].buttons["Settings"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
     }
 }

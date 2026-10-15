@@ -13,7 +13,7 @@
 - Open photos in a full-screen pager with zoom, metadata, location info, and sharing actions.
 - Save photos to the system Photos library.
 - Import photos, Live Photos, and full albums from the user’s photo library.
-- Schedule up to three daily reminder notifications that can deep-link straight into the camera.
+- Schedule up to seven daily reminder notifications that can deep-link straight into the camera.
 - Export selected photos or the entire library through the system document picker.
 - Delete selected photos, delete photos in a date range, or wipe the library completely.
 - Sync photo metadata through Core Data + CloudKit, while original assets upload in the background.
@@ -49,11 +49,15 @@
 
 `NotificationSettingsView` currently acts as the app’s main settings and maintenance screen.
 
-- Daily reminder times with notification permission handling.
-- Photo import from picker, private import (experimental), and album import.
+- Notifications submenu with daily reminder times, notification permission handling, and a default-on “Skip Reminders After Taking a Photo” toggle.
+- Import submenu with photo picker, private import (experimental), and album import.
 - iCloud sync status and failed upload retry action.
 - Delete by date range.
 - Delete all local photo records and assets.
+
+Reminders skip the rest of the local calendar day when a saved photo has today's capture date, including imported and synced photos. Unsaved captures and older imports do not count. Turning the toggle off restores every configured reminder. The schedule refreshes after library changes, on app activation, and when the day or system time changes.
+
+Daily repeating notification triggers cannot omit a single occurrence. After skipping today, the app queues the next 64 individual reminders starting tomorrow (at least nine days with seven reminder times). Opening the app on a later day restores indefinite daily repeats when no photo exists for that day. If the app stays closed past the queued reminders, reminders stop until it opens again.
 
 ## Architecture
 
@@ -93,11 +97,24 @@ The current sync setup is split into two parts:
 
 That means the grid can show records immediately, while large original assets continue uploading in the background. The app also tracks retryable and paused uploads and surfaces those states in the UI.
 
+Missing-file upload pauses recover automatically when the upload queue next runs, including older `CKError(16)` pauses. Recovery requires this device's persisted upload ownership: it checks missing assets in iCloud first, then copies available offline, readable-cache, or legacy originals back into upload staging. Existing originals remain intact, Live Photo resources recover independently, and success is recorded only after every resource is confirmed or uploaded. Unfinished local uploads protect their offline recovery copies from eviction. Manual retry also includes owned photos with missing staging files; missing originals remain paused, and failed cloud checks use the normal retry queue.
+
+Capture processing waits for the final camera callback before pairing still and Live Photo resources; a failed movie preserves a valid still, and failed captures report an error instead of leaving the camera busy. Pending originals are included in device backup. A handled save failure removes its staged files and upload ownership without deleting the capture's source movie, so saving can be retried. Crash recovery skips active saves and serializes recovery attempts. Upload workers reserve each photo before sending it, retry transient failures on a timer while the app remains running, and retain files until CloudKit confirms every save. Deletion waits for an in-flight asset upload before remote cleanup, preventing a late upload from recreating a deleted asset. iOS background scheduling still controls retries while the app is suspended.
+
+Settings → Storage Management can keep all originals, or photos marked with either heart, available offline on this device. Both options include Live Photo motion. Cloud-backed offline originals are stored separately from caches and pending uploads and are excluded from device backup. Turning a keep setting off releases copies no longer selected; unuploaded originals are preserved.
+
+Keep Recently Opened Photos adds a persistent cache ordered by last opening, with new captures and imports treated as openings. Its limit is adjustable from 100 MB to currently free device storage (default 1 GB). Exceeding or lowering the limit evicts the least recently opened cloud-backed photos, including their complete Live Photo resources. Hearted photos selected by Keep Hearted Photos are protected outside this limit, and Keep All Photos overrides it. Pending uploads are never evicted; after upload, retained staging files are handed off within the cache budget. Background downloads, thumbnail loads, and adjacent-page prefetching do not update access order. Settings shows a storage bar with hearted photos, other retained photos, pending uploads, cache, and the recent-photo limit.
+
+Automatic offline downloads use Wi-Fi unless cellular downloads are enabled. They pause in Low Data Mode, Low Power Mode, or low device storage, preserve a 0.5 GB reserve (500 MB), and resume at 0.55 GB (550 MB), with room for the next transfer. Full iCloud storage pauses uploads while preserving local originals; keeping offline copies does not free iCloud space.
+
+Opening a photo always checks local originals and readable caches before the network. Uncached photos fail immediately while offline; connection loss cancels active downloads, and each remote request has a 30-second deadline. The viewer keeps its thumbnail or downloaded still, shows an offline or timeout message, offers a manual retry, and retries the current photo when connectivity returns.
+
 ### Key Services
 
 - `PhotoStorageService`: save, import, export, delete, and asset loading logic
 - `PhotoUploadService`: staged CloudKit uploads, retry handling, background processing
 - `CloudKitService`: asset staging, upload/download, local cache management
+- `PhotoOfflineCoordinator` / `PhotoOfflineStore`: offline selection, persistent originals, download progress, and storage safeguards
 - `CloudSyncMonitor`: sync/upload state exposed to the UI
 - `DailyReminderNotificationService`: recurring reminders and notification payload handling
 - `AlignmentGuideStore`: guide persistence via `UserDefaults` and iCloud key-value store

@@ -22,6 +22,7 @@ struct progressApp: App {
         #if DEBUG && targetEnvironment(simulator)
         if ProcessInfo.processInfo.environment["UI_TEST_RESET_REMINDERS"] == "1" {
             UserDefaults.standard.removeObject(forKey: "dailyPhotoReminderTimes")
+            UserDefaults.standard.removeObject(forKey: DailyReminderNotificationService.skipAfterPhotoKey)
         }
         #endif
     }
@@ -148,6 +149,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().delegate = self
         PortraitVideoExportService.shared.deleteTemporaryExports()
         PhotoUploadService.registerBackgroundTask()
+        PhotoOfflineCoordinator.registerBackgroundTask()
         return true
     }
 
@@ -155,6 +157,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         guard PersistenceController.shared.isLoaded, !didStartPersistenceServices else { return }
         didStartPersistenceServices = true
         _ = CloudSyncMonitor.shared
+        DailyReminderNotificationService.shared.start(context: PersistenceController.shared.makeBackgroundContext())
 
         Task {
             await ICloudAvailabilityMonitor.shared.refresh()
@@ -167,6 +170,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             await PhotoStorageService.shared.recoverLegacyOriginals(context: context)
             await PhotoUploadService.shared.start()
             await RemoteAssetDeletionService.shared.start()
+            PhotoOfflineCoordinator.shared.start()
         }
 
         Task.detached(priority: .utility) {
@@ -182,6 +186,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
+        PhotoOfflineCoordinator.shared.scheduleBackgroundProcessing()
         Task {
             guard PersistenceController.shared.isLoaded else { return }
             guard ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
@@ -198,6 +203,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         Task {
             guard PersistenceController.shared.isLoaded else { return }
             await ICloudAvailabilityMonitor.shared.refresh()
+            PhotoOfflineCoordinator.shared.requestReconciliation()
             await PhotoUploadService.shared.enqueuePendingUploads(
                 expeditingRetries: true,
                 forceRetryExpedite: true
@@ -210,14 +216,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        if await DailyReminderNotificationService.shared.shouldSuppressReminder(userInfo: notification.request.content.userInfo) {
+            return []
+        }
+        return [.banner, .list, .sound]
     }
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        center.removeAllDeliveredNotifications()
+        DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
 
         let userInfo = response.notification.request.content.userInfo
         guard DailyReminderNotificationService.shared.isDailyReminderNotification(userInfo: userInfo) else {
