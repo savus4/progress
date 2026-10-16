@@ -75,7 +75,6 @@ final class DailyReminderNotificationService {
         let names: [Notification.Name] = [
             .NSManagedObjectContextDidSave,
             .NSPersistentStoreRemoteChange,
-            UIApplication.didBecomeActiveNotification,
             UIApplication.significantTimeChangeNotification,
             .NSCalendarDayChanged
         ]

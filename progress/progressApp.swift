@@ -30,14 +30,20 @@ struct progressApp: App {
     var body: some Scene {
         WindowGroup {
             PersistenceRootView(persistenceController: persistenceController)
-                .onChange(of: scenePhase) { _, phase in
-                    guard phase == .active else { return }
-                    DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
-                }
                 .task(id: persistenceController.loadState) {
                     guard persistenceController.isLoaded else { return }
                     appDelegate.startPersistenceServices()
                 }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active:
+                appDelegate.handleBecameActive()
+            case .background:
+                appDelegate.handleEnteredBackground()
+            default:
+                break
+            }
         }
     }
 
@@ -141,11 +147,13 @@ private struct LibraryLoadingView: View {
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     private var backgroundUploadTask: UIBackgroundTaskIdentifier = .invalid
     private var didStartPersistenceServices = false
+    private weak var application: UIApplication?
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        self.application = application
         UNUserNotificationCenter.current().delegate = self
         PortraitVideoExportService.shared.deleteTemporaryExports()
         PhotoUploadService.registerBackgroundTask()
@@ -185,8 +193,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    func applicationDidEnterBackground(_ application: UIApplication) {
+    func handleEnteredBackground() {
         PhotoOfflineCoordinator.shared.scheduleBackgroundProcessing()
+        guard let application else { return }
         Task {
             guard PersistenceController.shared.isLoaded else { return }
             guard ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
@@ -197,8 +206,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    func applicationDidBecomeActive(_ application: UIApplication) {
+    func handleBecameActive() {
         DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
+        if didStartPersistenceServices {
+            DailyReminderNotificationService.shared.refreshReminders()
+        }
 
         Task {
             guard PersistenceController.shared.isLoaded else { return }

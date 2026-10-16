@@ -68,6 +68,7 @@ struct PhotoRouteMapView: View {
         GeometryReader { proxy in
             ZStack {
                 mapContent(size: proxy.size)
+                    .ignoresSafeArea(.container, edges: [.top, .bottom])
 
                 if didBuildMapItems, mapItems.isEmpty {
                     noLocationsView
@@ -90,12 +91,11 @@ struct PhotoRouteMapView: View {
                 }
 
                 if didBuildMapItems, !mapItems.isEmpty {
-                    mapControlsOverlay(topInset: proxy.safeAreaInsets.top)
+                    mapControlsOverlay
                 }
             }
         }
-        .background(Color.black)
-        .ignoresSafeArea(.container, edges: [.top, .bottom])
+        .background(Color.black.ignoresSafeArea())
     }
 
     @ViewBuilder
@@ -163,7 +163,7 @@ struct PhotoRouteMapView: View {
         }
     }
 
-    private func mapControlsOverlay(topInset: CGFloat) -> some View {
+    private var mapControlsOverlay: some View {
         VStack(alignment: .leading, spacing: 10) {
             ageLegend
             if shouldShowCompass {
@@ -176,7 +176,7 @@ struct PhotoRouteMapView: View {
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: shouldShowCompass)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.top, topInset + 62)
+        .padding(.top, 16)
         .padding(.leading, 16)
     }
 

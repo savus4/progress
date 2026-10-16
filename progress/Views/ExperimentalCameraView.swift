@@ -87,15 +87,12 @@ struct ExperimentalCameraView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let bottomInset = geometry.safeAreaInsets.bottom
-            let barContentHeight: CGFloat = 116
-            let bottomBarHeight = barContentHeight + bottomInset
+            let bottomBarHeight: CGFloat = 116
             let previewHeight = max(geometry.size.height - bottomBarHeight, 0)
-            let previewWidth = geometry.size.width
-            let actualPreviewHeight = min(
-                previewHeight,
-                previewWidth / max(cameraService.sensorAspectRatio, 0.0001)
-            )
+            let previewAspectRatio = max(cameraService.sensorAspectRatio, 0.0001)
+            // Keep guides aligned with the portrait image when height limits the preview.
+            let previewWidth = min(geometry.size.width, previewHeight * previewAspectRatio)
+            let actualPreviewHeight = previewWidth / previewAspectRatio
 
             ZStack(alignment: .bottom) {
                 VStack(spacing: 0) {
@@ -116,10 +113,7 @@ struct ExperimentalCameraView: View {
                         .allowsHitTesting(isEditingGuides && !guideInteractionDisabled)
 
                         if let captureFeedbackStage, !showingCapturePreview {
-                            captureStatusOverlay(
-                                for: captureFeedbackStage,
-                                bottomInset: bottomInset
-                            )
+                            captureStatusOverlay(for: captureFeedbackStage)
                         }
 
                         if shouldShowLivePhotoToggle {
@@ -142,7 +136,7 @@ struct ExperimentalCameraView: View {
                     .background(Color.black)
                     .contentShape(Rectangle())
 
-                    experimentalControlBar(bottomInset: bottomInset, height: bottomBarHeight)
+                    experimentalControlBar(height: bottomBarHeight)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
@@ -285,7 +279,7 @@ struct ExperimentalCameraView: View {
     }
 
     @ViewBuilder
-    private func experimentalControlBar(bottomInset: CGFloat, height: CGFloat) -> some View {
+    private func experimentalControlBar(height: CGFloat) -> some View {
         ZStack {
             Color.black
 
@@ -386,11 +380,10 @@ struct ExperimentalCameraView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .padding(.horizontal, 24)
+                .frame(maxWidth: 600)
                 .frame(height: 116)
                 .animation(.easeInOut(duration: 0.18), value: isEditingGuides)
 
-                Spacer()
-                    .frame(height: bottomInset)
             }
         }
         .frame(maxWidth: .infinity)
@@ -607,7 +600,7 @@ struct ExperimentalCameraView: View {
     }
 
     @ViewBuilder
-    private func captureStatusOverlay(for stage: CaptureFeedbackStage, bottomInset: CGFloat) -> some View {
+    private func captureStatusOverlay(for stage: CaptureFeedbackStage) -> some View {
         VStack {
             Spacer()
 
@@ -638,7 +631,7 @@ struct ExperimentalCameraView: View {
                     .stroke(.white.opacity(0.1), lineWidth: 1)
             )
             .padding(.horizontal, 20)
-            .padding(.bottom, bottomInset + 28)
+            .padding(.bottom, 28)
         }
         .transition(.opacity)
     }
@@ -777,7 +770,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                       targetFrameInGlobal != .zero else {
                     return CGRect(
                         x: 1,
-                        y: geometry.safeAreaInsets.top + 1,
+                        y: 1,
                         width: fallbackTargetSize,
                         height: fallbackTargetSize
                     )
@@ -792,7 +785,7 @@ struct ExperimentalCapturePreviewOverlay: View {
             }()
             let fallbackStartFrame = CGRect(
                 x: 20,
-                y: geometry.safeAreaInsets.top + 64,
+                y: 64,
                 width: geometry.size.width - 40,
                 height: max(geometry.size.width - 40, 1) * 1.25
             )
@@ -893,7 +886,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                             .transition(.opacity)
                     }
                     }
-                    .padding(.top, max(geometry.safeAreaInsets.top - 4, 0))
+                    .frame(width: geometry.size.width, height: geometry.size.height)
                 } else {
                     Image(uiImage: image)
                         .resizable()

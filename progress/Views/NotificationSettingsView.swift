@@ -73,6 +73,9 @@ struct NotificationSettingsView: View {
                     Toggle("Hirs-Mode", isOn: $isHirsModeEnabled)
                         .accessibilityIdentifier("hirsModeToggle")
 
+                    Text("Shows the photo preview mirrored, matching the camera preview. Saved photos stay unchanged.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {

@@ -118,7 +118,6 @@ struct PhotoGridView: View {
                             onOpenPhoto: openPhotoDetail
                         )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .ignoresSafeArea(.container, edges: [.top, .bottom])
                     } else if dataController.isEmpty {
                         filteredEmptyState
                             .frame(maxWidth: .infinity, maxHeight: .infinity)

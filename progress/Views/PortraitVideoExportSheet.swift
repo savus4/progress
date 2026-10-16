@@ -70,11 +70,10 @@ struct PortraitVideoExportSheet: View {
                 videoSection
                 dateRangeSection
             }
-            .contentMargins(.top, 110, for: .scrollContent)
             .listSectionSpacing(10)
             .scrollContentBackground(.hidden)
             .background(Color(.systemGroupedBackground))
-            .overlay(alignment: .top) {
+            .safeAreaInset(edge: .top, spacing: 0) {
                 floatingSummaryStats
             }
             .safeAreaInset(edge: .bottom) {

@@ -417,6 +417,8 @@ final class PhotoGridCollectionViewController: UIViewController {
     private let minGridColumnCount = GridPreferences.minColumnCount
     private let maxGridColumnCount = GridPreferences.maxColumnCount
     private let gridSpacing: CGFloat = 2
+    private var effectiveGridColumnCount = GridPreferences.defaultColumnCount
+    private var lastLayoutWidth: CGFloat = 0
     private var thumbnailResolution: DecodedThumbnailCache.Resolution {
         gridColumnCount == 1 ? .expanded : .grid
     }
@@ -564,6 +566,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         prefetchNearVisibleThumbnails()
     }
 
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        view.setNeedsLayout()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateLayoutItemSize()
@@ -689,16 +696,36 @@ final class PhotoGridCollectionViewController: UIViewController {
 
     private func updateLayoutItemSize() {
         guard let layout = collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return }
-        let availableWidth = collectionView.bounds.width
+        let insets = collectionView.adjustedContentInset
+        let availableWidth = max(0, collectionView.bounds.width - insets.left - insets.right)
         guard availableWidth > 0 else { return }
 
-        let columnCount = min(max(gridColumnCount, minGridColumnCount), maxGridColumnCount)
-        let itemWidth = floor((availableWidth - CGFloat(columnCount - 1) * gridSpacing) / CGFloat(columnCount))
+        // Keep the selected density on phones, adding columns as the window grows.
+        let preferredColumns = min(max(gridColumnCount, minGridColumnCount), maxGridColumnCount)
+        let columnCount = preferredColumns == 1 ? 1 : max(preferredColumns, Int(CGFloat(preferredColumns) * availableWidth / 500))
+        let didResize = lastLayoutWidth > 0 && lastLayoutWidth != availableWidth
+        let anchor: GridPinchAnchor? = didResize ? collectionView.indexPathsForVisibleItems.sorted().first.flatMap { indexPath in
+            collectionView.layoutAttributesForItem(at: indexPath).map { attributes in
+                GridPinchAnchor(
+                    indexPath: indexPath,
+                    xRatio: 0,
+                    yRatio: 0,
+                    locationInBounds: CGPoint(x: 0, y: attributes.frame.minY - collectionView.bounds.minY)
+                )
+            }
+        } : nil
+        lastLayoutWidth = availableWidth
+        effectiveGridColumnCount = columnCount
+        let itemWidth = max(1, floor((availableWidth - CGFloat(columnCount - 1) * gridSpacing) / CGFloat(columnCount)))
 
         let itemSize = CGSize(width: itemWidth, height: itemWidth)
         if layout.itemSize != itemSize {
             layout.itemSize = itemSize
             layout.invalidateLayout()
+            if let anchor {
+                collectionView.layoutIfNeeded()
+                restorePinchAnchor(anchor)
+            }
         }
     }
 
@@ -947,7 +974,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         let key = PreheatWindowKey(
             firstRow: Int(floor(bounds.minY / rowHeight)),
             lastRow: Int(floor(bounds.maxY / rowHeight)),
-            size: bounds.size, columns: gridColumnCount, changeToken: currentChangeToken,
+            size: bounds.size, columns: effectiveGridColumnCount, changeToken: currentChangeToken,
             direction: preheatDirection, isScrolling: isScrollMotionActive
         )
         // Sorting/layout queries only when a row, direction, layout, or snapshot changes.
