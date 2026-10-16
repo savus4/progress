@@ -16,6 +16,8 @@ struct progressApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var persistenceController = PersistenceController.shared
+    // Snapshot at launch so scheduling a replay in Settings never interrupts this session.
+    @State private var showsIntroduction = !UserDefaults.standard.bool(forKey: IntroductionPreferences.completedKey)
 
     init() {
         loadRocketSimConnect()
@@ -29,11 +31,22 @@ struct progressApp: App {
 
     var body: some Scene {
         WindowGroup {
-            PersistenceRootView(persistenceController: persistenceController)
-                .task(id: persistenceController.loadState) {
-                    guard persistenceController.isLoaded else { return }
-                    appDelegate.startPersistenceServices()
+            ZStack {
+                if showsIntroduction {
+                    IntroductionView(onFinish: completeIntroduction)
+                        .transition(.opacity)
+                        .zIndex(1)
+                } else {
+                    PersistenceRootView(persistenceController: persistenceController)
+                        .transition(.opacity)
                 }
+            }
+            .statusBarHidden(showsIntroduction)
+            .animation(.easeOut(duration: 0.2), value: showsIntroduction)
+            .task(id: persistenceController.loadState) {
+                guard persistenceController.isLoaded else { return }
+                appDelegate.startPersistenceServices()
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -45,6 +58,11 @@ struct progressApp: App {
                 break
             }
         }
+    }
+
+    private func completeIntroduction() {
+        UserDefaults.standard.set(true, forKey: IntroductionPreferences.completedKey)
+        showsIntroduction = false
     }
 
     private func loadRocketSimConnect() {

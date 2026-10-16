@@ -5,6 +5,7 @@ final class ReminderSettingsUITests: XCTestCase {
     func testReminderEditsAfterReturningFromStorageManagementPersist() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
+        app.launchArguments += ["-hasCompletedIntroduction", "YES"]
         app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
         app.launchEnvironment["UI_TEST_RESET_REMINDERS"] = "1"
         app.launch()
@@ -78,6 +79,7 @@ final class ReminderSettingsUITests: XCTestCase {
     func testNotificationTogglePersistsAndImportOptionsHaveTheirOwnSubmenu() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
+        app.launchArguments += ["-hasCompletedIntroduction", "YES"]
         app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
         app.launchEnvironment["UI_TEST_RESET_REMINDERS"] = "1"
         app.launch()

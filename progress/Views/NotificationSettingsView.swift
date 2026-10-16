@@ -5,10 +5,12 @@ struct NotificationSettingsView: View {
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
+    @AppStorage(IntroductionPreferences.completedKey) private var hasCompletedIntroduction = false
 
     @State private var isRetryingUploads = false
     @State private var uploadRetryStatusMessage: String?
     @State private var bottomRubberBandDistance: CGFloat = 0
+    @State private var showsIntroductionScheduledAlert = false
 
     private let settingsCreditRevealOverscroll: CGFloat = 190
     private let settingsCreditFadeOverscroll: CGFloat = 40
@@ -110,6 +112,19 @@ struct NotificationSettingsView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text("Settings")
+                        .font(.headline)
+                        .padding(.horizontal, 24)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("settingsTitle")
+                        .onLongPressGesture(minimumDuration: 3, perform: scheduleIntroduction)
+                        .accessibilityAction(named: Text("Show Introduction on Next Launch")) {
+                            scheduleIntroduction()
+                        }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         dismiss()
@@ -123,7 +138,17 @@ struct NotificationSettingsView: View {
             .task {
                 await cloudSyncMonitor.refreshUploadStatus()
             }
+            .alert("Introduction Scheduled", isPresented: $showsIntroductionScheduledAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("The introduction will appear the next time you launch Work in Progress.")
+            }
         }
+    }
+
+    private func scheduleIntroduction() {
+        hasCompletedIntroduction = false
+        showsIntroductionScheduledAlert = true
     }
 
     private var settingsCreditFooterOpacity: CGFloat {

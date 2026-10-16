@@ -20,9 +20,18 @@
 
 ## Main Screens
 
+### Introduction
+
+- First launch opens a short introduction with a portrait video preview, followed by highlights for large libraries, Live Photos, saved locations, and private iCloud sync.
+- Swipe between the two pages or use Continue to advance. The page indicator and Get Started action follow the current page.
+- The preview grows to fit the available space, and the video animates in when playback is ready. Feature content is centered vertically, with a separate entrance for each row and scrolling for longer text. Get Started completes the intro's exit before opening the library; Reduce Motion uses short fades.
+- The video entrance starts after 0.7 seconds, followed by the title, subtitle, page indicator, and button, using slower spring animations. Soft background particles stay still with Reduce Motion and pause while the app is inactive.
+- The bundled `Resources/Introduction.mp4` preview loops silently, pauses outside the active page or scene, and respects Reduce Motion. Replace this file to update the preview; an animated placeholder is shown if the video is missing.
+- Completing the introduction is remembered on this device. Press and hold the **Settings** title for three seconds to show the introduction on the next launch. A confirmation appears immediately; the current session stays open.
+
 ### Grid
 
-- The app launches into `PhotoGridView`.
+- After the introduction, the app launches into `PhotoGridView`.
 - Empty state includes a direct “Take Your First Photo” action.
 - Existing photos appear in an adaptive grid.
 - Tapping opens a paged fullscreen viewer.

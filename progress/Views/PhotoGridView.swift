@@ -115,7 +115,8 @@ struct PhotoGridView: View {
                             mapCameraSnapshot: $mapCameraSnapshot,
                             mapVisibleRegionSnapshot: $mapVisibleRegionSnapshot,
                             focusRequest: mapFocusRequest,
-                            onOpenPhoto: openPhotoDetail
+                            onOpenPhoto: openPhotoDetail,
+                            onOpenSettings: { showingNotificationSettings = true }
                         )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if dataController.isEmpty {
@@ -310,7 +311,7 @@ struct PhotoGridView: View {
                     }
                 }
             }
-            .toolbar(photoDetailPresentation == nil ? .visible : .hidden, for: .navigationBar)
+            .toolbar(photoDetailPresentation == nil && !isMapModeActive ? .visible : .hidden, for: .navigationBar)
             .fullScreenCover(isPresented: $showingCamera) {
                 ExperimentalCameraView(
                     gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal

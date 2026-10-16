@@ -25,6 +25,7 @@ final class progressUITests: XCTestCase {
     @MainActor
     func testCaptureSaveReturnsPhotoToGrid() throws {
         let app = XCUIApplication()
+        app.launchArguments += ["-hasCompletedIntroduction", "YES"]
         app.launchArguments += [
             "UI_TEST_IN_MEMORY_STORE",
             "UI_TEST_MOCK_CAPTURE"
@@ -57,6 +58,7 @@ final class progressUITests: XCTestCase {
     @MainActor
     func testFailedCaptureSaveKeepsPreviewAndCanRetry() throws {
         let app = XCUIApplication()
+        app.launchArguments += ["-hasCompletedIntroduction", "YES"]
         app.launchArguments += ["UI_TEST_IN_MEMORY_STORE", "UI_TEST_MOCK_CAPTURE"]
         app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
         app.launchEnvironment["UI_TEST_MOCK_CAPTURE"] = "1"
@@ -103,6 +105,7 @@ final class progressUITests: XCTestCase {
     @MainActor
     func testPhotoPagerSwipeRepro() throws {
         let app = XCUIApplication()
+        app.launchArguments += ["-hasCompletedIntroduction", "YES"]
         app.launchArguments += [
             "UI_TEST_IN_MEMORY_STORE",
             "UI_TEST_MOCK_CAPTURE"
@@ -131,6 +134,7 @@ final class progressUITests: XCTestCase {
     @MainActor
     func testPhotoPagerSwipeOnExistingLibrary() throws {
         let app = XCUIApplication()
+        app.launchArguments += ["-hasCompletedIntroduction", "YES"]
         app.launch()
 
         let firstGridItem = app.cells["photoGridItem"].firstMatch

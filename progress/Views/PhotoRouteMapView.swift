@@ -19,7 +19,7 @@ struct PhotoRouteMapItem: Identifiable, Equatable {
     }
 
     var hasLocation: Bool {
-        latitude != 0 || longitude != 0
+        (latitude != 0 || longitude != 0) && CLLocationCoordinate2DIsValid(coordinate)
     }
 
     nonisolated init(gridItem: UIKitPhotoGridItem) {
@@ -46,6 +46,7 @@ struct PhotoRouteMapView: View {
     @Binding var mapVisibleRegionSnapshot: MKCoordinateRegion?
     let focusRequest: PhotoMapFocusRequest?
     let onOpenPhoto: (NSManagedObjectID) -> Void
+    let onOpenSettings: () -> Void
 
     @Namespace private var mapScope
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -59,6 +60,8 @@ struct PhotoRouteMapView: View {
     @State private var mapItems: [PhotoRouteMapItem] = []
     @State private var didBuildMapItems = false
     @State private var renderedClusterCellMapPointSize: Double?
+    @State private var isShowingInitialOverview = false
+    @State private var mapControlsHeight: CGFloat = 80
 
     private let thumbnailCellSize: CGFloat = 76
     private let clusterCellSize: CGFloat = 48
@@ -66,9 +69,23 @@ struct PhotoRouteMapView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let mapSize = CGSize(
+                width: proxy.size.width,
+                height: proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom
+            )
+            let cameraInsets = EdgeInsets(
+                top: proxy.safeAreaInsets.top + mapControlsHeight + 40,
+                leading: 56,
+                bottom: proxy.safeAreaInsets.bottom + 108,
+                trailing: 56
+            )
             ZStack {
-                mapContent(size: proxy.size)
-                    .ignoresSafeArea(.container, edges: [.top, .bottom])
+                // Prepare the first position before mounting Map, so its automatic
+                // camera cannot become the saved position during first entry.
+                if didBuildMapItems, mapItems.isEmpty || didSetInitialCamera {
+                    mapContent(size: mapSize)
+                        .ignoresSafeArea(.container, edges: [.top, .bottom])
+                }
 
                 if didBuildMapItems, mapItems.isEmpty {
                     noLocationsView
@@ -90,9 +107,33 @@ struct PhotoRouteMapView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
-                if didBuildMapItems, !mapItems.isEmpty {
-                    mapControlsOverlay
+                mapControlsOverlay
+            }
+            .onAppear {
+                rebuildMapItemsIfNeeded()
+                if !focusOnRequestedPhotoIfPossible(size: mapSize, animated: false) {
+                    setInitialCameraIfNeeded(size: mapSize, insets: cameraInsets)
                 }
+            }
+            .onChange(of: changeToken) { _, _ in
+                rebuildMapItems()
+                clusterPresentation = nil
+                isClusterOverlayPresented = false
+                if !focusOnRequestedPhotoIfPossible(size: mapSize, animated: false) {
+                    updateAnnotationsAfterMapItemsChanged(size: mapSize, insets: cameraInsets)
+                }
+            }
+            .onChange(of: focusRequest?.token) { _, _ in
+                focusOnRequestedPhotoIfPossible(size: mapSize, animated: true)
+            }
+            .onChange(of: mapSize) { _, _ in
+                refitInitialOverviewIfNeeded(size: mapSize, insets: cameraInsets)
+            }
+            .onChange(of: cameraInsets) { _, _ in
+                refitInitialOverviewIfNeeded(size: mapSize, insets: cameraInsets)
+            }
+            .onChange(of: cameraPosition.positionedByUser) { _, positionedByUser in
+                if positionedByUser { isShowingInitialOverview = false }
             }
         }
         .background(Color.black.ignoresSafeArea())
@@ -132,6 +173,7 @@ struct PhotoRouteMapView: View {
             updateMapHeading(context.camera.heading)
         }
         .onMapCameraChange(frequency: .onEnd) { context in
+            guard didSetInitialCamera, !mapItems.isEmpty else { return }
             visibleRegion = context.region
             updateMapHeading(context.camera.heading)
             latestMapCamera = context.camera
@@ -143,41 +185,35 @@ struct PhotoRouteMapView: View {
             renderedClusterCellMapPointSize = nextClusterCellSize
             updateRenderedAnnotations(size: size, region: context.region, animated: shouldAnimateClusterChange)
         }
-        .onAppear {
-            rebuildMapItemsIfNeeded()
-            if focusOnRequestedPhotoIfPossible(size: size, animated: false) {
-                return
-            }
-            setInitialCameraIfNeeded(size: size)
-        }
-        .onChange(of: changeToken) { _, _ in
-            rebuildMapItems()
-            clusterPresentation = nil
-            isClusterOverlayPresented = false
-            if !focusOnRequestedPhotoIfPossible(size: size, animated: false) {
-                updateAnnotationsAfterMapItemsChanged(size: size)
-            }
-        }
-        .onChange(of: focusRequest?.token) { _, _ in
-            focusOnRequestedPhotoIfPossible(size: size, animated: true)
-        }
     }
 
     private var mapControlsOverlay: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ageLegend
-            if shouldShowCompass {
-                PhotoMapHeadingCompass(
-                    heading: mapHeading,
-                    onReset: resetMapHeading
-                )
-                .transition(.scale(scale: 0.82).combined(with: .opacity))
+        HStack(alignment: .top) {
+            if didBuildMapItems, !mapItems.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ageLegend
+                    if shouldShowCompass {
+                        PhotoMapHeadingCompass(
+                            heading: mapHeading,
+                            onReset: resetMapHeading
+                        )
+                        .transition(.scale(scale: 0.82).combined(with: .opacity))
+                    }
+                }
             }
+            Spacer(minLength: 16)
+            Button("Settings", systemImage: "gearshape", action: onOpenSettings)
+                .labelStyle(.iconOnly)
+                .font(.title3)
+                .frame(width: 44, height: 44)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: shouldShowCompass)
+        .padding(.top, 12)
+        .padding(.horizontal, 16)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { mapControlsHeight = $0 }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.top, 16)
-        .padding(.leading, 16)
     }
 
     private var shouldShowCompass: Bool {
@@ -221,6 +257,7 @@ struct PhotoRouteMapView: View {
         .shadow(color: .black.opacity(0.16), radius: 12, y: 5)
         .frame(width: 126)
         .accessibilityLabel("Photo age legend")
+        .accessibilityIdentifier("routeMapAgeLegend")
     }
 
     private var noLocationsView: some View {
@@ -384,6 +421,7 @@ struct PhotoRouteMapView: View {
         } else if shouldOpenClusterGrid(annotation) {
             showClusterGrid(for: annotation)
         } else {
+            isShowingInitialOverview = false
             let region = zoomRegion(for: annotation)
             let nextCamera = camera(for: region, heading: mapHeading)
             withAnimation(.easeInOut(duration: 0.28)) {
@@ -488,6 +526,8 @@ struct PhotoRouteMapView: View {
         )
         let nextCamera = camera(for: region, heading: mapHeading)
         let applyFocus = {
+            didSetInitialCamera = true
+            isShowingInitialOverview = false
             cameraPosition = .camera(nextCamera)
             visibleRegion = region
             latestMapCamera = nextCamera
@@ -647,21 +687,25 @@ struct PhotoRouteMapView: View {
         return true
     }
 
-    private func updateAnnotationsAfterMapItemsChanged(size: CGSize) {
+    private func updateAnnotationsAfterMapItemsChanged(size: CGSize, insets: EdgeInsets) {
         guard !mapItems.isEmpty else {
             renderedAnnotations = []
             renderedClusterCellMapPointSize = nil
             return
         }
 
-        if let visibleRegion {
+        if !didSetInitialCamera {
+            setInitialCameraIfNeeded(size: size, insets: insets)
+        } else if isShowingInitialOverview {
+            applyInitialOverview(size: size, insets: insets)
+        } else if let visibleRegion {
             renderedClusterCellMapPointSize = clusterCellMapPointSize(region: visibleRegion, viewSize: size)
             updateRenderedAnnotations(size: size, region: visibleRegion, animated: false)
         } else if restoreSavedCameraIfPossible(size: size) {
             return
         } else {
             didSetInitialCamera = false
-            setInitialCameraIfNeeded(size: size)
+            setInitialCameraIfNeeded(size: size, insets: insets)
         }
     }
 
@@ -727,8 +771,9 @@ struct PhotoRouteMapView: View {
         timelineAgeStops.map(\.color)
     }
 
-    private func setInitialCameraIfNeeded(size: CGSize) {
+    private func setInitialCameraIfNeeded(size: CGSize, insets: EdgeInsets) {
         guard !didSetInitialCamera else { return }
+        guard size.width > 0, size.height > 0 else { return }
         guard !mapItems.isEmpty else {
             cameraPosition = .automatic
             visibleRegion = nil
@@ -742,13 +787,29 @@ struct PhotoRouteMapView: View {
             return
         }
 
-        guard let region = initialCameraRegion() else { return }
-        let initialCamera = camera(for: region, heading: 0)
+        isShowingInitialOverview = true
+        applyInitialOverview(size: size, insets: insets)
+    }
+
+    private func refitInitialOverviewIfNeeded(size: CGSize, insets: EdgeInsets) {
+        if !didSetInitialCamera {
+            setInitialCameraIfNeeded(size: size, insets: insets)
+            return
+        }
+        guard isShowingInitialOverview, !cameraPosition.positionedByUser else { return }
+        applyInitialOverview(size: size, insets: insets)
+    }
+
+    private func applyInitialOverview(size: CGSize, insets: EdgeInsets) {
+        guard let rect = PhotoMapInitialViewport.mapRect(
+            containing: PhotoMapInitialViewport.coordinates(in: mapItems),
+            size: size,
+            insets: insets
+        ) else { return }
+        let region = MKCoordinateRegion(rect)
         visibleRegion = region
         renderedClusterCellMapPointSize = clusterCellMapPointSize(region: region, viewSize: size)
-        latestMapCamera = initialCamera
-        cameraPosition = .camera(initialCamera)
-        saveCameraSnapshot(camera: initialCamera, region: region)
+        cameraPosition = .rect(rect)
         updateRenderedAnnotations(size: size, region: region, animated: false)
     }
 
@@ -792,22 +853,9 @@ struct PhotoRouteMapView: View {
     }
 
     private func initialCameraRegion() -> MKCoordinateRegion? {
-        let recentItems = mapItems
-            .sorted { lhs, rhs in
-                switch (lhs.captureDate, rhs.captureDate) {
-                case let (lhsDate?, rhsDate?):
-                    return lhsDate > rhsDate
-                case (_?, nil):
-                    return true
-                case (nil, _?):
-                    return false
-                case (nil, nil):
-                    return lhs.objectID.uriRepresentation().absoluteString > rhs.objectID.uriRepresentation().absoluteString
-                }
-            }
-            .prefix(30)
-        guard !recentItems.isEmpty else { return nil }
-        return region(containing: recentItems.map(\.coordinate))
+        let coordinates = PhotoMapInitialViewport.coordinates(in: mapItems)
+        guard !coordinates.isEmpty else { return nil }
+        return region(containing: coordinates)
     }
 
     private static let accessibilityDateFormatter: DateFormatter = {
