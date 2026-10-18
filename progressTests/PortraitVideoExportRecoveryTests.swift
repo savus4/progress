@@ -8,6 +8,36 @@ import UIKit
 @MainActor
 @Suite("Portrait Video Export Recovery")
 struct PortraitVideoExportRecoveryTests {
+    @Test("Hidden photos produce no frames or failures, including after pause/resume", arguments: [false, true])
+    func excludesHiddenPhotos(resume: Bool) async throws {
+        let fixture = try ExportFixture(photoCount: 8, hiddenIndices: [1, 5])
+        defer { fixture.close() }
+        var completed = 0
+        var response = try await fixture.service.createVideo(
+            from: fixture.items, configuration: fixture.configuration,
+            shouldPause: { resume && completed >= 2 },
+            progress: { completed = $0.completedPhotoCount }
+        )
+        if resume {
+            guard case .paused(let session) = response else {
+                Issue.record("The export did not pause")
+                return
+            }
+            #expect(session.totalPhotoCount == 6)
+            #expect(session.photoIDs.count == 6)
+            response = try await fixture.service.createVideo(
+                from: fixture.items, configuration: fixture.configuration,
+                resuming: session, progress: { _ in }
+            )
+        }
+        guard case .completed(let result) = response else {
+            Issue.record("The export did not complete")
+            return
+        }
+        #expect(result.failedPhotos.isEmpty)
+        #expect(try await frameCount(in: result.videoURL) == 6)
+    }
+
     @Test("Finishing cancellation keeps the checkpoint consistent through repeated resumes", .timeLimit(.minutes(2)))
     func finishingPauseDoesNotDuplicateTail() async throws {
         let fixture = try ExportFixture(photoCount: 8)
@@ -108,7 +138,7 @@ struct PortraitVideoExportRecoveryTests {
         let directoryURL: URL
         let exportDirectoryURL: URL
 
-        init(photoCount: Int) throws {
+        init(photoCount: Int, hiddenIndices: Set<Int> = []) throws {
             let fixtureID = UUID().uuidString
             directoryURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ExportRecovery-\(fixtureID)", isDirectory: true)
@@ -140,6 +170,7 @@ struct PortraitVideoExportRecoveryTests {
                 photo.id = UUID()
                 photo.captureDate = Date(timeIntervalSince1970: Double(index) * 86_400)
                 photo.fullImageAssetName = assetName
+                photo.isHiddenFromVideo = hiddenIndices.contains(index)
                 photos.append(photo)
             }
             try context.save()

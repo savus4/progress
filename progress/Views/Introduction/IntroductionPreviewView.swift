@@ -16,7 +16,7 @@ struct IntroductionPreviewView: View {
                     .accessibilityAddTraits(.isHeader)
                     .modifier(IntroductionEntrance(isActive: hasAppeared, delay: 0.35))
 
-                Text("One photo a day.\nIt does not matter, when you start.")
+                Text("One photo a day.\nIt's not too late to start.")
                     .font(.title3)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

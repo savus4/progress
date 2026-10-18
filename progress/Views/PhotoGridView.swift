@@ -202,7 +202,8 @@ struct PhotoGridView: View {
                         .padding(.bottom, dataController.hasAnyPhotos ? 132 : 24)
                 }
             }
-            .navigationTitle(isMapModeActive ? "" : "Work in Progress")
+            .navigationTitle("Work in Progress")
+            .navigationBarTitleDisplayMode(isMapModeActive ? .inline : .large)
             .toolbar {
                 if isSelectionMode {
                     ToolbarItem(placement: .title) {
@@ -232,6 +233,7 @@ struct PhotoGridView: View {
                         }
                         .foregroundStyle(selectedHeartButtonColor)
                         .disabled(!isSelectedHeartButtonEnabled)
+                        .accessibilityLabel(shouldHeartSelectedPhotos ? "Favorite Selected Photos" : "Remove Selected Favorites")
 
                         Button(action: toggleFavoriteLivePhotoForSelectedPhotos) {
                             Image(uiImage: FavoriteLivePhotoFilterSymbol.image(isSelected: isSelectedFavoriteLivePhotoButtonActive))
@@ -243,6 +245,16 @@ struct PhotoGridView: View {
                         .accessibilityLabel(isSelectedFavoriteLivePhotoButtonActive ? "Remove Favorite Live Photo" : "Favorite Live Photo")
 
                         Menu {
+                            Button(action: toggleVideoVisibilityForSelectedPhotos) {
+                                Label(
+                                    shouldHideSelectedPhotos ? "Hide Selected from Video (\(selectedPhotoIDs.count))" : "Unhide Selected from Video (\(selectedPhotoIDs.count))",
+                                    systemImage: shouldHideSelectedPhotos ? "eye.slash" : "eye"
+                                )
+                            }
+                            .disabled(selectedPhotoIDs.isEmpty || isExporting || isSavingToPhotoLibrary || isDeletingSelection)
+
+                            Divider()
+
                             Button(action: exportSelectedPhotos) {
                                 Label("Save Selected to Files (\(selectedPhotoIDs.count))", systemImage: "folder")
                             }
@@ -523,6 +535,8 @@ struct PhotoGridView: View {
             return "No Hearted Photos"
         case .favoriteLivePhotos:
             return "No Favorite Live Photos"
+        case .hidden:
+            return "No Hidden Photos"
         }
     }
 
@@ -534,6 +548,8 @@ struct PhotoGridView: View {
             return "Heart photos from the detail view to focus this grid."
         case .favoriteLivePhotos:
             return "Mark Live Photos from the detail view to use their video clips."
+        case .hidden:
+            return "Photos you hide from videos appear here."
         }
     }
 
@@ -659,7 +675,7 @@ struct PhotoGridView: View {
 
     private var filterButtonForegroundStyle: Color {
         switch gridFilter {
-        case .all:
+        case .all, .hidden:
             return .primary
         case .hearted:
             return .red
@@ -822,11 +838,32 @@ struct PhotoGridView: View {
     }
 
     private var selectedLivePhotos: [DailyPhoto] {
-        selectedPhotos.filter { $0.livePhotoImageAssetName != nil && $0.livePhotoVideoAssetName != nil }
+        selectedPhotosEligibleForFavorites.filter { $0.livePhotoImageAssetName != nil && $0.livePhotoVideoAssetName != nil }
+    }
+
+    private var selectedPhotosEligibleForFavorites: [DailyPhoto] {
+        selectedPhotos.filter { !$0.isHiddenFromVideo }
     }
 
     private var shouldHeartSelectedPhotos: Bool {
         dataController.shouldHeartPhotos(for: selectedPhotoIDs)
+    }
+
+    private var shouldHideSelectedPhotos: Bool {
+        PhotoVideoVisibility.shouldHide(selectedPhotos)
+    }
+
+    private func toggleVideoVisibilityForSelectedPhotos() {
+        let photos = selectedPhotos
+        guard !photos.isEmpty else { return }
+
+        do {
+            try PhotoVideoVisibility.setHidden(shouldHideSelectedPhotos, for: photos, in: viewContext)
+            selectedPhotoIDs.removeAll()
+            isSelectionMode = false
+        } catch {
+            exportAlertMessage = "Unable to update video visibility."
+        }
     }
 
     private var shouldFavoriteSelectedLivePhotos: Bool {
@@ -854,7 +891,7 @@ struct PhotoGridView: View {
     }
 
     private var isSelectedHeartButtonEnabled: Bool {
-        !selectedPhotoIDs.isEmpty && !isDeletingSelection && !isSavingToPhotoLibrary
+        !selectedPhotosEligibleForFavorites.isEmpty && !isDeletingSelection && !isSavingToPhotoLibrary
     }
 
     private var isSelectedFavoriteLivePhotoButtonEnabled: Bool {
@@ -862,7 +899,7 @@ struct PhotoGridView: View {
     }
 
     private func toggleHeartForSelectedPhotos() {
-        let photos = selectedPhotos
+        let photos = selectedPhotosEligibleForFavorites
         guard !photos.isEmpty else {
             exportAlertMessage = "Please select at least one photo."
             return

@@ -90,7 +90,10 @@ struct NotificationSettingsView: View {
             }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let bottomEdge = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom
-                return max(0, bottomEdge - geometry.contentSize.height)
+                let visibleHeight = geometry.containerSize.height - geometry.contentInsets.top - geometry.contentInsets.bottom
+                // Empty space below a short form is not overscroll.
+                let restingBottomEdge = max(geometry.contentSize.height, visibleHeight)
+                return max(0, bottomEdge - restingBottomEdge)
             } action: { _, newDistance in
                 bottomRubberBandDistance = newDistance
             }

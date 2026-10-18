@@ -11,6 +11,7 @@ nonisolated struct PortraitVideoExportItem: Identifiable, Equatable {
     let livePhotoVideoAssetName: String?
     let isHearted: Bool
     let isFavoriteLivePhoto: Bool
+    let isHiddenFromVideo: Bool
 
     var id: NSManagedObjectID { objectID }
 
@@ -29,5 +30,6 @@ nonisolated struct PortraitVideoExportItem: Identifiable, Equatable {
         livePhotoVideoAssetName = photo.livePhotoVideoAssetName
         isHearted = photo.isHearted
         isFavoriteLivePhoto = photo.isFavoriteLivePhoto
+        isHiddenFromVideo = photo.isHiddenFromVideo
     }
 }

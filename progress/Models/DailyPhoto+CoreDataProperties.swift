@@ -23,6 +23,7 @@ nonisolated extension DailyPhoto {
     @NSManaged var importFingerprint: String?
     @NSManaged var isHearted: Bool
     @NSManaged var isFavoriteLivePhoto: Bool
+    @NSManaged var isHiddenFromVideo: Bool
     @NSManaged var uploadAttemptCount: Int16
     @NSManaged var uploadErrorMessage: String?
     @NSManaged var uploadRetryAfter: Date?

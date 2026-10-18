@@ -43,12 +43,15 @@ struct PortraitVideoExportSheet: View {
 
     private let calendar = Calendar.current
     private let availableDateRange: ClosedRange<Date>
+    private let hiddenPhotoCount: Int
 
     init(photos: [PortraitVideoExportItem]) {
-        self.photos = photos
+        let includedPhotos = photos.filter { !$0.isHiddenFromVideo }
+        self.photos = includedPhotos
+        hiddenPhotoCount = photos.count - includedPhotos.count
 
         let calendar = Calendar.current
-        let dates = photos.map(\.captureDate)
+        let dates = includedPhotos.map(\.captureDate)
         let minimumDate = dates.min() ?? Date()
         let maximumDate = dates.max() ?? minimumDate
         let lowerBound = calendar.startOfDay(for: minimumDate)
@@ -280,7 +283,7 @@ struct PortraitVideoExportSheet: View {
     }
 
     private var dateRangeSection: some View {
-        Section("Photos") {
+        Section {
             Toggle(isOn: $usesAllPhotos) {
                 Label("All Photos", systemImage: "photo.stack")
             }
@@ -301,6 +304,12 @@ struct PortraitVideoExportSheet: View {
             }
 
             LabeledContent("Selected", value: dateRangeSummary)
+        } header: {
+            Text("Photos")
+        } footer: {
+            if hiddenPhotoCount > 0 {
+                Text("\(hiddenPhotoCount) photo\(hiddenPhotoCount == 1 ? " is" : "s are") hidden from video. Unhide them in the photo library to include them.")
+            }
         }
         .disabled(exportTask != nil)
     }

@@ -266,6 +266,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
     let longitude: Double
     var isHearted: Bool
     var isFavoriteLivePhoto: Bool
+    var isHiddenFromVideo: Bool
 
     var id: NSManagedObjectID { objectID }
 
@@ -279,8 +280,9 @@ struct PhotoDetailItem: Identifiable, Equatable {
         locationName = photo.locationName
         latitude = photo.latitude
         longitude = photo.longitude
-        isHearted = photo.isHearted
-        isFavoriteLivePhoto = photo.isFavoriteLivePhoto
+        isHearted = photo.isHearted && !photo.isHiddenFromVideo
+        isFavoriteLivePhoto = photo.isFavoriteLivePhoto && !photo.isHiddenFromVideo
+        isHiddenFromVideo = photo.isHiddenFromVideo
     }
 
     init(gridItem: UIKitPhotoGridItem) {
@@ -294,6 +296,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
         longitude = gridItem.longitude
         isHearted = gridItem.isHearted
         isFavoriteLivePhoto = gridItem.isFavoriteLivePhoto
+        isHiddenFromVideo = gridItem.isHiddenFromVideo
     }
 }
 
@@ -314,6 +317,7 @@ struct PhotoDetailView: View {
     @State private var isPerformingAction = false
     @State private var librarySaveState: PhotoDetailLibrarySaveState
     @State private var deleteTransition: PhotoDetailDeleteTransition?
+    @State private var hiddenFavoriteNoticeID: UUID?
 
     init(
         items: [PhotoDetailItem],
@@ -359,6 +363,8 @@ struct PhotoDetailView: View {
                 isHearted: currentItem?.isHearted ?? false,
                 isFavoriteLivePhotoEnabled: !isPerformingAction && supportsLivePhoto,
                 isFavoriteLivePhoto: currentItem?.isFavoriteLivePhoto ?? false,
+                isVideoVisibilityEnabled: !isPerformingAction && currentItem != nil,
+                isHiddenFromVideo: currentItem?.isHiddenFromVideo ?? false,
                 saveTitle: saveToLibraryButtonTitle,
                 saveImageSystemName: saveToLibraryButtonSystemImage,
                 onClose: closeCurrentPhoto,
@@ -367,9 +373,28 @@ struct PhotoDetailView: View {
                 onShowOnMap: showCurrentPhotoOnMap,
                 onHeart: toggleCurrentPhotoHeart,
                 onFavoriteLivePhoto: toggleCurrentPhotoFavoriteLivePhoto,
+                onToggleVideoVisibility: toggleCurrentPhotoVideoVisibility,
                 onDelete: deleteCurrentPhoto
             )
         }
+        .overlay(alignment: .bottom) {
+            if let noticeID = hiddenFavoriteNoticeID {
+                HiddenPhotoFavoriteNotice()
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 100)
+                    .transition(.opacity)
+                    .task(id: noticeID) {
+                        do {
+                            try await Task.sleep(for: .seconds(5))
+                        } catch {
+                            return
+                        }
+                        guard hiddenFavoriteNoticeID == noticeID else { return }
+                        hiddenFavoriteNoticeID = nil
+                    }
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: hiddenFavoriteNoticeID != nil)
         .offset(y: verticalDismissOffset)
         .simultaneousGesture(verticalDismissGesture)
         .animation(.easeInOut(duration: 0.18), value: areControlsVisible)
@@ -380,6 +405,12 @@ struct PhotoDetailView: View {
         .onChange(of: selectedIndex) { _, _ in
             librarySaveState.selectPhoto(currentItem?.objectID)
             onCurrentItemChanged(currentItem?.objectID)
+        }
+        .onChange(of: currentItem?.objectID) { _, _ in
+            hiddenFavoriteNoticeID = nil
+        }
+        .onDisappear {
+            hiddenFavoriteNoticeID = nil
         }
         .task(id: currentItem?.objectID) {
             await updateLocationName()
@@ -573,12 +604,20 @@ struct PhotoDetailView: View {
 
     private func toggleCurrentPhotoHeart() {
         guard !isPerformingAction, let currentItem else { return }
+        guard !currentItem.isHiddenFromVideo else {
+            showHiddenPhotoFavoriteNotice()
+            return
+        }
 
         do {
             guard let photo = try viewContext.existingObject(with: currentItem.objectID) as? DailyPhoto else {
                 throw PhotoDetailHeartError.photoMissing
             }
 
+            guard !photo.isHiddenFromVideo else {
+                showHiddenPhotoFavoriteNotice()
+                return
+            }
             let nextValue = !photo.isHearted
             photo.isHearted = nextValue
             photo.modifiedAt = Date()
@@ -596,12 +635,20 @@ struct PhotoDetailView: View {
 
     private func toggleCurrentPhotoFavoriteLivePhoto() {
         guard !isPerformingAction, let currentItem, supportsLivePhoto else { return }
+        guard !currentItem.isHiddenFromVideo else {
+            showHiddenPhotoFavoriteNotice()
+            return
+        }
 
         do {
             guard let photo = try viewContext.existingObject(with: currentItem.objectID) as? DailyPhoto else {
                 throw PhotoDetailHeartError.photoMissing
             }
 
+            guard !photo.isHiddenFromVideo else {
+                showHiddenPhotoFavoriteNotice()
+                return
+            }
             let nextValue = !photo.isFavoriteLivePhoto
             photo.isFavoriteLivePhoto = nextValue
             photo.modifiedAt = Date()
@@ -614,6 +661,34 @@ struct PhotoDetailView: View {
         } catch {
             viewContext.rollback()
             actionError = PhotoDetailActionError(message: "Unable to update this Live Photo favorite.")
+        }
+    }
+
+    private func showHiddenPhotoFavoriteNotice() {
+        hiddenFavoriteNoticeID = UUID()
+        UIAccessibility.post(notification: .announcement, argument: HiddenPhotoFavoriteNotice.message)
+    }
+
+    private func toggleCurrentPhotoVideoVisibility() {
+        guard !isPerformingAction, let currentItem else { return }
+
+        do {
+            guard let photo = try viewContext.existingObject(with: currentItem.objectID) as? DailyPhoto else {
+                throw PhotoDetailHeartError.photoMissing
+            }
+
+            let nextValue = !photo.isHiddenFromVideo
+            try PhotoVideoVisibility.setHidden(nextValue, for: [photo], in: viewContext)
+            hiddenFavoriteNoticeID = nil
+
+            if detailItems.indices.contains(selectedIndex),
+               detailItems[selectedIndex].objectID == currentItem.objectID {
+                detailItems[selectedIndex].isHiddenFromVideo = nextValue
+                detailItems[selectedIndex].isHearted = photo.isHearted
+                detailItems[selectedIndex].isFavoriteLivePhoto = photo.isFavoriteLivePhoto
+            }
+        } catch {
+            actionError = PhotoDetailActionError(message: "Unable to update video visibility for this photo.")
         }
     }
 
@@ -792,6 +867,8 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
     let isHearted: Bool
     let isFavoriteLivePhotoEnabled: Bool
     let isFavoriteLivePhoto: Bool
+    let isVideoVisibilityEnabled: Bool
+    let isHiddenFromVideo: Bool
     let saveTitle: String
     let saveImageSystemName: String
     let onClose: () -> Void
@@ -800,6 +877,7 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
     let onShowOnMap: () -> Void
     let onHeart: () -> Void
     let onFavoriteLivePhoto: () -> Void
+    let onToggleVideoVisibility: () -> Void
     let onDelete: () -> Void
 
     func makeUIViewController(context: Context) -> ToolbarConfigViewController {
@@ -819,6 +897,8 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
             isHearted: isHearted,
             isFavoriteLivePhotoEnabled: isFavoriteLivePhotoEnabled,
             isFavoriteLivePhoto: isFavoriteLivePhoto,
+            isVideoVisibilityEnabled: isVideoVisibilityEnabled,
+            isHiddenFromVideo: isHiddenFromVideo,
             saveTitle: saveTitle,
             saveImageSystemName: saveImageSystemName,
             onClose: onClose,
@@ -827,6 +907,7 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
             onShowOnMap: onShowOnMap,
             onHeart: onHeart,
             onFavoriteLivePhoto: onFavoriteLivePhoto,
+            onToggleVideoVisibility: onToggleVideoVisibility,
             onDelete: onDelete
         )
         controller.applyConfigurationIfPossible()
@@ -851,6 +932,8 @@ private final class ToolbarConfigViewController: UIViewController {
         let isHearted: Bool
         let isFavoriteLivePhotoEnabled: Bool
         let isFavoriteLivePhoto: Bool
+        let isVideoVisibilityEnabled: Bool
+        let isHiddenFromVideo: Bool
         let saveTitle: String
         let saveImageSystemName: String
         var onClose: () -> Void
@@ -859,6 +942,7 @@ private final class ToolbarConfigViewController: UIViewController {
         var onShowOnMap: () -> Void
         var onHeart: () -> Void
         var onFavoriteLivePhoto: () -> Void
+        var onToggleVideoVisibility: () -> Void
         var onDelete: () -> Void
 
         static func == (lhs: Configuration, rhs: Configuration) -> Bool {
@@ -873,6 +957,8 @@ private final class ToolbarConfigViewController: UIViewController {
             lhs.isHearted == rhs.isHearted &&
             lhs.isFavoriteLivePhotoEnabled == rhs.isFavoriteLivePhotoEnabled &&
             lhs.isFavoriteLivePhoto == rhs.isFavoriteLivePhoto &&
+            lhs.isVideoVisibilityEnabled == rhs.isVideoVisibilityEnabled &&
+            lhs.isHiddenFromVideo == rhs.isHiddenFromVideo &&
             lhs.saveTitle == rhs.saveTitle &&
             lhs.saveImageSystemName == rhs.saveImageSystemName
         }
@@ -965,6 +1051,12 @@ private final class ToolbarConfigViewController: UIViewController {
         deleteButton.isEnabled = configuration.isDeleteEnabled
         heartButton.isEnabled = configuration.isHeartEnabled
         livePhotoFavoriteButton.isEnabled = configuration.isFavoriteLivePhotoEnabled
+        // Keep the unavailable appearance while allowing taps to explain the restriction.
+        heartButton.alpha = configuration.isHiddenFromVideo && configuration.isHeartEnabled ? 0.35 : 1
+        livePhotoFavoriteButton.alpha = configuration.isHiddenFromVideo && configuration.isFavoriteLivePhotoEnabled ? 0.35 : 1
+        let hiddenFavoriteHint = configuration.isHiddenFromVideo ? "Shows why hidden photos can’t be favorited." : nil
+        heartButton.accessibilityHint = hiddenFavoriteHint
+        livePhotoFavoriteButton.accessibilityHint = hiddenFavoriteHint
 
         if previousConfiguration?.isHearted != configuration.isHearted {
             heartButton.setImage(UIImage(
@@ -989,7 +1081,9 @@ private final class ToolbarConfigViewController: UIViewController {
         if needsInstallation || previousConfiguration?.saveTitle != configuration.saveTitle ||
             previousConfiguration?.saveImageSystemName != configuration.saveImageSystemName ||
             previousConfiguration?.isSaveEnabled != configuration.isSaveEnabled ||
-            previousConfiguration?.isShowOnMapEnabled != configuration.isShowOnMapEnabled {
+            previousConfiguration?.isShowOnMapEnabled != configuration.isShowOnMapEnabled ||
+            previousConfiguration?.isVideoVisibilityEnabled != configuration.isVideoVisibilityEnabled ||
+            previousConfiguration?.isHiddenFromVideo != configuration.isHiddenFromVideo {
             moreButton.menu = moreMenu(configuration: configuration)
         }
 
@@ -1096,7 +1190,17 @@ private final class ToolbarConfigViewController: UIViewController {
             showOnMapAction.attributes = .disabled
         }
 
-        return UIMenu(children: [saveAction, showOnMapAction])
+        let videoVisibilityAction = UIAction(
+            title: configuration.isHiddenFromVideo ? "Unhide from Video" : "Hide from Video",
+            image: UIImage(systemName: configuration.isHiddenFromVideo ? "eye" : "eye.slash")
+        ) { [weak self] _ in
+            self?.configuration?.onToggleVideoVisibility()
+        }
+        if !configuration.isVideoVisibilityEnabled {
+            videoVisibilityAction.attributes = .disabled
+        }
+
+        return UIMenu(children: [saveAction, showOnMapAction, videoVisibilityAction])
     }
 
     private func moreItem() -> UIBarButtonItem {

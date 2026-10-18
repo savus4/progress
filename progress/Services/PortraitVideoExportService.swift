@@ -503,14 +503,13 @@ final class PortraitVideoExportService {
         shouldPause: @escaping @MainActor () -> Bool = { false },
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
     ) async throws -> PortraitVideoExportResponse {
-        guard !photos.isEmpty else { throw PortraitVideoExportError.noPhotos }
-
-        let sortedPhotos = photos.sorted { lhs, rhs in
+        let sortedPhotos = photos.filter { !$0.isHiddenFromVideo }.sorted { lhs, rhs in
             if lhs.captureDate == rhs.captureDate {
                 return lhs.objectID.uriRepresentation().absoluteString < rhs.objectID.uriRepresentation().absoluteString
             }
             return lhs.captureDate < rhs.captureDate
         }
+        guard !sortedPhotos.isEmpty else { throw PortraitVideoExportError.noPhotos }
         var workEstimate = makeWorkEstimate(
             for: sortedPhotos,
             includesFavoriteLivePhotoVideo: configuration.includesFavoriteLivePhotoVideo

@@ -7,6 +7,7 @@ enum PhotoGridFilter: String, CaseIterable, Identifiable {
     case all
     case hearted
     case favoriteLivePhotos
+    case hidden
 
     var id: String { rawValue }
 
@@ -18,6 +19,8 @@ enum PhotoGridFilter: String, CaseIterable, Identifiable {
             return "Hearted"
         case .favoriteLivePhotos:
             return "Favorite Live Photos"
+        case .hidden:
+            return "Hidden"
         }
     }
 
@@ -29,6 +32,8 @@ enum PhotoGridFilter: String, CaseIterable, Identifiable {
             return "heart.fill"
         case .favoriteLivePhotos:
             return "livephoto"
+        case .hidden:
+            return "eye.slash.fill"
         }
     }
 }
@@ -158,7 +163,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     func shouldHeartPhotos(for objectIDs: Set<NSManagedObjectID>) -> Bool {
-        let photos = photos(for: objectIDs)
+        let photos = photos(for: objectIDs).filter { !$0.isHiddenFromVideo }
         guard !photos.isEmpty else { return true }
         return photos.contains { !$0.isHearted }
     }
@@ -185,9 +190,11 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         case .all:
             return nil
         case .hearted:
-            return NSPredicate(format: "isHearted == YES")
+            return NSPredicate(format: "isHearted == YES AND isHiddenFromVideo == NO")
         case .favoriteLivePhotos:
-            return NSPredicate(format: "isFavoriteLivePhoto == YES")
+            return NSPredicate(format: "isFavoriteLivePhoto == YES AND isHiddenFromVideo == NO")
+        case .hidden:
+            return NSPredicate(format: "isHiddenFromVideo == YES")
         }
     }
 
@@ -202,11 +209,11 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         totalPhotoCount = countPhotos(in: context, predicate: nil)
         heartedPhotoCount = countPhotos(
             in: context,
-            predicate: NSPredicate(format: "isHearted == YES")
+            predicate: NSPredicate(format: "isHearted == YES AND isHiddenFromVideo == NO")
         )
         favoriteLivePhotoCount = countPhotos(
             in: context,
-            predicate: NSPredicate(format: "isFavoriteLivePhoto == YES")
+            predicate: NSPredicate(format: "isFavoriteLivePhoto == YES AND isHiddenFromVideo == NO")
         )
     }
 
@@ -235,6 +242,7 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
     let longitude: Double
     let isHearted: Bool
     let isFavoriteLivePhoto: Bool
+    let isHiddenFromVideo: Bool
     let uploadState: PhotoUploadState
     let assetNames: [String]
 
@@ -249,8 +257,9 @@ struct UIKitPhotoGridItem: Identifiable, Equatable {
         locationName = photo.locationName
         latitude = photo.latitude
         longitude = photo.longitude
-        isHearted = photo.isHearted
-        isFavoriteLivePhoto = photo.isFavoriteLivePhoto
+        isHearted = photo.isHearted && !photo.isHiddenFromVideo
+        isFavoriteLivePhoto = photo.isFavoriteLivePhoto && !photo.isHiddenFromVideo
+        isHiddenFromVideo = photo.isHiddenFromVideo
         uploadState = photo.uploadState
         assetNames = [
             fullImageAssetName,
@@ -371,6 +380,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     weak var delegate: PhotoGridCollectionViewControllerDelegate?
 
     private let collectionView: UICollectionView
+    private weak var navigationScrollViewOwner: UIViewController?
     private var dataSource: UICollectionViewDiffableDataSource<UIKitPhotoGridSection, NSManagedObjectID>!
     private var items: [UIKitPhotoGridItem] = []
     private var itemsByID: [NSManagedObjectID: UIKitPhotoGridItem] = [:]
@@ -558,6 +568,26 @@ final class PhotoGridCollectionViewController: UIViewController {
         stopSelectionAutoScroll()
         cancelAllThumbnailTasks()
         thumbnailDataProvider.purge()
+    }
+
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+
+        // Reconnect large-title scrolling when SwiftUI mounts a new grid after map mode.
+        setContentScrollView(collectionView, for: .top)
+        navigationScrollViewOwner = navigationController?.topViewController
+        navigationScrollViewOwner?.setContentScrollView(collectionView, for: .top)
+    }
+
+    override func willMove(toParent parent: UIViewController?) {
+        if parent == nil {
+            if let owner = navigationScrollViewOwner,
+               owner.contentScrollView(for: .top) === collectionView {
+                owner.setContentScrollView(nil, for: .top)
+            }
+            navigationScrollViewOwner = nil
+        }
+        super.willMove(toParent: parent)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -1548,6 +1578,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     private let selectionBadgeImageView = UIImageView()
     private let heartBadgeImageView = UIImageView()
     private let livePhotoFavoriteBadgeImageView = UIImageView()
+    private let hiddenFromVideoBadgeImageView = UIImageView()
     private let statusLabel = PaddingLabel()
 
     override init(frame: CGRect) {
@@ -1568,6 +1599,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         selectionBadgeImageView.isHidden = true
         heartBadgeImageView.isHidden = true
         livePhotoFavoriteBadgeImageView.isHidden = true
+        hiddenFromVideoBadgeImageView.isHidden = true
     }
 
     func configure(
@@ -1588,6 +1620,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
 
         heartBadgeImageView.isHidden = !item.isHearted
         livePhotoFavoriteBadgeImageView.isHidden = !item.isFavoriteLivePhoto
+        hiddenFromVideoBadgeImageView.isHidden = !item.isHiddenFromVideo
 
         let badge: (text: String, systemName: String, backgroundColor: UIColor, foregroundColor: UIColor)?
         if showsUploadStatus {
@@ -1654,6 +1687,19 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         livePhotoFavoriteBadgeImageView.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(livePhotoFavoriteBadgeImageView)
 
+        hiddenFromVideoBadgeImageView.image = UIImage(
+            systemName: "eye.slash.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        )
+        hiddenFromVideoBadgeImageView.tintColor = .white
+        hiddenFromVideoBadgeImageView.contentMode = .center
+        hiddenFromVideoBadgeImageView.backgroundColor = UIColor.black.withAlphaComponent(0.62)
+        hiddenFromVideoBadgeImageView.layer.cornerRadius = 13
+        hiddenFromVideoBadgeImageView.isHidden = true
+        hiddenFromVideoBadgeImageView.accessibilityIdentifier = "photoGridHiddenFromVideoBadge"
+        hiddenFromVideoBadgeImageView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(hiddenFromVideoBadgeImageView)
+
         statusLabel.font = .preferredFont(forTextStyle: .caption2).bold()
         statusLabel.accessibilityIdentifier = "photoGridUploadBadge"
         statusLabel.layer.cornerRadius = 12
@@ -1686,6 +1732,11 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
             livePhotoFavoriteBadgeImageView.widthAnchor.constraint(equalToConstant: 22),
             livePhotoFavoriteBadgeImageView.heightAnchor.constraint(equalToConstant: 22),
 
+            hiddenFromVideoBadgeImageView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 7),
+            hiddenFromVideoBadgeImageView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -7),
+            hiddenFromVideoBadgeImageView.widthAnchor.constraint(equalToConstant: 26),
+            hiddenFromVideoBadgeImageView.heightAnchor.constraint(equalToConstant: 26),
+
             statusLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
             statusLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8)
         ])
@@ -1698,6 +1749,9 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         }
         if item.isFavoriteLivePhoto {
             values.append("Favorite Live Photo")
+        }
+        if item.isHiddenFromVideo {
+            values.append("Hidden from video")
         }
         return values.isEmpty ? nil : values.joined(separator: ", ")
     }

@@ -202,12 +202,15 @@ struct PhotoRouteMapView: View {
                 }
             }
             Spacer(minLength: 16)
-            Button("Settings", systemImage: "gearshape", action: onOpenSettings)
-                .labelStyle(.iconOnly)
-                .font(.title3)
-                .frame(width: 44, height: 44)
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
+            Button(action: onOpenSettings) {
+                Label("Settings", systemImage: "gearshape")
+                    .labelStyle(.iconOnly)
+                    .font(.title3)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .accessibilityIdentifier("mapSettingsButton")
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: shouldShowCompass)
         .padding(.top, 12)

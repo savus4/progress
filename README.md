@@ -22,7 +22,7 @@
 
 ### Introduction
 
-- First launch opens a short introduction with a portrait video preview, followed by highlights for large libraries, Live Photos, saved locations, and private iCloud sync.
+- First launch opens a short introduction with a portrait video preview, followed by highlights for large libraries, Live Photos, video creation, saved locations, and privacy.
 - Swipe between the two pages or use Continue to advance. The page indicator and Get Started action follow the current page.
 - The preview grows to fit the available space, and the video animates in when playback is ready. Feature content is centered vertically, with a separate entrance for each row and scrolling for longer text. Get Started completes the intro's exit before opening the library; Reduce Motion uses short fades.
 - The video entrance starts after 0.7 seconds, followed by the title, subtitle, page indicator, and button, using slower spring animations. Soft background particles stay still with Reduce Motion and pause while the app is inactive.
@@ -35,7 +35,9 @@
 - Empty state includes a direct “Take Your First Photo” action.
 - Existing photos appear in an adaptive grid.
 - Tapping opens a paged fullscreen viewer.
-- Selection mode supports bulk export and bulk delete.
+- Selection mode supports bulk export, bulk delete, and hiding or unhiding photos from videos.
+- Hidden photos remain in the grid with a small eye-slash badge. Hiding clears both favorite types; hidden photos cannot be favorited until they are unhidden.
+- The bottom-left filter menu includes Hidden to show only photos excluded from videos.
 - Photos show status badges such as uploading, retrying, paused, or downloading.
 
 ### Camera
@@ -52,6 +54,8 @@
 - Still photos can be shared directly.
 - Live Photos can be shared as paired asset files.
 - Photos can be saved back to the system Photos library.
+- The ellipsis menu can hide or unhide the current photo from videos.
+- Trying to favorite a hidden photo shows a five-second explanation with instructions to unhide it first.
 - An info sheet shows timestamps, location name, coordinates, and a map when available.
 
 ### Settings
@@ -95,7 +99,10 @@ The `DailyPhoto` Core Data entity currently stores:
 - `createdAt`
 - `modifiedAt`
 - `importFingerprint`
+- `isHearted`, `isFavoriteLivePhoto`, and `isHiddenFromVideo`
 - upload bookkeeping fields such as `uploadStateRaw`, `uploadAttemptCount`, `uploadErrorMessage`, and `uploadRetryAfter`
+
+`progressVideoVisibility` is the current Core Data model version. The original model remains bundled for lightweight migration; existing and newly captured/imported photos default to inclusion in videos. `isHiddenFromVideo` syncs with the photo metadata and excludes both still and Live Photo video frames, including paused exports. Before release, deploy the additive `CD_isHiddenFromVideo` field on `CD_DailyPhoto` to the production CloudKit schema.
 
 ### Sync Model
 

@@ -110,6 +110,8 @@ final class PersistenceController: ObservableObject {
             NSPersistentCloudKitContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
         }
         for description in container.persistentStoreDescriptions {
+            description.shouldMigrateStoreAutomatically = true
+            description.shouldInferMappingModelAutomatically = true
             description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
             description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         }
