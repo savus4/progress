@@ -67,6 +67,23 @@
 - iCloud sync status and failed upload retry action.
 - Delete by date range.
 - Delete all local photo records and assets.
+- Optional snack-themed tips at the bottom: chips (US$3), fries (US$5), and custom tips from US$10 to US$100 in US$10 steps. The App Store supplies localized prices and currency. Verified tips show a thank-you screen; cancellation, pending approval, and errors never show success.
+
+#### In-app purchase setup
+
+Create these **consumable** products in App Store Connect for `me.riepl.progress`, with the United States as the base storefront:
+
+| Product ID | US price |
+| --- | --- |
+| `me.riepl.progress.tip.chips` | $3.00 |
+| `me.riepl.progress.tip.fries` | $5.00 |
+| `me.riepl.progress.tip.custom` | $10.00 per unit |
+
+Custom tips buy 1–10 units of the custom product in a single Apple confirmation sheet (`Product.PurchaseOption.quantity` has a ten-unit maximum). They are one-time tips, with no feature unlock or subscription. Use the exact base prices above rather than $2.99/$4.99/$9.99. Complete the paid-app agreement, banking, tax, product availability/localization, and App Review setup in App Store Connect before release. Product creation and approval happen outside this repository.
+
+The shared Debug scheme selects `progress/Resources/Tips.storekit` under **Edit Scheme → Run → Options → StoreKit Configuration** for local testing. Set it to **None** when testing actual App Store Connect products in Sandbox. The tests create StoreKit Test sessions from the bundled configuration. The app uses SwiftUI's `PurchaseAction`, verifies signed transactions, finishes consumables, and listens for both transaction updates and unfinished transactions from launch.
+
+API references: [PurchaseAction](https://developer.apple.com/documentation/storekit/purchaseaction), [quantity](https://developer.apple.com/documentation/storekit/product/purchaseoption/quantity(_:)), and [transaction price (includes quantity)](https://developer.apple.com/documentation/storekit/transaction/price).
 
 Reminders skip the rest of the local calendar day when a saved photo has today's capture date, including imported and synced photos. Unsaved captures and older imports do not count. Turning the toggle off restores every configured reminder. The schedule refreshes after library changes, on app activation, and when the day or system time changes.
 
@@ -170,6 +187,18 @@ The app is configured to use the default CloudKit container:
 - `iCloud.$(CFBundleIdentifier)`
 
 ## Testing
+
+### Simulator example library
+
+Debug simulator builds automatically show the local examples in `SimulatorFixtures/Photos/`.
+The current fixture set contains 51 stills, including 49 Live Photos. Capture dates and
+embedded locations are preserved. Missing examples are restored on launch without
+duplicating existing ones or resetting favorites. The simulator uses a separate local
+store with iCloud disabled. Personal fixtures are Git-ignored, and device/Release
+builds exclude both the media and the seeding code. UI tests keep their empty stores.
+
+Set `SIMULATOR_EXAMPLE_PHOTOS=0` in the Run environment to disable this mode.
+See [SimulatorFixtures/README.md](SimulatorFixtures/README.md) to replace the examples.
 
 - `progressTests` uses Swift Testing for service and model coverage.
 - `progressUITests` includes a mocked capture flow that verifies saving from camera preview back into the grid.

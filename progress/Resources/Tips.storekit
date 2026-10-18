@@ -1,0 +1,64 @@
+{
+  "identifier" : "7F087859-484A-4D78-A8E3-C3D1554982E9",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "3.00",
+      "familyShareable" : false,
+      "internalID" : "10300001",
+      "localizations" : [
+        {
+          "description" : "A little snack to support Work in Progress. Thank you!",
+          "displayName" : "A bag of chips",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "me.riepl.progress.tip.chips",
+      "referenceName" : "Chips Tip",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "5.00",
+      "familyShareable" : false,
+      "internalID" : "10500001",
+      "localizations" : [
+        {
+          "description" : "A side of kindness to support Work in Progress. Thank you!",
+          "displayName" : "A side of fries",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "me.riepl.progress.tip.fries",
+      "referenceName" : "Fries Tip",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "10.00",
+      "familyShareable" : false,
+      "internalID" : "11000001",
+      "localizations" : [
+        {
+          "description" : "A one-time tip to support Work in Progress. Thank you!",
+          "displayName" : "A little extra support",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "me.riepl.progress.tip.custom",
+      "referenceName" : "Custom Tip Unit",
+      "type" : "Consumable"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "",
+    "_developerTeamID" : "",
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : []
+  },
+  "subscriptionGroups" : [],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

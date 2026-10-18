@@ -87,6 +87,8 @@ struct NotificationSettingsView: View {
                         Label("Storage Management", systemImage: "internaldrive")
                     }
                 }
+
+                TipJarSection()
             }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let bottomEdge = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom

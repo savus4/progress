@@ -1,0 +1,51 @@
+{
+  "created": "2026-10-18",
+  "assets": [
+    {
+      "placement": "Product page header",
+      "file": "header.png",
+      "width": 3840,
+      "height": 1646,
+      "format": "PNG",
+      "color_mode": "RGB",
+      "profile": "sRGB",
+      "alpha": false,
+      "source_dimensions": [
+        1916,
+        821
+      ],
+      "export_resampling": "Lanczos; source raster resized, not native 4K rendering",
+      "review_safe_rectangle": [
+        1100,
+        496,
+        2740,
+        1151
+      ],
+      "bytes": 3206816,
+      "sha256": "3066c88afb1af30696b88e9d423dba72cc3d925698f4d8e9e750ec442af98fa0"
+    },
+    {
+      "placement": "Search results",
+      "file": "search-results.png",
+      "width": 1920,
+      "height": 1280,
+      "format": "PNG",
+      "color_mode": "RGB",
+      "profile": "sRGB",
+      "alpha": false,
+      "source_dimensions": [
+        1536,
+        1024
+      ],
+      "export_resampling": "Lanczos; source raster resized, not native 4K rendering",
+      "review_safe_rectangle": [
+        420,
+        384,
+        1500,
+        896
+      ],
+      "bytes": 1584094,
+      "sha256": "a73d8bbc1ae06b94c08853e3a604bd0d0bec44dc77cdcfc04f715e92f9e909d7"
+    }
+  ]
+}

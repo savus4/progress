@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Work in Progress · App Store creatives</title>
+<style>
+  :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #101722; color: #eff5ff; }
+  * { box-sizing: border-box; }
+  body { max-width: 1320px; margin: 0 auto; padding: 48px 24px 72px; }
+  h1 { margin: 4px 0 12px; font-size: clamp(30px, 4vw, 48px); letter-spacing: -.04em; }
+  p, figcaption { color: #adbed3; line-height: 1.6; }
+  a { color: #90d6ff; }
+  .eyebrow { color: #90d6ff; letter-spacing: .12em; font-size: 12px; text-transform: uppercase; }
+  section { margin-top: 42px; }
+  h2 { margin-bottom: 6px; letter-spacing: -.02em; }
+  figure { margin: 18px 0; }
+  img { display: block; width: 100%; border-radius: 12px; border: 1px solid #354153; }
+  video { display: block; width: 100%; max-width: 440px; max-height: 80vh; margin: 20px auto; background: #000; border-radius: 14px; }
+  video.landscape { max-width: 100%; max-height: none; }
+  figcaption { margin-top: 10px; font-size: 14px; }
+  details { margin: 20px 0; padding: 18px; background: #1a2432; border-radius: 12px; }
+  summary { cursor: pointer; font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .note { max-width: 900px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } body { padding: 28px 16px; } }
+</style>
+<body>
+  <span class="eyebrow">App Store creative assets · English · 18 October 2026</span>
+  <h1>Work in Progress</h1>
+  <p class="note">Promotional videos with changing copy and the original intro footage, plus matching still artwork. The yellow outlines in review images mark the art safe areas measured from Apple's templates.</p>
+  <p><a href="../work-in-progress-app-store-creatives.zip" download>Download both upload files</a> · <a href="README.md">Preparation notes</a> · <a href="prompts.md">Imagegen prompts</a></p>
+  <section id="promotional-video">
+    <h2>Promotional video</h2>
+    <p>17 seconds · 886 × 1920 · 30 fps · silent · changing promotional copy</p>
+    <video controls playsinline preload="metadata" poster="../PromotionalVideo/portrait-poster.png" aria-label="Work in Progress promotional video">
+      <source src="../PromotionalVideo/work-in-progress-portrait.mp4" type="video/mp4">
+    </video>
+    <p><a href="../PromotionalVideo/work-in-progress-portrait.mp4" download>Download portrait MP4</a> · <a href="../PromotionalVideo/portrait-poster.png" download>Poster</a> · <a href="../PromotionalVideo/README.md">Video preparation notes</a></p>
+    <details><summary>Header and search video exports</summary>
+      <h3>Product page header · 3840 × 1646</h3>
+      <video class="landscape" controls playsinline preload="metadata" poster="../PromotionalVideo/header-poster.png" aria-label="Product page header promotional video">
+        <source src="../PromotionalVideo/work-in-progress-header.mp4" type="video/mp4">
+      </video>
+      <p><a href="../PromotionalVideo/work-in-progress-header.mp4" download>Download header MP4</a></p>
+      <h3>Search results · 1920 × 1280</h3>
+      <video class="landscape" controls playsinline preload="metadata" poster="../PromotionalVideo/search-poster.png" aria-label="Search promotional video">
+        <source src="../PromotionalVideo/work-in-progress-search.mp4" type="video/mp4">
+      </video>
+      <p><a href="../PromotionalVideo/work-in-progress-search.mp4" download>Download search MP4</a></p>
+    </details>
+    <details><summary>Previous app-interface recording · 29.4 seconds</summary>
+      <video controls playsinline preload="none" poster="../AppPreview/poster.png" aria-label="Previous app interface video draft">
+        <source src="../AppPreview/work-in-progress-app-preview.mp4" type="video/mp4">
+      </video>
+    </details>
+  </section>
+  <section>
+    <h2>Product page header</h2>
+    <p>3840 × 1646 · RGB PNG · sRGB · no alpha</p>
+    <figure><a href="header.png" download><img src="header.png" alt="One photo a day, beside three daily portrait cards on a blue background."></a><figcaption><a href="header.png" download>header.png</a> — complete upload canvas</figcaption></figure>
+    <details><summary>Review the header crop</summary><div class="two">
+      <figure><img src="Review/header-safe-area.png" alt="Header with a yellow safe-area outline."><figcaption>Safe area marked on the full canvas.</figcaption></figure>
+      <figure><img src="Review/header-safe-crop.png" alt="Central header crop retains the full headline and all three faces."><figcaption>Central safe crop: headline and all three faces remain visible.</figcaption></figure>
+    </div></details>
+  </section>
+  <section>
+    <h2>Search results</h2>
+    <p>1920 × 1280 · RGB PNG · sRGB · no alpha</p>
+    <figure><a href="search-results.png" download><img src="search-results.png" alt="One photo a day, beside the Work in Progress portrait library on a blue background."></a><figcaption><a href="search-results.png" download>search-results.png</a> — complete upload canvas</figcaption></figure>
+    <details><summary>Review the search crop</summary><div class="two">
+      <figure><img src="Review/search-results-safe-area.png" alt="Search artwork with a yellow safe-area outline."><figcaption>Safe area marked on the full canvas.</figcaption></figure>
+      <figure><img src="Review/search-results-safe-crop.png" alt="Central search crop retains the headline, app name, and key photo rows."><figcaption>Central safe crop: headline, app name, and key portrait rows remain visible.</figcaption></figure>
+    </div></details>
+  </section>
+  <p class="note">Still artwork was composed with imagegen and uses generated composites. The new promotional videos combine custom graphics and type with the original intro footage directly. Final header and search placement can be inspected in App Store Connect's Preview control.</p>
+</body>
+</html>

@@ -16,6 +16,7 @@ struct progressApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var persistenceController = PersistenceController.shared
+    @State private var tipStore = TipStore()
     // Snapshot at launch so scheduling a replay in Settings never interrupts this session.
     @State private var showsIntroduction = !UserDefaults.standard.bool(forKey: IntroductionPreferences.completedKey)
 
@@ -42,6 +43,10 @@ struct progressApp: App {
                 }
             }
             .statusBarHidden(showsIntroduction)
+            .environment(tipStore)
+            .task {
+                await tipStore.observeTransactions()
+            }
             .animation(.easeOut(duration: 0.2), value: showsIntroduction)
             .task(id: persistenceController.loadState) {
                 guard persistenceController.isLoaded else { return }
@@ -185,6 +190,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ = CloudSyncMonitor.shared
         DailyReminderNotificationService.shared.start(context: PersistenceController.shared.makeBackgroundContext())
 
+        #if DEBUG && targetEnvironment(simulator)
+        // Keep normal-library upload journals, originals, and maintenance untouched.
+        if SimulatorExampleLibrary.isEnabled {
+            Task { await ICloudAvailabilityMonitor.shared.refresh() }
+            return
+        }
+        #endif
+
         Task {
             await ICloudAvailabilityMonitor.shared.refresh()
             let context = PersistenceController.shared.makeBackgroundContext()
@@ -212,6 +225,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func handleEnteredBackground() {
+        #if DEBUG && targetEnvironment(simulator)
+        if SimulatorExampleLibrary.isEnabled { return }
+        #endif
         PhotoOfflineCoordinator.shared.scheduleBackgroundProcessing()
         guard let application else { return }
         Task {
@@ -233,6 +249,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         Task {
             guard PersistenceController.shared.isLoaded else { return }
             await ICloudAvailabilityMonitor.shared.refresh()
+            #if DEBUG && targetEnvironment(simulator)
+            if SimulatorExampleLibrary.isEnabled { return }
+            #endif
             PhotoOfflineCoordinator.shared.requestReconciliation()
             await PhotoUploadService.shared.enqueuePendingUploads(
                 expeditingRetries: true,

@@ -890,6 +890,9 @@ final class PhotoStorageService {
     }
 
     private func recoverLegacyOriginals(for original: PhotoSnapshot, context: NSManagedObjectContext?) async throws -> PhotoSnapshot {
+        #if DEBUG && targetEnvironment(simulator)
+        if SimulatorExampleLibrary.assetURL(named: original.fullImageAssetName) != nil { return original }
+        #endif
         var snapshot = original
         let photoID = snapshot.id ?? UUID()
         let wasUploaded = cloudKitService.uploadStateStore.entry(for: photoID)?.state == .uploaded

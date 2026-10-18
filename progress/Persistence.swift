@@ -104,7 +104,13 @@ final class PersistenceController: ObservableObject {
         let shouldUseInMemory = inMemory
             || processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
             || processInfo.environment["UI_TEST_IN_MEMORY_STORE"] == "1"
-        container = if shouldUseInMemory {
+        let usesExampleLibrary: Bool
+        #if DEBUG && targetEnvironment(simulator)
+        usesExampleLibrary = !shouldUseInMemory && SimulatorExampleLibrary.isEnabled
+        #else
+        usesExampleLibrary = false
+        #endif
+        container = if shouldUseInMemory || usesExampleLibrary {
             NSPersistentContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
         } else {
             NSPersistentCloudKitContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
@@ -118,6 +124,12 @@ final class PersistenceController: ObservableObject {
         if shouldUseInMemory {
             container.persistentStoreDescriptions.first!.type = NSInMemoryStoreType
         }
+        #if DEBUG && targetEnvironment(simulator)
+        if usesExampleLibrary {
+            container.persistentStoreDescriptions.first!.url = NSPersistentContainer.defaultDirectoryURL()
+                .appendingPathComponent("SimulatorExamples.sqlite")
+        }
+        #endif
         container.viewContext.name = "ViewContext"
         container.viewContext.mergePolicy = NSMergePolicy(
             merge: .mergeByPropertyObjectTrumpMergePolicyType
@@ -131,10 +143,12 @@ final class PersistenceController: ObservableObject {
     }
 
     func retryLoading() {
-        guard !isLoadingStore, container.persistentStoreCoordinator.persistentStores.isEmpty else {
-            return
+        guard !isLoadingStore else { return }
+        if container.persistentStoreCoordinator.persistentStores.isEmpty {
+            loadPersistentStores()
+        } else {
+            prepareLoadedStore()
         }
-        loadPersistentStores()
     }
 
     private func loadPersistentStores() {
@@ -163,9 +177,33 @@ final class PersistenceController: ObservableObject {
             logger.error("persistent-store-load-failed error=\(firstStoreLoadError.localizedDescription, privacy: .public)")
             loadState = .failed(firstStoreLoadError.localizedDescription)
         } else {
-            logger.log("persistent-store-load-succeeded")
-            loadState = .loaded
+            prepareLoadedStore()
         }
+    }
+
+    private func prepareLoadedStore() {
+        #if DEBUG && targetEnvironment(simulator)
+        if container.persistentStoreDescriptions.first?.url?.lastPathComponent == "SimulatorExamples.sqlite",
+           let resourceURL = SimulatorExampleLibrary.resourceURL {
+            isLoadingStore = true
+            loadState = .loading
+            let context = makeBackgroundContext()
+            Task {
+                defer { isLoadingStore = false }
+                do {
+                    try await SimulatorExampleLibrary.seed(in: context, from: resourceURL)
+                    loadState = .loaded
+                    logger.log("simulator-examples-loaded")
+                } catch {
+                    logger.error("simulator-examples-failed error=\(error.localizedDescription, privacy: .public)")
+                    loadState = .failed(error.localizedDescription)
+                }
+            }
+            return
+        }
+        #endif
+        logger.log("persistent-store-load-succeeded")
+        loadState = .loaded
     }
 
     func makeBackgroundContext() -> NSManagedObjectContext {

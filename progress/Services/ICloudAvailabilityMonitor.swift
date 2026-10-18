@@ -25,6 +25,9 @@ final class ICloudAvailabilityMonitor: ObservableObject {
     }
 
     var isAvailableForCloudOperations: Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        if SimulatorExampleLibrary.isEnabled { return false }
+        #endif
         if case .unavailable = state {
             return false
         }
@@ -71,6 +74,12 @@ final class ICloudAvailabilityMonitor: ObservableObject {
     }
 
     func refresh() async {
+        #if DEBUG && targetEnvironment(simulator)
+        if SimulatorExampleLibrary.isEnabled {
+            state = .unavailable("Simulator example photos use a separate local library. iCloud sync is disabled.")
+            return
+        }
+        #endif
         if let testingOverrideState {
             state = testingOverrideState
             return

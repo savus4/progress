@@ -186,6 +186,9 @@ final class CloudKitService {
     ) async throws -> URL {
         try Task.checkCancellation()
         guard !deletedAssetNames.contains(assetName) else { throw CloudKitError.assetNotFound }
+        #if DEBUG && targetEnvironment(simulator)
+        if let exampleURL = SimulatorExampleLibrary.assetURL(named: assetName) { return exampleURL }
+        #endif
         if let stagedURL = stagedAssetURL(named: assetName) {
             return stableReadableURL(for: stagedURL, assetName: assetName)
         }
@@ -480,6 +483,9 @@ final class CloudKitService {
     }
 
     nonisolated func isAssetAvailableForImmediateRead(named assetName: String) -> Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        if SimulatorExampleLibrary.assetURL(named: assetName) != nil { return true }
+        #endif
         let fileManager = FileManager.default
         let stagedURL = stagingDirectoryURL.appendingPathComponent(assetName)
         let readableURL = temporaryReadableAssetsDirectoryURL.appendingPathComponent(assetName)
