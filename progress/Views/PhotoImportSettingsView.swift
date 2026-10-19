@@ -39,6 +39,8 @@ struct PhotoImportSettingsView: View {
                 }
                 .disabled(photoImporter.isImporting)
 
+                importGuidanceCard
+
                 if let statusMessage = photoImporter.statusMessage {
                     Text(statusMessage)
                         .font(.footnote)
@@ -98,6 +100,64 @@ struct PhotoImportSettingsView: View {
                 }
             }
         }
+    }
+
+    private var importGuidanceCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            importGuidanceRow(
+                systemImage: "livephoto",
+                title: "Live Photos",
+                detail: "\"Import Photos\" and \"Import Album\" keep Live Photos, great for video creation.",
+                tint: .blue
+            )
+
+            Divider()
+
+            importGuidanceRow(
+                systemImage: "photo",
+                title: "Private Import",
+                detail: "\"Import Privately\" saves still images only, and you can import without full Photos library access.",
+                tint: .orange
+            )
+
+            Divider()
+
+            importGuidanceRow(
+                systemImage: "lock.shield",
+                title: "Your Data",
+                detail: "Photos stay on this device and, when enabled, in your iCloud.",
+                tint: .green
+            )
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.secondary.opacity(0.08))
+        )
+    }
+
+    private func importGuidanceRow(
+        systemImage: String,
+        title: String,
+        detail: String,
+        tint: Color
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 16)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.footnote.weight(.semibold))
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private func presentAlbumImportSheet() {
