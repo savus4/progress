@@ -25,6 +25,7 @@ final class ICloudAvailabilityMonitor: ObservableObject {
     }
 
     var isAvailableForCloudOperations: Bool {
+        guard PhotoStorageModeStore.shared.mode.allowsCloudWrites else { return false }
         #if DEBUG && targetEnvironment(simulator)
         if SimulatorExampleLibrary.isEnabled { return false }
         #endif
@@ -36,6 +37,10 @@ final class ICloudAvailabilityMonitor: ObservableObject {
 
     var isLocalModeActive: Bool {
         !isAvailableForCloudOperations
+    }
+
+    func storagePreferenceDidChange() {
+        NotificationCenter.default.post(name: Self.availabilityDidChangeNotification, object: nil)
     }
 
     var unavailableReason: String? {

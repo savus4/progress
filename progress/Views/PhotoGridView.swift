@@ -29,7 +29,8 @@ struct PhotoGridView: View {
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
 
     @State private var showingCamera = false
-    @State private var showingNotificationSettings = false
+    @State private var settingsDestination: PhotoSettingsDestination?
+    @State private var storage = PhotoStorageCoordinator.shared
     @State private var photoDetailPresentation: PhotoDetailPresentation?
     @State private var activePhotoDetailObjectID: NSManagedObjectID?
     @State private var pendingDetailDismissObjectID: NSManagedObjectID?
@@ -78,7 +79,7 @@ struct PhotoGridView: View {
             ZStack {
                     if !dataController.hasAnyPhotos {
                         VStack(spacing: 20) {
-                            if cloudSyncMonitor.isMetadataImportActive {
+                            if !storage.isLocalOnly && cloudSyncMonitor.isMetadataImportActive {
                                 photoLibraryDownloadStatus
                             } else {
                                 Image(systemName: "camera.fill")
@@ -101,9 +102,23 @@ struct PhotoGridView: View {
                                     .background(.blue.gradient, in: Capsule())
                                     .foregroundStyle(.white)
                             }
-                            .disabled(photoImporter.isImporting)
+                            .disabled(photoImporter.isImporting || storage.mode.isMigrating)
                             .accessibilityIdentifier("emptyStateCaptureButton")
                             .padding(.top)
+
+                            Button {
+                                settingsDestination = .photoStorage
+                            } label: {
+                                Label(storage.isLocalOnly
+                                      ? "Photos stay on this device. Change photo storage in Settings."
+                                      : "Photos upload privately to iCloud. You can change this in Settings.",
+                                      systemImage: storage.isLocalOnly ? "iphone" : "icloud")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("emptyStatePhotoStorageLink")
                         }
                         .padding(.horizontal, 28)
                     } else if isMapModeActive {
@@ -116,7 +131,7 @@ struct PhotoGridView: View {
                             mapVisibleRegionSnapshot: $mapVisibleRegionSnapshot,
                             focusRequest: mapFocusRequest,
                             onOpenPhoto: openPhotoDetail,
-                            onOpenSettings: { showingNotificationSettings = true }
+                            onOpenSettings: { settingsDestination = .general }
                         )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if dataController.isEmpty {
@@ -164,6 +179,7 @@ struct PhotoGridView: View {
                             }
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .disabled(storage.mode.isMigrating)
                         .ignoresSafeArea(.container, edges: [.top, .bottom])
                         .overlay(alignment: .top) {
                             if isScrollDateVisible, let visibleScrollDate {
@@ -176,7 +192,25 @@ struct PhotoGridView: View {
 
             }
             .overlay(alignment: .bottom) {
-                if dataController.hasAnyPhotos, !isSelectionMode, !isMapModeActive {
+                if storage.mode.isMigrating {
+                    Button {
+                        settingsDestination = .photoStorage
+                    } label: {
+                        HStack(spacing: 10) {
+                            if storage.isWorking { ProgressView().controlSize(.small) }
+                            Text(storage.errorMessage == nil ? "Switching photo storage…" : "Photo storage needs attention")
+                                .font(.subheadline)
+                            Image(systemName: "chevron.right").font(.caption)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(.regularMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("photoStorageSwitchStatusButton")
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 20)
+                } else if dataController.hasAnyPhotos, !isSelectionMode, !isMapModeActive {
                     floatingCaptureButton
                         .padding(.bottom, 20)
                 }
@@ -315,7 +349,7 @@ struct PhotoGridView: View {
                             .disabled(!dataController.hasAnyPhotos || photoImporter.isImporting)
                         }
 
-                        Button(action: { showingNotificationSettings = true }) {
+                        Button(action: { settingsDestination = .general }) {
                             Image(systemName: "gearshape")
                                 .font(.title3)
                         }
@@ -329,8 +363,8 @@ struct PhotoGridView: View {
                     gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal
                 )
             }
-            .sheet(isPresented: $showingNotificationSettings) {
-                NotificationSettingsView()
+            .sheet(item: $settingsDestination) { destination in
+                NotificationSettingsView(opensPhotoStorage: destination == .photoStorage)
             }
             .sheet(item: $portraitVideoExportPresentation) { presentation in
                 PortraitVideoExportSheet(
@@ -373,6 +407,7 @@ struct PhotoGridView: View {
             dataController.setFilter(newValue)
         }
         .onChange(of: dataController.changeToken) { _, _ in
+            selectedPhotoIDs.formIntersection(dataController.itemsSnapshot.map(\.objectID))
             if pendingDetailDismissObjectID != nil, dataController.isEmpty {
                 finalizePhotoDetailDismissal()
             }
@@ -733,6 +768,10 @@ struct PhotoGridView: View {
     }
 
     private func openCamera() {
+        guard !storage.mode.isMigrating else {
+            exportAlertMessage = "Let the photo storage switch finish before capturing. Check Photo Storage in Settings."
+            return
+        }
         guard !photoImporter.isImporting else {
             exportAlertMessage = "Photo import is still running. Wait for it to finish before capturing."
             return

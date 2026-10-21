@@ -46,6 +46,7 @@ final class CloudKitService {
 
     private let container: CKContainer
     private let privateDatabase: CKDatabase
+    private let recordZoneID: CKRecordZone.ID
     private let systemCloudKitCacheDirectoryURL: URL
     nonisolated private let stagingDirectoryURL: URL
     nonisolated private let temporaryReadableAssetsDirectoryURL: URL
@@ -57,6 +58,7 @@ final class CloudKitService {
     private let network: PhotoNetworkMonitor?
     nonisolated let offlineStore: PhotoOfflineStore
     let offlineSettingsDefaults: UserDefaults
+    let storageModeStore: PhotoStorageModeStore
     private var offlineDeletionTasks: [String: Task<Void, Never>] = [:]
     private var deletedAssetNames: Set<String> = []
     private var activeAssetUploads: [String: Int] = [:]
@@ -77,10 +79,13 @@ final class CloudKitService {
         offlineStore: PhotoOfflineStore? = nil,
         offlineSettingsDefaults: UserDefaults = .standard,
         assetMetadataLoader: (@MainActor @Sendable (String) async throws -> PhotoAssetMetadata)? = nil,
-        networkMonitor: PhotoNetworkMonitor? = nil
+        networkMonitor: PhotoNetworkMonitor? = nil,
+        storageModeStore: PhotoStorageModeStore = .shared,
+        recordZoneID: CKRecordZone.ID = CKRecordZone.default().zoneID
     ) {
         container = CKContainer(identifier: CloudKitConfiguration.containerIdentifier)
         privateDatabase = container.privateCloudDatabase
+        self.recordZoneID = recordZoneID
         systemCloudKitCacheDirectoryURL = Self.makeSystemCloudKitCacheDirectoryURL()
         self.stagingDirectoryURL = stagingDirectoryURL ?? Self.makeStagingDirectoryURL()
         self.temporaryReadableAssetsDirectoryURL = temporaryReadableAssetsDirectoryURL ?? Self.makeTemporaryReadableAssetsDirectoryURL()
@@ -97,6 +102,7 @@ final class CloudKitService {
         self.assetMetadataLoader = assetMetadataLoader
         network = networkMonitor ?? (assetURLLoader == nil ? .shared : nil)
         self.offlineSettingsDefaults = offlineSettingsDefaults
+        self.storageModeStore = storageModeStore
         self.offlineStore = offlineStore ?? PhotoOfflineStore(directoryURL: stagingDirectoryURL.map {
             $0.deletingLastPathComponent().appendingPathComponent("OfflinePhotoOriginals", isDirectory: true)
         } ?? PhotoOfflineStore.defaultDirectoryURL)
@@ -218,6 +224,10 @@ final class CloudKitService {
             }
         }
 
+        guard storageModeStore.mode != .local, storageModeStore.mode != .preparingUpload else {
+            throw CloudKitError.assetNotFound
+        }
+
         if let assetURLLoader {
             let sourceURL: URL = try await PhotoAssetDownload.run(network: network) { request in
                 let work = Task {
@@ -239,7 +249,7 @@ final class CloudKitService {
             }
         }
 
-        let recordID = CKRecord.ID(recordName: assetName)
+        let recordID = assetRecordID(named: assetName)
         let results: [CKRecord.ID: Result<CKRecord, Error>]
         do {
             let record = try await fetchAssetRecord(named: assetName, desiredKeys: nil, allowsCellularAccess: allowsCellularAccess)
@@ -313,7 +323,7 @@ final class CloudKitService {
             }
             return results
         }
-        let operation = CKFetchRecordsOperation(recordIDs: assetNames.map { CKRecord.ID(recordName: $0) })
+        let operation = CKFetchRecordsOperation(recordIDs: assetNames.map { assetRecordID(named: $0) })
         operation.desiredKeys = [RecordKey.byteCount, RecordKey.checksum]
         operation.configuration.allowsCellularAccess = allowsCellularAccess
         operation.configuration.qualityOfService = .utility
@@ -329,7 +339,7 @@ final class CloudKitService {
     }
 
     private func fetchAssetRecord(named assetName: String, desiredKeys: [String]?, allowsCellularAccess: Bool) async throws -> CKRecord {
-        let operation = CKFetchRecordsOperation(recordIDs: [CKRecord.ID(recordName: assetName)])
+        let operation = CKFetchRecordsOperation(recordIDs: [assetRecordID(named: assetName)])
         operation.desiredKeys = desiredKeys
         operation.configuration.allowsCellularAccess = allowsCellularAccess
         operation.configuration.timeoutIntervalForRequest = 15
@@ -345,6 +355,8 @@ final class CloudKitService {
     }
 
     func finishUploadedOriginals(assetNames: Set<String>, retaining: Bool) async throws {
+        // A preference can change while a previously started upload is finishing.
+        guard !storageModeStore.mode.keepsAllOriginals else { return }
         for name in assetNames {
             guard !deletedAssetNames.contains(name), let source = stagedAssetURL(named: name) else { continue }
             if retaining {
@@ -374,6 +386,7 @@ final class CloudKitService {
     }
 
     func releaseOfflineCopies(except names: Set<String>) async throws {
+        guard !storageModeStore.mode.keepsAllOriginals else { return }
         let removed = try await offlineStore.assetNames().subtracting(names)
         try await offlineStore.removeUnselected(keeping: names)
         // Readable URLs can be hard links to persistent originals. Remove both
@@ -398,7 +411,7 @@ final class CloudKitService {
         let fileURL = stagingFileURL(for: assetName)
         try ensureDirectoryExists(at: stagingDirectoryURL)
         try data.write(to: fileURL, options: .atomic)
-        if includesInBackup {
+        if includesInBackup && storageModeStore.mode.allowsCloudWrites {
             try markIncludedInBackup(fileURL)
         }
         return fileURL
@@ -418,7 +431,7 @@ final class CloudKitService {
                 try fileManager.moveItem(at: temporaryURL, to: destinationURL)
             }
         }
-        if includesInBackup {
+        if includesInBackup && storageModeStore.mode.allowsCloudWrites {
             try markIncludedInBackup(destinationURL)
         }
         return destinationURL
@@ -433,7 +446,7 @@ final class CloudKitService {
         return try await PhotoAssetFileWorker.stage(
             data: data,
             at: stagingFileURL(for: assetName),
-            includesInBackup: includesInBackup
+            includesInBackup: includesInBackup && storageModeStore.mode.allowsCloudWrites
         )
     }
 
@@ -446,7 +459,7 @@ final class CloudKitService {
         return try await PhotoAssetFileWorker.stage(
             file: sourceURL,
             at: stagingFileURL(for: assetName),
-            includesInBackup: includesInBackup
+            includesInBackup: includesInBackup && storageModeStore.mode.allowsCloudWrites
         )
     }
 
@@ -496,6 +509,7 @@ final class CloudKitService {
 
     func uploadStagedAsset(named assetName: String, photoID: UUID, role: PhotoAssetRole, retainsStagedOriginal: Bool = false) async throws {
         try Task.checkCancellation()
+        guard storageModeStore.mode.allowsCloudWrites else { throw CancellationError() }
         guard !deletedAssetNames.contains(assetName) else { throw CancellationError() }
         activeAssetUploads[assetName, default: 0] += 1
         defer {
@@ -528,7 +542,7 @@ final class CloudKitService {
             )
         }
 
-        if !retainsStagedOriginal, sourceURL.deletingLastPathComponent() == stagingDirectoryURL {
+        if !retainsStagedOriginal, storageModeStore.mode.allowsCloudWrites, sourceURL.deletingLastPathComponent() == stagingDirectoryURL {
             try? fileManager.removeItem(at: sourceURL)
         }
         logger.log("upload-staged-asset-finished name=\(assetName, privacy: .public) photo=\(photoID.uuidString, privacy: .public) role=\(role.rawValue, privacy: .public)")
@@ -538,7 +552,7 @@ final class CloudKitService {
         if let remoteAssetExistenceChecker {
             return try await remoteAssetExistenceChecker(assetName)
         }
-        let recordID = CKRecord.ID(recordName: assetName)
+        let recordID = assetRecordID(named: assetName)
 
         do {
             let results = try await privateDatabase.records(for: [recordID], desiredKeys: [RecordKey.photoID])
@@ -601,6 +615,10 @@ final class CloudKitService {
         }
     }
 
+    func restoreAssetAccess(named assetNames: Set<String>) {
+        deletedAssetNames.subtract(assetNames)
+    }
+
     func removeStagedAsset(named assetName: String) {
         let stagedURL = stagingFileURL(for: assetName)
         if fileManager.fileExists(atPath: stagedURL.path) {
@@ -634,7 +652,8 @@ final class CloudKitService {
     }
 
     func deleteRemoteAssetRecord(named assetName: String) async throws {
-        let recordID = CKRecord.ID(recordName: assetName)
+        guard storageModeStore.mode.allowsCloudWrites else { throw CancellationError() }
+        let recordID = assetRecordID(named: assetName)
         do {
             let results = try await privateDatabase.modifyRecords(
                 saving: [],
@@ -667,10 +686,15 @@ final class CloudKitService {
 
     func deleteRemoteAssetRecords(named assetNames: [String]) async -> [String: RemoteAssetDeletionOutcome] {
         let orderedAssetNames = Self.uniqueAssetNames(from: assetNames)
+        guard storageModeStore.mode.allowsCloudWrites else {
+            return Dictionary(uniqueKeysWithValues: orderedAssetNames.map {
+                ($0, .failure(RemoteAssetDeletionFailure(ckErrorCodeRawValue: nil, retryAfterSeconds: nil, description: "iCloud sync is turned off.")))
+            })
+        }
         guard !orderedAssetNames.isEmpty else { return [:] }
 
         let recordIDsByAssetName = Dictionary(
-            uniqueKeysWithValues: orderedAssetNames.map { ($0, CKRecord.ID(recordName: $0)) }
+            uniqueKeysWithValues: orderedAssetNames.map { ($0, assetRecordID(named: $0)) }
         )
         let recordIDs = orderedAssetNames.compactMap { recordIDsByAssetName[$0] }
 
@@ -765,6 +789,7 @@ final class CloudKitService {
     }
 
     func markStagedAssetsIncludedInBackup() {
+        guard storageModeStore.mode.allowsCloudWrites else { return }
         do {
             try ensureDirectoryExists(at: stagingDirectoryURL)
             var directoryURL = stagingDirectoryURL
@@ -857,7 +882,8 @@ final class CloudKitService {
         role: PhotoAssetRole,
         checksum: String
     ) async throws {
-        let recordID = CKRecord.ID(recordName: assetName)
+        guard storageModeStore.mode.allowsCloudWrites else { throw CancellationError() }
+        let recordID = assetRecordID(named: assetName)
         let record = CKRecord(recordType: RecordType.photoAsset, recordID: recordID)
         record[RecordKey.fileAsset] = CKAsset(fileURL: sourceURL)
         record[RecordKey.photoID] = photoID.uuidString as CKRecordValue
@@ -916,6 +942,10 @@ final class CloudKitService {
 
     private func stagingFileURL(for assetName: String) -> URL {
         stagingDirectoryURL.appendingPathComponent(assetName)
+    }
+
+    private func assetRecordID(named name: String) -> CKRecord.ID {
+        CKRecord.ID(recordName: name, zoneID: recordZoneID)
     }
 
     private func temporaryUploadURL(for assetName: String) -> URL {
@@ -1103,6 +1133,7 @@ final class CloudKitService {
     }
 
     private func markIncludedInBackup(_ fileURL: URL) throws {
+        guard storageModeStore.mode.allowsCloudWrites else { return }
         var directoryURL = fileURL.deletingLastPathComponent()
         var directoryValues = URLResourceValues()
         directoryValues.isExcludedFromBackup = false

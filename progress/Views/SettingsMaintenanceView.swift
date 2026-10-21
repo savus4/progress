@@ -5,6 +5,7 @@ struct SettingsMaintenanceView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @State private var offlineCoordinator = PhotoOfflineCoordinator.shared
+    @State private var storage = PhotoStorageCoordinator.shared
     @AppStorage(PhotoOfflineSettings.keepAllKey) private var keepAllPhotos = false
     @AppStorage(PhotoOfflineSettings.keepHeartedKey) private var keepHeartedPhotos = false
     @AppStorage(PhotoOfflineSettings.cellularKey) private var allowCellularDownloads = false
@@ -28,6 +29,13 @@ struct SettingsMaintenanceView: View {
 
     var body: some View {
         Form {
+            if storage.isLocalOnly {
+                Section {
+                    NavigationLink("Photo Storage") { PhotoStorageSettingsView() }
+                    Text("Local storage keeps every original on this device. Offline cache preferences apply when iCloud sync is enabled.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
             Section("Offline Photos") {
                 Toggle("Keep All Photos on Device", isOn: $keepAllPhotos)
                     .accessibilityIdentifier("keepAllPhotosOnDeviceToggle")
@@ -71,6 +79,7 @@ struct SettingsMaintenanceView: View {
                 Toggle("Allow Cellular Downloads", isOn: $allowCellularDownloads)
                     .accessibilityIdentifier("allowCellularOfflineDownloadsToggle")
             }
+            .disabled(storage.isLocalOnly)
 
             Section("Storage") {
                 PhotoStorageBarView(
@@ -128,7 +137,7 @@ struct SettingsMaintenanceView: View {
                 Button("Delete Matching Photos", role: .destructive) {
                     showingDeleteRangeConfirmation = true
                 }
-                .disabled(deleteRangeMatchCount == 0 || isDeletingPhotosInRange || isLoadingDeleteRangeMatchCount)
+                .disabled(storage.mode.isMigrating || deleteRangeMatchCount == 0 || isDeletingPhotosInRange || isLoadingDeleteRangeMatchCount)
 
                 if let deleteRangeStatusMessage {
                     Text(deleteRangeStatusMessage)
@@ -157,7 +166,7 @@ struct SettingsMaintenanceView: View {
                 Button("Delete All Photos", role: .destructive) {
                     showingDeleteAllConfirmation = true
                 }
-                .disabled(totalPhotoCount == 0 || isDeletingAllPhotos || isLoadingTotalPhotoCount)
+                .disabled(storage.mode.isMigrating || totalPhotoCount == 0 || isDeletingAllPhotos || isLoadingTotalPhotoCount)
 
                 if let deleteAllStatusMessage {
                     Text(deleteAllStatusMessage)

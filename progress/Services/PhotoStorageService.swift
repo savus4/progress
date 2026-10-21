@@ -96,6 +96,7 @@ final class PhotoStorageService {
     private static let orphanedPendingUploadGracePeriod: TimeInterval = 7 * 24 * 60 * 60
 
     private let cloudKitService: CloudKitService
+    private let remoteAssetDeletionService: RemoteAssetDeletionService
     private let pendingUploadManifestService: PendingUploadManifestService
     private let legacyRecoveryContext: NSManagedObjectContext?
     private let thumbnailService = ThumbnailService.shared
@@ -108,8 +109,10 @@ final class PhotoStorageService {
         return cache
     }()
 
-    init(cloudKitService: CloudKitService = .shared, legacyRecoveryContext: NSManagedObjectContext? = nil) {
+    init(cloudKitService: CloudKitService = .shared, legacyRecoveryContext: NSManagedObjectContext? = nil,
+         remoteAssetDeletionService: RemoteAssetDeletionService = .shared) {
         self.cloudKitService = cloudKitService
+        self.remoteAssetDeletionService = remoteAssetDeletionService
         pendingUploadManifestService = cloudKitService.pendingUploadManifestService
         self.legacyRecoveryContext = legacyRecoveryContext
     }
@@ -124,6 +127,7 @@ final class PhotoStorageService {
         enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let photoID = UUID()
+        try ensureStorageMigrationAllowsLibraryChanges()
         let sourceImageData = livePhotoImageData ?? imageData
         guard let sourceImageData else {
             throw PhotoStorageError.missingImageData
@@ -148,6 +152,7 @@ final class PhotoStorageService {
         )
         let objectID: NSManagedObjectID
         do {
+            try ensureStorageMigrationAllowsLibraryChanges()
             try await pendingUploadManifestService.record(manifestEntry)
             try cloudKitService.uploadStateStore.register(manifestEntry.localUpload)
             objectID = try await context.perform {
@@ -564,6 +569,7 @@ final class PhotoStorageService {
     }
 
     func deletePhoto(_ objectID: NSManagedObjectID, context: NSManagedObjectContext) async throws {
+        try ensureStorageMigrationAllowsDeletion()
         let assetNames = try await context.perform {
             guard let photo = try context.existingObject(with: objectID) as? DailyPhoto else {
                 return Set<String>()
@@ -583,6 +589,7 @@ final class PhotoStorageService {
         deletesAssetsInBackground: Bool = true
     ) async throws -> Int {
         let uniqueObjectIDs = Array(Set(objectIDs))
+        try ensureStorageMigrationAllowsDeletion()
         guard !uniqueObjectIDs.isEmpty else { return 0 }
 
         let (assetNames, deletedCount) = try await context.perform {
@@ -632,6 +639,7 @@ final class PhotoStorageService {
         to endDate: Date,
         context: NSManagedObjectContext
     ) async throws -> Int {
+        try ensureStorageMigrationAllowsDeletion()
         let (assetNames, deletedCount) = try await context.perform {
             let request = DailyPhoto.fetchRequest()
             request.predicate = Self.dateRangePredicate(from: startDate, to: endDate)
@@ -652,7 +660,8 @@ final class PhotoStorageService {
     }
 
     func deleteAllPhotos(context: NSManagedObjectContext) async throws -> DeleteAllPhotosResult {
-        try await deleteAllPhotos(
+        try ensureStorageMigrationAllowsDeletion()
+        return try await deleteAllPhotos(
             context: context,
             operations: DeleteAllPhotosOperations(
                 cancelPendingUploads: { await PhotoUploadService.shared.cancelPendingWork() },
@@ -781,6 +790,7 @@ final class PhotoStorageService {
         context: NSManagedObjectContext,
         ignoreGracePeriod: Bool = false
     ) async {
+        guard !cloudKitService.storageModeStore.mode.keepsAllOriginals else { return }
         let referencedAssetNames: Set<String>
 
         do {
@@ -1292,6 +1302,18 @@ final class PhotoStorageService {
         for name in names { cloudKitService.removeStagedAsset(named: name) }
     }
 
+    private func ensureStorageMigrationAllowsDeletion() throws {
+        guard !cloudKitService.storageModeStore.mode.isMigrating else {
+            throw PhotoStorageMigrationError.attention("Let the photo storage switch finish before deleting photos. You can check its progress in Settings → Photo Storage.")
+        }
+    }
+
+    private func ensureStorageMigrationAllowsLibraryChanges() throws {
+        guard !cloudKitService.storageModeStore.mode.isMigrating else {
+            throw PhotoStorageMigrationError.attention("Let the photo storage switch finish before adding photos. Check its progress in Settings → Photo Storage.")
+        }
+    }
+
     private func decodeAndCacheFullImage(from fileURL: URL, cacheKey: String) async throws -> UIImage {
         let preparedImage = try await Self.decodeFullImage(from: fileURL)
         decodedFullImageCache.setObject(
@@ -1494,35 +1516,44 @@ final class PhotoStorageService {
 
     private func deleteAssets(named assetNames: Set<String>) async {
         guard !assetNames.isEmpty else { return }
+        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
 
         for assetName in assetNames {
             await cloudKitService.deleteAssetAndWait(named: assetName)
         }
 
-        await RemoteAssetDeletionService.shared.enqueue(assetNames: assetNames)
+        if deletesCloudCopies { await remoteAssetDeletionService.enqueue(assetNames: assetNames) }
     }
 
     private func deleteAssetsInBackground(named assetNames: Set<String>) async {
         guard !assetNames.isEmpty else { return }
+        guard cloudKitService.storageModeStore.mode.allowsCloudWrites else {
+            await deleteAssets(named: assetNames)
+            return
+        }
 
-        await RemoteAssetDeletionService.shared.enqueueForDeferredProcessing(assetNames: assetNames)
+        let cloud = cloudKitService
+        let deletions = remoteAssetDeletionService
+        await deletions.enqueueForDeferredProcessing(assetNames: assetNames)
         Task.detached(priority: .utility) {
             for assetName in assetNames {
-                await CloudKitService.shared.deleteAssetAndWait(named: assetName)
+                await cloud.deleteAssetAndWait(named: assetName)
             }
 
-            await RemoteAssetDeletionService.shared.processPendingDeletions()
+            await deletions.processPendingDeletions()
         }
     }
 
     private func deleteAssetsAndWaitForRemoteCleanup(named assetNames: Set<String>) async -> Set<String> {
         guard !assetNames.isEmpty else { return [] }
+        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
 
         for assetName in assetNames {
             await cloudKitService.deleteAssetAndWait(named: assetName)
         }
 
-        return await RemoteAssetDeletionService.shared.enqueueAndAttemptImmediateDeletion(assetNames: assetNames)
+        guard deletesCloudCopies else { return [] }
+        return await remoteAssetDeletionService.enqueueAndAttemptImmediateDeletion(assetNames: assetNames)
     }
 
     private func existingImportedPhotoFingerprints(
@@ -1566,6 +1597,7 @@ final class PhotoStorageService {
         context: NSManagedObjectContext,
         saveChanges: Bool = true
     ) async throws -> StoredPendingPhoto {
+        try ensureStorageMigrationAllowsLibraryChanges()
         let photoID = UUID()
         let exifMetadata = await Self.exifMetadata(from: imageData)
         let thumbnailData = await thumbnailService.generateThumbnailAsync(from: imageData)
@@ -1586,6 +1618,7 @@ final class PhotoStorageService {
             livePhotoVideoAssetName: videoAssetName
         )
         do {
+            try ensureStorageMigrationAllowsLibraryChanges()
             try await pendingUploadManifestService.record(manifestEntry)
             try cloudKitService.uploadStateStore.register(manifestEntry.localUpload)
             let objectID = try await context.perform {
@@ -1947,14 +1980,23 @@ actor RemoteAssetDeletionService {
     private let monitorQueue = DispatchQueue(label: "progress.remote-asset-deletion.monitor")
     private let storageURL: URL
     private let deletionBatchSize = 100
+    private let cloudOperationsAvailable: @Sendable () async -> Bool
+    private let deleteRemoteAssets: @Sendable ([String]) async -> [String: RemoteAssetDeletionOutcome]
 
     private var didStart = false
     private var didLoadQueue = false
     private var isProcessing = false
     private var queuedDeletionsByAssetName: [String: PendingRemoteAssetDeletion] = [:]
 
-    init() {
-        storageURL = Self.makeStorageURL()
+    init(storageURL: URL? = nil,
+         cloudOperationsAvailable: @escaping @Sendable () async -> Bool = {
+             await MainActor.run { ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations }
+         }, deleteRemoteAssets: @escaping @Sendable ([String]) async -> [String: RemoteAssetDeletionOutcome] = {
+             await CloudKitService.shared.deleteRemoteAssetRecords(named: $0)
+         }) {
+        self.storageURL = storageURL ?? Self.makeStorageURL()
+        self.cloudOperationsAvailable = cloudOperationsAvailable
+        self.deleteRemoteAssets = deleteRemoteAssets
     }
 
     func start() async {
@@ -1963,10 +2005,10 @@ actor RemoteAssetDeletionService {
 
         loadQueueIfNeeded()
 
-        pathMonitor.pathUpdateHandler = { path in
+        pathMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
             Task {
-                await RemoteAssetDeletionService.shared.processPendingDeletions(expeditingRetries: true)
+                await self?.processPendingDeletions(expeditingRetries: true)
             }
         }
         pathMonitor.start(queue: monitorQueue)
@@ -2029,12 +2071,18 @@ actor RemoteAssetDeletionService {
         return Set(assetNames.filter { queuedDeletionsByAssetName[$0] != nil })
     }
 
+    func cancel(assetNames: Set<String>) {
+        loadQueueIfNeeded()
+        for name in assetNames { queuedDeletionsByAssetName.removeValue(forKey: name) }
+        persistQueue()
+    }
+
     func processPendingDeletions(expeditingRetries: Bool = false) async {
         loadQueueIfNeeded()
 
         guard !queuedDeletionsByAssetName.isEmpty else { return }
         guard !isProcessing else { return }
-        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
+        guard await cloudOperationsAvailable() else { return }
 
         if !expeditingRetries, pathMonitor.currentPath.status != .satisfied {
             return
@@ -2065,7 +2113,7 @@ actor RemoteAssetDeletionService {
         while batchStartIndex < eligibleAssetNames.count {
             let batchEndIndex = Swift.min(batchStartIndex + deletionBatchSize, eligibleAssetNames.count)
             let assetNameBatch = Array(eligibleAssetNames[batchStartIndex..<batchEndIndex])
-            let results = await CloudKitService.shared.deleteRemoteAssetRecords(named: assetNameBatch)
+            let results = await deleteRemoteAssets(assetNameBatch)
 
             for assetName in assetNameBatch {
                 guard var pendingDeletion = queuedDeletionsByAssetName[assetName] else {
@@ -2269,6 +2317,7 @@ actor PhotoUploadService {
     }
 
     nonisolated static func registerBackgroundTask() {
+        #if !targetEnvironment(simulator)
         let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
         let didRegister = BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { task in
             guard let processingTask = task as? BGProcessingTask else {
@@ -2283,12 +2332,17 @@ actor PhotoUploadService {
         logger.log(
             "bg-register identifier=\(backgroundTaskIdentifier, privacy: .public) success=\(didRegister, privacy: .public)"
         )
+        #endif
     }
 
     nonisolated static func scheduleBackgroundProcessing(
         earliestBeginDate: Date? = nil,
         source: String = #function
     ) {
+        // Simulator cannot execute scheduled background work. Foreground
+        // processing and its retry task continue independently of this fallback.
+        #if !targetEnvironment(simulator)
+        guard !StorageTestConfiguration.isIsolatedHost else { return }
         let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
         let request = BGProcessingTaskRequest(identifier: backgroundTaskIdentifier)
         request.requiresNetworkConnectivity = true
@@ -2314,6 +2368,7 @@ actor PhotoUploadService {
             )
             logPendingTaskRequests(reason: "post-submit-failure", source: source)
         }
+        #endif
     }
 
     nonisolated private static func logPendingTaskRequests(reason: String, source: String) {

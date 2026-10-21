@@ -98,24 +98,38 @@ final class PersistenceController: ObservableObject {
     private var pendingStoreLoads = 0
     private var firstStoreLoadError: Error?
     private var isLoadingStore = false
+    private let storageModeStore: PhotoStorageModeStore
+    private let cloudLibraryLoader: (@MainActor (NSPersistentContainer) async throws -> Void)?
+    private let baseStoreURL: URL?
 
-    init(inMemory: Bool = false) {
+    init(inMemory: Bool = false, storageModeStore: PhotoStorageModeStore = .shared, storeURL: URL? = nil, cloudEnabled: Bool = true,
+         cloudLibraryLoader: (@MainActor (NSPersistentContainer) async throws -> Void)? = nil) {
+        self.storageModeStore = storageModeStore
+        self.cloudLibraryLoader = cloudLibraryLoader
         let processInfo = ProcessInfo.processInfo
         let shouldUseInMemory = inMemory
-            || processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
-            || processInfo.environment["UI_TEST_IN_MEMORY_STORE"] == "1"
+            || (storeURL == nil && (processInfo.arguments.contains("UI_TEST_IN_MEMORY_STORE")
+                || processInfo.environment["UI_TEST_IN_MEMORY_STORE"] == "1" || StorageTestConfiguration.isIsolatedHost))
         let usesExampleLibrary: Bool
         #if DEBUG && targetEnvironment(simulator)
         usesExampleLibrary = !shouldUseInMemory && SimulatorExampleLibrary.isEnabled
         #else
         usesExampleLibrary = false
         #endif
-        container = if shouldUseInMemory || usesExampleLibrary {
+        container = if shouldUseInMemory || usesExampleLibrary || !cloudEnabled {
             NSPersistentContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
         } else {
             NSPersistentCloudKitContainer(name: "progress", managedObjectModel: Self.managedObjectModel)
         }
+        baseStoreURL = storeURL ?? container.persistentStoreDescriptions.first?.url
         for description in container.persistentStoreDescriptions {
+            if let storeURL { description.url = storeURL }
+            if !shouldUseInMemory, !usesExampleLibrary, let filename = storageModeStore.storeFilename {
+                description.url = description.url?.deletingLastPathComponent().appendingPathComponent(filename)
+            }
+            if !storageModeStore.mode.allowsCloudWrites {
+                description.cloudKitContainerOptions = nil
+            }
             description.shouldMigrateStoreAutomatically = true
             description.shouldInferMappingModelAutomatically = true
             description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
@@ -214,6 +228,121 @@ final class PersistenceController: ObservableObject {
         )
         context.automaticallyMergesChangesFromParent = true
         return context
+    }
+
+    /// Reopens the selected SQLite store. Removing the store tears down mirroring;
+    /// changing its description alone would leave the old mirroring delegate live.
+    func reloadCloudConfiguration(cloudEnabled: Bool? = nil, storeFilename: String? = nil) async throws {
+        guard !isLoadingStore else { throw CocoaError(.persistentStoreOperation) }
+        loadState = .loading
+        isLoadingStore = true
+        do {
+            if container.viewContext.hasChanges { try container.viewContext.save() }
+            container.viewContext.reset()
+            let coordinator = container.persistentStoreCoordinator
+            for store in coordinator.persistentStores { try coordinator.remove(store) }
+            for description in container.persistentStoreDescriptions {
+                if let baseStoreURL {
+                    description.url = (storeFilename ?? storageModeStore.storeFilename).map {
+                        baseStoreURL.deletingLastPathComponent().appendingPathComponent($0)
+                    } ?? baseStoreURL
+                }
+                description.cloudKitContainerOptions = (cloudEnabled ?? storageModeStore.mode.allowsCloudWrites)
+                    && container is NSPersistentCloudKitContainer
+                    ? NSPersistentCloudKitContainerOptions(containerIdentifier: CloudKitConfiguration.containerIdentifier) : nil
+            }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                container.loadPersistentStores { _, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                }
+            }
+            isLoadingStore = false
+            loadState = .loaded
+        } catch {
+            isLoadingStore = false
+            loadState = .failed(error.localizedDescription)
+            throw error
+        }
+    }
+
+    /// The active local store remains intact until the imported, merged store
+    /// has opened successfully and its filename is committed to the checkpoint.
+    func prepareLibraryForICloudStorage(validateAccount: @MainActor () async throws -> Void) async throws -> String {
+        guard isLoaded, let directory = baseStoreURL?.deletingLastPathComponent() else {
+            throw CocoaError(.persistentStoreOperation)
+        }
+        if container.viewContext.hasChanges { try container.viewContext.save() }
+        let filename = "ICloudLibrary-\(UUID().uuidString).sqlite"
+        try await PhotoCloudLibraryPreparation.prepare(
+            from: container, at: directory.appendingPathComponent(filename),
+            mirrorsCloud: container is NSPersistentCloudKitContainer,
+            loader: cloudLibraryLoader, validateAccount: validateAccount
+        )
+        return filename
+    }
+
+    func setLibraryExcludedFromBackup(_ excluded: Bool) throws {
+        for description in container.persistentStoreDescriptions where description.type != NSInMemoryStoreType {
+            guard let storeURL = description.url else { continue }
+            // Includes SQLite sidecars and Core Data's external binary storage.
+            var directory = storeURL.deletingLastPathComponent()
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = excluded
+            try directory.setResourceValues(values)
+        }
+    }
+
+    /// A clean local store has no CloudKit record mappings. Remote deletion
+    /// tombstones must never remove our verified library when sync is enabled later.
+    func copyLibraryForLocalStorage() async throws -> String {
+        guard isLoaded, let originalURL = container.persistentStoreDescriptions.first?.url else {
+            throw CocoaError(.persistentStoreOperation)
+        }
+        loadState = .loading
+        defer { loadState = .loaded }
+        if container.viewContext.hasChanges { try container.viewContext.save() }
+        let filename = "DeviceLibrary-\(UUID().uuidString).sqlite"
+        let local = NSPersistentContainer(name: "progress", managedObjectModel: container.managedObjectModel)
+        let description = NSPersistentStoreDescription(url: originalURL.deletingLastPathComponent().appendingPathComponent(filename))
+        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        local.persistentStoreDescriptions = [description]
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            local.loadPersistentStores { _, error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+        }
+        let source = makeBackgroundContext()
+        let target = local.newBackgroundContext()
+        let ids = try await source.perform {
+            let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
+            request.resultType = .managedObjectIDResultType
+            return try source.fetch(request)
+        }
+        for id in ids {
+            try Task.checkCancellation()
+            let attributes: [String: PhotoLibraryAttribute] = try await source.perform {
+                let photo = try source.existingObject(with: id)
+                defer { source.refresh(photo, mergeChanges: false) }
+                return try photo.entity.attributesByName.reduce(into: [:]) { result, attribute in
+                    if let value = photo.value(forKey: attribute.key) {
+                        result[attribute.key] = try PhotoLibraryAttribute(value: value, type: attribute.value.attributeType)
+                    }
+                }
+            }
+            try await target.perform {
+                let photo = DailyPhoto(context: target)
+                for (key, attribute) in attributes { photo.setValue(attribute.value, forKey: key) }
+                try target.save()
+                target.reset()
+            }
+        }
+        try Task.checkCancellation()
+        let count = try await target.perform { try target.count(for: DailyPhoto.fetchRequest()) }
+        guard count == ids.count else { throw CocoaError(.persistentStoreSave) }
+        for store in local.persistentStoreCoordinator.persistentStores { try local.persistentStoreCoordinator.remove(store) }
+        return filename
     }
 
     @MainActor

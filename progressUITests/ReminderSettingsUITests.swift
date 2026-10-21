@@ -62,17 +62,20 @@ final class ReminderSettingsUITests: XCTestCase {
     @MainActor
     private func visitStorageManagementAndReturn(_ app: XCUIApplication) {
         returnToSettings(app)
+        let photoStorage = app.buttons["photoStorageSettingsLink"]
+        XCTAssertTrue(photoStorage.waitForExistence(timeout: 5))
+        photoStorage.tap()
+        XCTAssertTrue(app.navigationBars["Photo Storage"].waitForExistence(timeout: 5))
         let storage = app.buttons["Storage Management"]
         for _ in 0..<5 where !storage.isHittable { app.swipeUp() }
         XCTAssertTrue(storage.isHittable)
         storage.tap()
-        let back = app.navigationBars["Storage Management"].buttons["Settings"]
+        let back = app.navigationBars["Storage Management"].buttons["Photo Storage"]
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         back.tap()
-        // Returning preserves the Form's position near the Storage link. Move
-        // the Notifications section fully into view before editing its controls.
-        app.swipeDown()
-        app.swipeDown()
+        let settingsBack = app.navigationBars["Photo Storage"].buttons["Settings"]
+        XCTAssertTrue(settingsBack.waitForExistence(timeout: 5))
+        settingsBack.tap()
     }
 
     @MainActor

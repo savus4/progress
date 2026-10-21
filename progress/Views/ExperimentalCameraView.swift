@@ -297,7 +297,9 @@ struct ExperimentalCameraView: View {
                                     .frame(width: 48, height: 48)
                                     .background(Color.white.opacity(0.08), in: Circle())
                             }
-                            .disabled(controlsDisabled)
+                            .accessibilityLabel("Close Camera")
+                            .accessibilityIdentifier("experimentalCameraCloseButton")
+                            .disabled(guideInteractionDisabled)
 
                             Spacer(minLength: 0)
                         }

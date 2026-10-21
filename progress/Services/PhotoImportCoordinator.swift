@@ -122,6 +122,10 @@ final class PhotoImportCoordinator: ObservableObject {
     }
 
     private func beginImport(totalCount: Int, operation: @escaping @Sendable () async -> Void) {
+        guard !PhotoStorageModeStore.shared.mode.isMigrating else {
+            statusMessage = "Let the photo storage switch finish before importing photos. Check Photo Storage in Settings."
+            return
+        }
         guard !isImporting else { return }
 
         importTask?.cancel()

@@ -5,6 +5,71 @@ import Testing
 
 @MainActor
 struct CloudSyncMonitorTests {
+    @Test("Unavailable iCloud is distinct from the local-only preference and recovers", arguments: [
+        "iCloud is not signed in on this device.", "iCloud is temporarily unavailable."
+    ])
+    func cloudUnavailableDoesNotImplyLocalOnly(reason: String) async throws {
+        let fixture = try Fixture(isUnavailable: true, reason: reason)
+        defer { fixture.removeFiles() }
+        await fixture.monitor.refreshUploadStatus()
+        #expect(fixture.modeStore.mode == .iCloud)
+        #expect(fixture.monitor.statusTitle == "iCloud sync is unavailable")
+        #expect(fixture.monitor.statusDetail.contains(reason))
+        #expect(fixture.monitor.statusDetail.contains("enabled in Photo Storage"))
+        #expect(fixture.monitor.showsStatusDetail)
+        #expect(fixture.monitor.isFailing)
+        #expect(fixture.monitor.statusSymbolName == "icloud.slash")
+
+        fixture.availability.isUnavailable = false
+        await fixture.monitor.refreshUploadStatus()
+        #expect(fixture.monitor.statusTitle == "iCloud sync is ready")
+        #expect(fixture.monitor.showsStatusDetail == false)
+        #expect(fixture.monitor.isFailing == false)
+        #expect(fixture.modeStore.mode == .iCloud)
+    }
+
+    @Test("Local-only status follows the preference regardless of account availability", arguments: [false, true])
+    func explicitLocalOnly(isUnavailable: Bool) async throws {
+        let fixture = try Fixture(mode: .local, isUnavailable: isUnavailable)
+        defer { fixture.removeFiles() }
+        await fixture.monitor.refreshUploadStatus()
+        #expect(fixture.monitor.statusTitle == "Photos stored only on this device")
+        #expect(fixture.monitor.statusSymbolName == "internaldrive")
+        #expect(fixture.monitor.showsStatusDetail)
+        #expect(fixture.monitor.isFailing == false)
+    }
+
+    @Test("Simulator examples explain their separate local library without changing the normal preference")
+    func simulatorExampleStatus() async throws {
+        let fixture = try Fixture(usesSimulatorExamples: true)
+        defer { fixture.removeFiles() }
+        await fixture.monitor.refreshUploadStatus()
+        #expect(fixture.monitor.statusTitle == "Simulator example library")
+        #expect(fixture.monitor.statusDetail.contains("iCloud sync is disabled for this example library"))
+        #expect(fixture.monitor.showsStatusDetail)
+        #expect(fixture.monitor.isFailing == false)
+        #expect(fixture.monitor.statusSymbolName == "internaldrive")
+        #expect(fixture.modeStore.mode == .iCloud)
+    }
+
+    @Test("Migration status takes precedence over an unavailable iCloud account", arguments: [
+        PhotoStorageMode.downloading, .deletingCloudCopies, .preparingUpload
+    ])
+    func migrationStatus(mode: PhotoStorageMode) async throws {
+        let fixture = try Fixture(mode: mode, isUnavailable: true)
+        defer { fixture.removeFiles() }
+        await fixture.monitor.refreshUploadStatus()
+        let expected = switch mode {
+        case .downloading: "Switching to local photo storage"
+        case .deletingCloudCopies: "Removing iCloud copies"
+        case .preparingUpload: "Preparing private iCloud upload"
+        default: ""
+        }
+        #expect(fixture.monitor.statusTitle == expected)
+        #expect(fixture.monitor.showsStatusDetail)
+        #expect(fixture.monitor.isFailing == false)
+    }
+
     @Test("Unuploaded originals remain visible even when staged files are missing", arguments: [
         PhotoUploadState.pending, .uploading, .failed, .paused
     ])
@@ -89,20 +154,40 @@ struct CloudSyncMonitorTests {
     }
 
     private final class Fixture {
+        final class Availability {
+            var isUnavailable: Bool
+            let reason: String?
+
+            init(isUnavailable: Bool, reason: String?) {
+                self.isUnavailable = isUnavailable
+                self.reason = reason
+            }
+        }
+
         let root: URL
         let persistence = PersistenceController(inMemory: true)
         let uploadStore: LocalPhotoUploadStore
         let monitor: CloudSyncMonitor
+        let modeStore: PhotoStorageModeStore
+        let availability: Availability
         var context: NSManagedObjectContext { persistence.container.viewContext }
 
-        init() throws {
+        init(mode: PhotoStorageMode = .iCloud, isUnavailable: Bool = false, reason: String? = nil,
+             usesSimulatorExamples: Bool = false) throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("CloudSyncMonitorTests-\(UUID())")
             uploadStore = LocalPhotoUploadStore(storageURL: root.appendingPathComponent("uploads.json"))
+            modeStore = PhotoStorageModeStore(storageURL: root.appendingPathComponent("preference/mode.json"))
+            try modeStore.set(mode)
+            let availability = Availability(isUnavailable: isUnavailable, reason: reason)
+            self.availability = availability
             monitor = CloudSyncMonitor(
                 context: persistence.container.viewContext,
                 uploadStore: uploadStore,
-                iCloudUnavailableProvider: { false },
-                observesChanges: false
+                iCloudUnavailableProvider: { availability.isUnavailable },
+                observesChanges: false,
+                storageModeStore: modeStore,
+                iCloudUnavailableReasonProvider: { availability.reason },
+                usesSimulatorExampleLibrary: usesSimulatorExamples
             )
         }
 

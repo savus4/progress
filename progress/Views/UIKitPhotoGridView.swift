@@ -48,11 +48,13 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     @Published private(set) var changeToken = 0
 
     private var fetchedResultsController: NSFetchedResultsController<DailyPhoto>?
+    private var fetchedStoreIdentities: Set<ObjectIdentifier> = []
     private weak var context: NSManagedObjectContext?
     private var filter: PhotoGridFilter = .all
     private var photosByID: [NSManagedObjectID: DailyPhoto] = [:]
     private(set) var itemsSnapshot: [UIKitPhotoGridItem] = []
     private var localUploadObserver: NSObjectProtocol?
+    private var storesDidChangeObserver: NSObjectProtocol?
     private var uploadSnapshotRefreshTask: Task<Void, Never>?
 
     override init() {
@@ -67,8 +69,8 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
                 self.uploadSnapshotRefreshTask?.cancel()
                 self.uploadSnapshotRefreshTask = Task { @MainActor [weak self] in
                     try? await Task.sleep(for: .milliseconds(50))
-                    guard !Task.isCancelled, let self, let controller = self.fetchedResultsController else { return }
-                    self.rebuildSnapshot(from: controller.fetchedObjects ?? [])
+                    guard !Task.isCancelled, let self else { return }
+                    self.refreshSnapshot()
                 }
             }
         }
@@ -77,6 +79,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     isolated deinit {
         uploadSnapshotRefreshTask?.cancel()
         if let localUploadObserver { NotificationCenter.default.removeObserver(localUploadObserver) }
+        if let storesDidChangeObserver { NotificationCenter.default.removeObserver(storesDidChangeObserver) }
     }
 
     var hasAnyPhotos: Bool {
@@ -84,12 +87,18 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     func configureIfNeeded(context: NSManagedObjectContext, filter: PhotoGridFilter) {
+        let needsNewFetch = self.context !== context || !hasCurrentFetch
+        if self.context !== context {
+            observeStoreChanges(in: context)
+        }
         self.context = context
-        self.filter = filter
-        guard fetchedResultsController == nil else {
+        guard needsNewFetch else {
             setFilter(filter)
             return
         }
+        self.filter = filter
+        invalidateFetch()
+        guard !currentStoreIdentities.isEmpty else { return }
 
         let request = DailyPhoto.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false)]
@@ -104,6 +113,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         )
         controller.delegate = self
         fetchedResultsController = controller
+        fetchedStoreIdentities = currentStoreIdentities
 
         do {
             try controller.performFetch()
@@ -118,6 +128,10 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     func setFilter(_ filter: PhotoGridFilter) {
+        guard hasCurrentFetch else {
+            if let context { configureIfNeeded(context: context, filter: filter) }
+            return
+        }
         guard self.filter != filter else { return }
         self.filter = filter
         fetchedResultsController?.fetchRequest.predicate = fetchPredicate
@@ -135,11 +149,13 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     var allPhotos: [DailyPhoto] {
-        fetchedResultsController?.fetchedObjects ?? []
+        guard hasCurrentFetch else { return [] }
+        return fetchedResultsController?.fetchedObjects ?? []
     }
 
     func allStoredPhotos() -> [DailyPhoto] {
         guard let context else { return allPhotos }
+        guard !currentStoreIdentities.isEmpty else { return [] }
 
         let request = DailyPhoto.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false)]
@@ -159,7 +175,8 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     func photos(for objectIDs: Set<NSManagedObjectID>) -> [DailyPhoto] {
-        objectIDs.compactMap { photosByID[$0] }
+        guard hasCurrentFetch else { return [] }
+        return objectIDs.compactMap { photosByID[$0] }
     }
 
     func shouldHeartPhotos(for objectIDs: Set<NSManagedObjectID>) -> Bool {
@@ -173,6 +190,57 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     }
 
     func controllerDidChangeContent(_ controller: NSFetchedResultsController<any NSFetchRequestResult>) {
+        guard controller === fetchedResultsController else { return }
+        refreshSnapshot()
+    }
+
+    private var currentStoreIdentities: Set<ObjectIdentifier> {
+        Set((context?.persistentStoreCoordinator?.persistentStores ?? []).map(ObjectIdentifier.init))
+    }
+
+    private var hasCurrentFetch: Bool {
+        fetchedResultsController != nil && !fetchedStoreIdentities.isEmpty
+            && fetchedStoreIdentities == currentStoreIdentities
+    }
+
+    private func observeStoreChanges(in context: NSManagedObjectContext) {
+        if let storesDidChangeObserver { NotificationCenter.default.removeObserver(storesDidChangeObserver) }
+        storesDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .NSPersistentStoreCoordinatorStoresDidChange,
+            object: context.persistentStoreCoordinator,
+            queue: .main
+        ) { [weak self] _ in
+            // Refetch after Core Data finishes changing stores. A local-only
+            // library may never receive an upload event or another context save.
+            Task { @MainActor [weak self] in
+                self?.refreshSnapshot()
+            }
+        }
+    }
+
+    private func invalidateFetch() {
+        uploadSnapshotRefreshTask?.cancel()
+        uploadSnapshotRefreshTask = nil
+        fetchedResultsController?.delegate = nil
+        fetchedResultsController = nil
+        fetchedStoreIdentities = []
+        photosByID = [:]
+        itemsSnapshot = []
+        photoCount = 0
+        totalPhotoCount = 0
+        heartedPhotoCount = 0
+        favoriteLivePhotoCount = 0
+        isEmpty = true
+        changeToken &+= 1
+    }
+
+    private func refreshSnapshot() {
+        // A batched FRC result can still contain object IDs from a removed store,
+        // even though the same view context now points at its replacement.
+        guard hasCurrentFetch else {
+            if let context { configureIfNeeded(context: context, filter: filter) }
+            return
+        }
         rebuildSnapshot(from: fetchedResultsController?.fetchedObjects ?? [])
     }
 

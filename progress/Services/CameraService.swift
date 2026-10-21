@@ -10,7 +10,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isAuthorized = false
     @Published private(set) var isReadyForCapture = false
     @Published private(set) var livePhotoAudioUnavailable = false
-    private var audioConfigurationID = UUID()
+    private var sessionConfigurationID = UUID()
     @Published var previewLayer: AVCaptureVideoPreviewLayer?
     @Published var capturedImage: UIImage?
     @Published var capturedImageData: Data?
@@ -79,7 +79,8 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
 
     func configureLivePhotoAudio(enabled: Bool) async {
         let configurationID = UUID()
-        audioConfigurationID = configurationID
+        sessionConfigurationID = configurationID
+        // Keep the shutter disabled until startSession verifies the video connection.
         isReadyForCapture = false
         let needsAudio = enabled && isLivePhotoCaptureSupported && !usesMockCapture
         let authorized = await CameraMicrophonePermission.authorize(
@@ -87,15 +88,14 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             status: { AVCaptureDevice.authorizationStatus(for: .audio) },
             request: { await AVCaptureDevice.requestAccess(for: .audio) }
         )
-        guard !Task.isCancelled, audioConfigurationID == configurationID else { return }
+        guard !Task.isCancelled, sessionConfigurationID == configurationID else { return }
         let connected = await withCheckedContinuation { continuation in
             sessionQueue.async { [self] in
                 continuation.resume(returning: configureAudioInputOnSessionQueue(enabled: authorized))
             }
         }
-        guard !Task.isCancelled, audioConfigurationID == configurationID else { return }
+        guard !Task.isCancelled, sessionConfigurationID == configurationID else { return }
         livePhotoAudioUnavailable = needsAudio && !connected
-        isReadyForCapture = true
     }
 
     nonisolated private func configureAudioInputOnSessionQueue(enabled: Bool) -> Bool {
@@ -170,14 +170,27 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     }
     
     func startSession() {
+        let configurationID = sessionConfigurationID
+        isReadyForCapture = false
+        captureErrorMessage = nil
         sessionQueue.async { [weak self] in
-            guard let self, !self.session.isRunning else { return }
-            self.session.startRunning()
+            guard let self else { return }
+            if self.photoOutput.connection(with: .video) != nil, !self.session.isRunning {
+                self.session.startRunning()
+            }
+            let isReady = self.canCapturePhotoOnSessionQueue
+            Task { @MainActor [weak self] in
+                guard let self, self.sessionConfigurationID == configurationID else { return }
+                self.isReadyForCapture = isReady
+                if !isReady {
+                    self.captureErrorMessage = Self.cameraUnavailableMessage
+                }
+            }
         }
     }
 
     func stopSession() {
-        audioConfigurationID = UUID()
+        sessionConfigurationID = UUID()
         isReadyForCapture = false
         sessionQueue.async { [weak self] in
             guard let self, self.session.isRunning else { return }
@@ -219,6 +232,19 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
 
+        // AVFoundation raises an Objective-C exception for a missing/inactive
+        // connection; Swift error handling and capture delegates can't catch it.
+        guard canCapturePhotoOnSessionQueue else {
+            Task { @MainActor [weak self] in
+                guard let self, self.captureGeneration == generation else { return }
+                self.captureInFlight = false
+                self.isReadyForCapture = false
+                self.captureErrorMessage = Self.cameraUnavailableMessage
+                self.captureFinished += 1
+            }
+            return
+        }
+
         let settings: AVCapturePhotoSettings
         if let preferredPhotoCodec = Self.preferredCodec(from: photoOutput.availablePhotoCodecTypes) {
             settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: preferredPhotoCodec])
@@ -253,6 +279,22 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         )
         settings.photoQualityPrioritization = .quality
         photoOutput.capturePhoto(with: settings, delegate: self)
+    }
+
+    nonisolated private var canCapturePhotoOnSessionQueue: Bool {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard session.isRunning, !session.isInterrupted,
+              session.outputs.contains(photoOutput),
+              let connection = photoOutput.connection(with: .video) else { return false }
+        return connection.isEnabled && connection.isActive
+    }
+
+    nonisolated private static var cameraUnavailableMessage: String {
+        #if targetEnvironment(simulator)
+        "Camera capture isn’t available in the simulator. Use an iPhone to take a photo."
+        #else
+        "The camera isn’t available right now. Close the camera and try again."
+        #endif
     }
 
     private func simulateMockCapture(location: CLLocation?) {

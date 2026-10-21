@@ -44,6 +44,21 @@ actor PhotoOfflineStore {
         return try (inventory ?? [:]).filter { try assetURL(named: $0.key) != nil }
     }
 
+    /// Rehash durable bytes, including complete files recovered after a kill
+    /// between rename and inventory persistence.
+    func verifyOriginal(named name: String) async throws {
+        guard let url = try assetURL(named: name), let expected = inventory?[name] else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let revision = revisions[name] ?? 0
+        let digest = try await PhotoAssetFileWorker.digestAndByteCount(at: url)
+        guard (revisions[name] ?? 0) == revision else { throw CancellationError() }
+        guard digest.byteCount > 0, digest.byteCount == expected.byteCount,
+              expected.checksum == nil || expected.checksum == digest.checksum else { throw CocoaError(.fileReadCorruptFile) }
+        inventory?[name] = PhotoAssetMetadata(byteCount: digest.byteCount, checksum: digest.checksum)
+        try persistInventory()
+    }
+
     func recordAccess(to fullImageAssetName: String, at date: Date = Date()) throws {
         _ = try fileURL(named: fullImageAssetName)
         try loadRecentAccesses()

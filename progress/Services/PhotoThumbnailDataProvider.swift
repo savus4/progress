@@ -63,6 +63,11 @@ final class PhotoThumbnailDataProvider: NSObject {
             guard !Task.isCancelled else { return [NSManagedObjectID: Data]() }
             let result = await context.perform {
                 autoreleasepool {
+                    let stores = context.persistentStoreCoordinator?.persistentStores ?? []
+                    let reachableIDs = batchIDs.filter { id in
+                        id.persistentStore.map { stores.contains($0) } ?? false
+                    }
+                    guard !reachableIDs.isEmpty else { return [NSManagedObjectID: Data]() }
                     let identity = NSExpressionDescription()
                     identity.name = "objectID"
                     identity.expression = NSExpression.expressionForEvaluatedObject()
@@ -70,9 +75,9 @@ final class PhotoThumbnailDataProvider: NSObject {
                     let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
                     request.resultType = .dictionaryResultType
                     request.includesPendingChanges = false
-                    request.predicate = NSPredicate(format: "SELF IN %@", batchIDs)
+                    request.predicate = NSPredicate(format: "SELF IN %@", reachableIDs)
                     request.propertiesToFetch = [identity, "thumbnailData"]
-                    request.fetchLimit = batchIDs.count
+                    request.fetchLimit = reachableIDs.count
                     let rows = (try? context.fetch(request)) ?? []
                     var result: [NSManagedObjectID: Data] = [:]
                     for row in rows {

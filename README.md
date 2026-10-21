@@ -134,7 +134,7 @@ Missing-file upload pauses recover automatically when the upload queue next runs
 
 Capture processing waits for the final camera callback before pairing still and Live Photo resources; a failed movie preserves a valid still, and failed captures report an error instead of leaving the camera busy. Pending originals are included in device backup. A handled save failure removes its staged files and upload ownership without deleting the capture's source movie, so saving can be retried. Crash recovery skips active saves and serializes recovery attempts. Upload workers reserve each photo before sending it, retry transient failures on a timer while the app remains running, and retain files until CloudKit confirms every save. Deletion waits for an in-flight asset upload before remote cleanup, preventing a late upload from recreating a deleted asset. iOS background scheduling still controls retries while the app is suspended.
 
-Settings → Storage Management can keep all originals, or photos marked with either heart, available offline on this device. Both options include Live Photo motion. Cloud-backed offline originals are stored separately from caches and pending uploads and are excluded from device backup. Turning a keep setting off releases copies no longer selected; unuploaded originals are preserved.
+Settings → Photo Storage → Advanced → Storage Management can keep all originals, or photos marked with either heart, available offline on this device. Both options include Live Photo motion. Cloud-backed offline originals are stored separately from caches and pending uploads and are excluded from device backup. Turning a keep setting off releases copies no longer selected; unuploaded originals are preserved.
 
 Keep Recently Opened Photos adds a persistent cache ordered by last opening, with new captures and imports treated as openings. Its limit is adjustable from 100 MB to currently free device storage (default 1 GB). Exceeding or lowering the limit evicts the least recently opened cloud-backed photos, including their complete Live Photo resources. Hearted photos selected by Keep Hearted Photos are protected outside this limit, and Keep All Photos overrides it. Pending uploads are never evicted; after upload, retained staging files are handed off within the cache budget. Background downloads, thumbnail loads, and adjacent-page prefetching do not update access order. Settings shows a storage bar with hearted photos, other retained photos, pending uploads, cache, and the recent-photo limit.
 
@@ -188,14 +188,59 @@ The app is configured to use the default CloudKit container:
 
 ## Testing
 
+### Photo storage switching
+
+Settings → Photo Storage controls this device’s metadata sync and original-asset uploads together. Existing installations default to iCloud. Local-only mode excludes the library, retained originals, staging, and legacy originals from future device backups. Existing iCloud device backups and photos saved to Apple Photos are managed separately by iOS.
+
+Switching locally estimates original sizes, temporary download copies, a possible clean database copy, and a safety margin before committing. The margin is 10% of the working footprint, with a 50 MB minimum and 500 MB maximum; it stays free on the device. The confirmation lists originals, working space, and this safety margin separately. The same margin is checked before each original is retained, and completed originals remain safe if space runs out. Users choose whether to retain or remove existing cloud copies. Every still and Live Photo resource is hashed and retained before remote deletion. Atomic device-only checkpoints resume interrupted downloads, verification, upload preparation, and deletion. Adding/deleting photos is paused during a switch. Downloads can be cancelled before deletion begins.
+
+The removal option enumerates cloud metadata and original records, refuses to delete unknown photos that have not synced to this device, and verifies every deletion and final absence. A fresh local database preserves photo UUIDs, thumbnails, dates, locations, and flags without old CloudKit record mappings; deletion tombstones cannot erase the retained local library when iCloud is later enabled. Other devices should stop syncing before removal because they can upload copies again afterward. The original database remains retained locally for recovery and is excluded from backups in local mode.
+
+**CloudKit release setup:** Enable a QUERYABLE index for the `PhotoAsset` record type’s `recordName` system field (shown as Record ID in CloudKit Console), and deploy the index to production. The removal preflight requires enumeration of originals; a query/index failure stops the operation before any deletion. No Core Data schema change is required. See [Apple’s querying guidance](https://developer.apple.com/documentation/cloudkit/handling-an-icloud-container-s-data).
+
+Apple exposes account availability and quota-exceeded errors, but no remaining-iCloud-capacity API. Re-enabling iCloud therefore shows the original-byte estimate, explains private upload of the complete library, and requires users to confirm they checked capacity in iOS Settings. Upload ownership is persisted before sync resumes; quota errors retain originals and pause uploads. The estimate excludes future photos and additional cloud metadata overhead.
+
+Re-enabling iCloud first imports the server library into a fresh SQLite store, then merges the surviving local photos by UUID. Deletions made while local-only was enabled remain local: retained iCloud photos return, new local photos upload, and photos present in both libraries keep one row and their server record identity. The original local database stays intact until the merged database opens and its filename is checkpointed. Failed or interrupted imports leave that local database available for retry. Local deletions never enqueue cloud-original cleanup; older cleanup requests for originals referenced by the merged library are cancelled before cloud operations resume.
+
+`PhotoStorageModeTests` and `PhotoStorageFailureTests` cover existing-install defaults, atomic checkpoints, corrupt/unwritable journals, empty libraries, space preflight and mid-download exhaustion, missing/corrupt originals, all Live resource roles, resumable partial downloads/deletions, account changes/sign-out, unknown remote photos, batch deletion and final-absence verification, cancellation, mutation/upload guards, repeated switches, durable upload ownership, and quota/network/authentication failures after enabling iCloud. Restart scenarios reconstruct SQLite, preferences, cache inventory, and upload journals from disk. `PhotoStorageSettingsUITests` cover empty-state navigation, settings navigation, and cancellation of the storage-choice dialog.
+
+Run deterministic storage tests on iPhone 18 Pro:
+
+```sh
+TEST_RUNNER_STORAGE_TEST_HOST=1 TEST_RUNNER_SIMULATOR_EXAMPLE_PHOTOS=0 \
+xcodebuild test -project progress.xcodeproj -scheme progress -parallel-testing-enabled NO \
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
+  -only-testing:progressTests/PhotoStorageModeTests \
+  -only-testing:progressTests/PhotoStorageFailureTests \
+  -only-testing:progressTests/PhotoCloudLibraryMergeTests
+```
+
+`PhotoStorageLiveCloudTests` and `PhotoStorageLiveMirroringTests` are opt-in integration tests requiring an iCloud account on the selected simulator. The asset tests create a unique `StorageTests-UUID` private zone, exercise the real upload/download/metadata APIs, verify byte equality through both storage directions, request one-record enumeration pages, refuse unknown photos and cross-zone deletion targets, and remove only that test zone afterward. A separate read-only test verifies production library enumeration and the required `PhotoAsset` query index. The mirroring test uses a temporary SQLite library and one synthetic photo UUID: it verifies export, detached local editing, re-enabled export with the same CloudKit record identity, and deletes only that synthetic record. Imported account photos are never modified or included in deletion plans.
+
+`PhotoCloudLibraryLiveMergeTests` exercises the production coordinator with a retained photo grid in two real-iCloud scenarios: three cloud photos deleted locally plus a new local photo, and three local photos with one matching cloud photo. It verifies the merged UUIDs, preserved server identities, refreshed grid results, and export of new photos. Cleanup targets only each scenario’s synthetic UUIDs.
+
+`PhotoGridStoreTransitionTests` forces a debounced upload-status refresh during database replacement, checks recovery after a store is temporarily removed, and verifies rebinding to a different view context. Cached fetched results and thumbnail requests must never resolve object IDs from a removed store.
+
+```sh
+TEST_RUNNER_STORAGE_TEST_HOST=1 TEST_RUNNER_SIMULATOR_EXAMPLE_PHOTOS=0 \
+TEST_RUNNER_RUN_LIVE_CLOUDKIT_TESTS=1 \
+xcodebuild test -project progress.xcodeproj -scheme progress -parallel-testing-enabled NO \
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
+  -only-testing:progressTests/PhotoStorageLiveCloudTests \
+  -only-testing:progressTests/PhotoStorageLiveMirroringTests \
+  -only-testing:progressTests/PhotoCloudLibraryLiveMergeTests
+```
+
+`STORAGE_TEST_HOST=1` works only in Debug simulator builds. It keeps the normal app library in memory and stops normal app background services while fixtures explicitly open their own temporary disk libraries. Live tests fail with the account status if iCloud is unavailable; they do not silently pass or switch to mocks. Simulated quota/space/account failures do not fill storage or sign the user out. Two-device re-upload races and OS force-kills during an in-flight CloudKit operation still need dedicated device testing; reconstructing a checkpoint is not an OS termination test.
+
 ### Simulator example library
 
 Debug simulator builds automatically show the local examples in `SimulatorFixtures/Photos/`.
 The current fixture set contains 51 stills, including 49 Live Photos. Capture dates and
 embedded locations are preserved. Missing examples are restored on launch without
 duplicating existing ones or resetting favorites. The simulator uses a separate local
-store with iCloud disabled. Personal fixtures are Git-ignored, and device/Release
-builds exclude both the media and the seeding code. UI tests keep their empty stores.
+store with iCloud disabled. Settings identifies the simulator example library and shows its fixed local-only storage mode; the normal library’s saved storage preference is preserved. Personal fixtures are Git-ignored, and device/Release
+builds exclude both the media and the seeding code. Ordinary UI tests keep their empty stores; the simulator-example regression test explicitly opens the example library.
 
 Set `SIMULATOR_EXAMPLE_PHOTOS=0` in the Run environment to disable this mode.
 See [SimulatorFixtures/README.md](SimulatorFixtures/README.md) to replace the examples.

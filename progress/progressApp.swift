@@ -45,6 +45,7 @@ struct progressApp: App {
             .statusBarHidden(showsIntroduction)
             .environment(tipStore)
             .task {
+                guard !StorageTestConfiguration.isIsolatedHost else { return }
                 await tipStore.observeTransactions()
             }
             .animation(.easeOut(duration: 0.2), value: showsIntroduction)
@@ -91,8 +92,12 @@ private struct PersistenceRootView: View {
         case .loading:
             LibraryLoadingView()
         case .loaded:
-            ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+            if StorageTestConfiguration.isIsolatedHost {
+                Color.clear
+            } else {
+                ContentView()
+                    .environment(\.managedObjectContext, persistenceController.container.viewContext)
+            }
         case .failed(let message):
             ContentUnavailableView {
                 Label("Library Couldn’t Open", systemImage: "externaldrive.badge.exclamationmark")
@@ -178,6 +183,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     ) -> Bool {
         self.application = application
         UNUserNotificationCenter.current().delegate = self
+        guard !StorageTestConfiguration.isIsolatedHost else { return true }
         PortraitVideoExportService.shared.deleteTemporaryExports()
         PhotoUploadService.registerBackgroundTask()
         PhotoOfflineCoordinator.registerBackgroundTask()
@@ -185,6 +191,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func startPersistenceServices() {
+        guard !StorageTestConfiguration.isIsolatedHost else { return }
         guard PersistenceController.shared.isLoaded, !didStartPersistenceServices else { return }
         didStartPersistenceServices = true
         _ = CloudSyncMonitor.shared
@@ -199,6 +206,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         #endif
 
         Task {
+            do { try PhotoStorageCoordinator.shared.applyBackupPreference() }
+            catch {
+                PhotoStorageCoordinator.shared.recordStartupError(error)
+                return
+            }
             await ICloudAvailabilityMonitor.shared.refresh()
             let context = PersistenceController.shared.makeBackgroundContext()
             let recoveredCount = await PhotoStorageService.shared.recoverPendingUploadsFromManifest(context: context)
@@ -210,6 +222,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             await PhotoUploadService.shared.start()
             await RemoteAssetDeletionService.shared.start()
             PhotoOfflineCoordinator.shared.start()
+            PhotoStorageCoordinator.shared.resume()
         }
 
         Task.detached(priority: .utility) {
@@ -225,6 +238,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func handleEnteredBackground() {
+        guard !StorageTestConfiguration.isIsolatedHost else { return }
         #if DEBUG && targetEnvironment(simulator)
         if SimulatorExampleLibrary.isEnabled { return }
         #endif
@@ -241,6 +255,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     }
 
     func handleBecameActive() {
+        guard !StorageTestConfiguration.isIsolatedHost else { return }
         DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
         if didStartPersistenceServices {
             DailyReminderNotificationService.shared.refreshReminders()
@@ -253,6 +268,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             if SimulatorExampleLibrary.isEnabled { return }
             #endif
             PhotoOfflineCoordinator.shared.requestReconciliation()
+            PhotoStorageCoordinator.shared.resume()
             await PhotoUploadService.shared.enqueuePendingUploads(
                 expeditingRetries: true,
                 forceRetryExpedite: true

@@ -65,6 +65,9 @@ final class CloudSyncMonitor: ObservableObject {
     private let uploadContext: NSManagedObjectContext?
     private let uploadStore: LocalPhotoUploadStore
     private let iCloudUnavailableProvider: @MainActor () -> Bool
+    private let iCloudUnavailableReasonProvider: @MainActor () -> String?
+    private let storageModeStore: PhotoStorageModeStore
+    private let usesSimulatorExampleLibrary: Bool
     private var uploadStatusRefreshID = UUID()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "CloudSync")
 
@@ -72,11 +75,23 @@ final class CloudSyncMonitor: ObservableObject {
         context: NSManagedObjectContext? = nil,
         uploadStore: LocalPhotoUploadStore = .shared,
         iCloudUnavailableProvider: @escaping @MainActor () -> Bool = { ICloudAvailabilityMonitor.shared.isLocalModeActive },
-        observesChanges: Bool = true
+        observesChanges: Bool = true,
+        storageModeStore: PhotoStorageModeStore = .shared,
+        iCloudUnavailableReasonProvider: @escaping @MainActor () -> String? = { ICloudAvailabilityMonitor.shared.unavailableReason },
+        usesSimulatorExampleLibrary: Bool = {
+            #if DEBUG && targetEnvironment(simulator)
+            SimulatorExampleLibrary.isEnabled
+            #else
+            false
+            #endif
+        }()
     ) {
         self.uploadContext = context
         self.uploadStore = uploadStore
         self.iCloudUnavailableProvider = iCloudUnavailableProvider
+        self.iCloudUnavailableReasonProvider = iCloudUnavailableReasonProvider
+        self.storageModeStore = storageModeStore
+        self.usesSimulatorExampleLibrary = usesSimulatorExampleLibrary
         guard observesChanges else { return }
 
         observer = NotificationCenter.default.addObserver(
@@ -209,9 +224,10 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var statusSymbolName: String {
-        if isICloudUnavailable {
+        if usesSimulatorExampleLibrary || storageModeStore.mode.keepsAllOriginals {
             return "internaldrive"
         }
+        if isICloudUnavailable { return "icloud.slash" }
 
         if pausedUploadCount > 0 || uploadStatusError != nil {
             return "exclamationmark.icloud"
@@ -237,9 +253,8 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var isFailing: Bool {
-        if isICloudUnavailable {
-            return false
-        }
+        if usesSimulatorExampleLibrary || storageModeStore.mode.keepsAllOriginals { return false }
+        if isICloudUnavailable { return true }
 
         if pausedUploadCount > 0 || uploadStatusError != nil {
             return true
@@ -248,6 +263,10 @@ final class CloudSyncMonitor: ObservableObject {
             return true
         }
         return false
+    }
+
+    var showsStatusDetail: Bool {
+        usesSimulatorExampleLibrary || storageModeStore.mode.keepsAllOriginals || isFailing
     }
 
     var retryableUploadCount: Int {
@@ -269,8 +288,16 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var statusTitle: String {
+        if usesSimulatorExampleLibrary { return "Simulator example library" }
+        switch storageModeStore.mode {
+        case .downloading: return "Switching to local photo storage"
+        case .deletingCloudCopies: return "Removing iCloud copies"
+        case .preparingUpload: return "Preparing private iCloud upload"
+        case .local: return "Photos stored only on this device"
+        case .iCloud: break
+        }
         if isICloudUnavailable {
-            return "Stored on this device"
+            return "iCloud sync is unavailable"
         }
 
         if isICloudStorageFull { return "iCloud storage is full" }
@@ -319,8 +346,16 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var statusDetail: String {
+        if usesSimulatorExampleLibrary {
+            return "Simulator example photos stay on this simulator. iCloud sync is disabled for this example library."
+        }
+        if storageModeStore.mode.keepsAllOriginals {
+            return PhotoStorageCoordinator.shared.errorMessage ?? PhotoStorageCoordinator.shared.statusMessage
+                ?? "Automatic photo sync is off. View Photo Storage for details."
+        }
         if isICloudUnavailable {
-            return "Full-resolution photos are included in this device backup. iCloud sync resumes automatically when enabled."
+            let reason = iCloudUnavailableReasonProvider() ?? "iCloud is currently unavailable."
+            return "iCloud sync is enabled in Photo Storage. \(reason) New photos stay on this device until sync resumes."
         }
 
         if isICloudStorageFull {

@@ -133,6 +133,9 @@ final class PhotoOfflineCoordinator {
     }
 
     private func reconcile(id: UUID) async {
+        // Storage migration owns retention and downloads until its checkpoint
+        // commits. Never race its verification with cache eviction or handoffs.
+        guard !cloud.storageModeStore.mode.keepsAllOriginals else { return }
         isDownloading = false
         defer { if runID == id { isDownloading = false } }
         do {
@@ -390,6 +393,7 @@ final class PhotoOfflineCoordinator {
     }
 
     nonisolated static func registerBackgroundTask() {
+        #if !targetEnvironment(simulator)
         BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { task in
             guard let task = task as? BGProcessingTask else { task.setTaskCompleted(success: false); return }
             let work = Task { @MainActor in
@@ -408,19 +412,42 @@ final class PhotoOfflineCoordinator {
                     return
                 }
                 shared.start()
+                await PhotoStorageCoordinator.shared.resumeAndWait()
+                if PhotoStorageModeStore.shared.mode == .local {
+                    shared.scheduleBackgroundProcessing()
+                    task.setTaskCompleted(success: true)
+                    return
+                }
+                if PhotoStorageModeStore.shared.mode.isMigrating {
+                    task.setTaskCompleted(success: false)
+                    shared.scheduleBackgroundProcessing(earliestBeginDate: Date().addingTimeInterval(900))
+                    return
+                }
                 await shared.reconcileNow()
                 task.setTaskCompleted(success: !Task.isCancelled && !shared.hasMissingPhotos)
                 if shared.hasMissingPhotos { shared.scheduleBackgroundProcessing(earliestBeginDate: Date().addingTimeInterval(900)) }
             }
             task.expirationHandler = {
                 work.cancel()
-                Task { @MainActor in shared.cancelPendingWork() }
+                Task { @MainActor in
+                    shared.cancelPendingWork()
+                    PhotoStorageCoordinator.shared.suspend()
+                }
             }
         }
+        #endif
     }
 
     func scheduleBackgroundProcessing(earliestBeginDate: Date? = nil) {
-        guard PhotoOfflineSettings.policy(in: defaults) != .onDemand || PhotoOfflineSettings.keepsRecentPhotos(in: defaults) else {
+        // BackgroundTasks is unavailable in Simulator; foreground reconciliation
+        // and retries still run through the coordinator's own tasks.
+        #if !targetEnvironment(simulator)
+        guard !StorageTestConfiguration.isIsolatedHost else { return }
+        guard cloud.storageModeStore.mode.allowsCloudWrites || cloud.storageModeStore.mode.isMigrating else {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundTaskIdentifier)
+            return
+        }
+        guard cloud.storageModeStore.mode.isMigrating || PhotoOfflineSettings.policy(in: defaults) != .onDemand || PhotoOfflineSettings.keepsRecentPhotos(in: defaults) else {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.backgroundTaskIdentifier)
             return
         }
@@ -429,6 +456,7 @@ final class PhotoOfflineCoordinator {
         request.earliestBeginDate = earliestBeginDate
         do { try BGTaskScheduler.shared.submit(request) }
         catch { logger.debug("offline-bg-schedule: \(error.localizedDescription, privacy: .public)") }
+        #endif
     }
 
     isolated deinit {

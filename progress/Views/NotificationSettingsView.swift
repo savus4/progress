@@ -4,6 +4,8 @@ struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
+    @State private var storage = PhotoStorageCoordinator.shared
+    @State private var navigationPath: [PhotoSettingsDestination]
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
     @AppStorage(IntroductionPreferences.completedKey) private var hasCompletedIntroduction = false
 
@@ -15,8 +17,12 @@ struct NotificationSettingsView: View {
     private let settingsCreditRevealOverscroll: CGFloat = 190
     private let settingsCreditFadeOverscroll: CGFloat = 40
 
+    init(opensPhotoStorage: Bool = false) {
+        _navigationPath = State(initialValue: opensPhotoStorage ? [.photoStorage] : [])
+    }
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             Form {
                 Section("iCloud Sync") {
                     HStack(alignment: .top, spacing: 12) {
@@ -27,7 +33,7 @@ struct NotificationSettingsView: View {
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text(cloudSyncMonitor.statusTitle)
-                            if cloudSyncMonitor.isFailing {
+                            if cloudSyncMonitor.showsStatusDetail {
                                 Text(cloudSyncMonitor.statusDetail)
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
@@ -35,7 +41,7 @@ struct NotificationSettingsView: View {
                         }
                     }
 
-                    if cloudSyncMonitor.hasRetryableUploads || isRetryingUploads {
+                    if !storage.isLocalOnly && (cloudSyncMonitor.hasRetryableUploads || isRetryingUploads) {
                         Button {
                             retryFailedUploads()
                         } label: {
@@ -53,6 +59,11 @@ struct NotificationSettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+
+                    NavigationLink(value: PhotoSettingsDestination.photoStorage) {
+                        Label("Photo Storage", systemImage: storage.isLocalOnly ? "iphone" : "icloud")
+                    }
+                    .accessibilityIdentifier("photoStorageSettingsLink")
                 }
 
                 Section {
@@ -78,14 +89,6 @@ struct NotificationSettingsView: View {
                     Text("Shows the photo preview mirrored, matching the camera preview. Saved photos stay unchanged.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                }
-
-                Section {
-                    NavigationLink {
-                        SettingsMaintenanceView()
-                    } label: {
-                        Label("Storage Management", systemImage: "internaldrive")
-                    }
                 }
 
                 TipJarSection()
@@ -115,6 +118,14 @@ struct NotificationSettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .navigationDestination(for: PhotoSettingsDestination.self) { destination in
+                switch destination {
+                case .general, .photoStorage:
+                    PhotoStorageSettingsView()
+                case .storageManagement:
+                    SettingsMaintenanceView()
+                }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
