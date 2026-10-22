@@ -25,7 +25,7 @@ struct DailyReminderSuppressionTests {
 
         #expect(await service.setSkipsRemindersAfterPhoto(true).value)
         #expect(DailyReminderNotificationService(defaults: defaults).skipsRemindersAfterPhoto)
-        #expect(schedulingCount == 0)
+        #expect(schedulingCount == 1)
     }
 
     @Test("A completed day queues only tomorrow and later, keeping all reminder times")

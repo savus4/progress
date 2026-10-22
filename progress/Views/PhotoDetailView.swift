@@ -1283,7 +1283,7 @@ private final class ToolbarConfigViewController: UIViewController {
 
         let confirmation = UIAlertController(
             title: "Delete photo?",
-            message: "This action cannot be undone.",
+            message: PhotoDeletionMessage.scope(isLocalOnly: PhotoStorageCoordinator.shared.isLocalOnly),
             preferredStyle: .actionSheet
         )
         confirmation.addAction(UIAlertAction(title: "Delete Photo", style: .destructive) { [weak self] _ in

@@ -3,7 +3,15 @@ import Foundation
 /// A device-only, atomic checkpoint. Read failures stop cloud writes rather than
 /// silently uploading a library whose privacy preference could not be read.
 nonisolated final class PhotoStorageModeStore: @unchecked Sendable {
-    static let shared = PhotoStorageModeStore()
+    static let shared: PhotoStorageModeStore = {
+        guard StorageTestConfiguration.usesEphemeralLibrary else { return PhotoStorageModeStore() }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("StorageTestMode-\(UUID())/mode.json")
+        let store = PhotoStorageModeStore(storageURL: url)
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment["UI_TEST_STORAGE_MODE"] == "local" { try? store.set(.local) }
+        #endif
+        return store
+    }()
     static let didChangeNotification = Notification.Name("PhotoStorageModeStore.didChange")
 
     private struct Checkpoint: Codable {

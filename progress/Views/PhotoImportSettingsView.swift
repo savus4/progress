@@ -2,12 +2,17 @@ import PhotosUI
 import SwiftUI
 
 struct PhotoImportSettingsView: View {
+    let timelineID: UUID
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var selectedPrivatePhotoItems: [PhotosPickerItem] = []
     @State private var showingAlbumImportSheet = false
     @State private var availableImportAlbums: [PhotoImportAlbum] = []
     @State private var isLoadingImportAlbums = false
+
+    init(timelineID: UUID = TimelineIdentity.defaultID) {
+        self.timelineID = timelineID
+    }
 
     var body: some View {
         Form {
@@ -59,12 +64,12 @@ struct PhotoImportSettingsView: View {
         }
         .onChange(of: selectedPhotoItems) { _, items in
             guard !items.isEmpty else { return }
-            photoImporter.importSelectedPhotos(items)
+            photoImporter.importSelectedPhotos(items, timelineID: timelineID)
             selectedPhotoItems = []
         }
         .onChange(of: selectedPrivatePhotoItems) { _, items in
             guard !items.isEmpty else { return }
-            photoImporter.importSelectedPhotosPrivately(items)
+            photoImporter.importSelectedPhotosPrivately(items, timelineID: timelineID)
             selectedPrivatePhotoItems = []
         }
         .sheet(isPresented: $showingAlbumImportSheet) {
@@ -72,7 +77,7 @@ struct PhotoImportSettingsView: View {
                 List(availableImportAlbums) { album in
                     Button {
                         showingAlbumImportSheet = false
-                        photoImporter.importAlbum(album)
+                        photoImporter.importAlbum(album, timelineID: timelineID)
                     } label: {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {

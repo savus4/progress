@@ -1,6 +1,11 @@
 import SwiftUI
 
 struct PhotoStorageSettingsView: View {
+    private enum TimelineDestination: Hashable {
+        case photoImport(UUID)
+    }
+
+    @State private var timelines = TimelineSelectionStore.shared
     @ObservedObject private var syncMonitor = CloudSyncMonitor.shared
     @State private var storage = PhotoStorageCoordinator.shared
     @State private var iCloudEnabled = !PhotoStorageCoordinator.shared.isLocalOnly
@@ -43,7 +48,7 @@ struct PhotoStorageSettingsView: View {
                     if let message = storage.statusMessage { Text(message).font(.footnote) }
                     if let message = storage.errorMessage { Text(message).font(.footnote).foregroundStyle(.red) }
                     if storage.mode.isMigrating {
-                        Text("Keep the app open to finish sooner. The switch resumes if interrupted. Adding and deleting photos is paused until it finishes.")
+                        Text("Keep the app open to finish sooner. The switch resumes if interrupted. Adding and deleting photos, and editing timelines, is paused until it finishes.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         Button("Retry Storage Switch") { storage.resume() }
@@ -73,6 +78,18 @@ struct PhotoStorageSettingsView: View {
                     Label("Storage Management", systemImage: "internaldrive")
                 }
                 .accessibilityIdentifier("storageManagementSettingsLink")
+
+                NavigationLink(value: TimelineDestination.photoImport(timelines.selectedID)) {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                }
+                .accessibilityIdentifier("importSettingsLink")
+            }
+        }
+        .navigationDestination(for: TimelineDestination.self) { destination in
+            switch destination {
+            case .photoImport(let timelineID):
+                PhotoImportSettingsView(timelineID: timelineID)
+                    .id(timelineID)
             }
         }
         .navigationTitle("Photo Storage")
@@ -96,7 +113,7 @@ struct PhotoStorageSettingsView: View {
             NavigationStack {
                 Form {
                     Section("iCloud Sync") {
-                        Text("Merge this device’s photos with your private iCloud library. Photos, Live Photos, thumbnails, edits, and deletions sync across devices. Photos deleted locally return if their iCloud copies were kept.")
+                        Text("Merge this device’s timelines and photos with your private iCloud library. Timeline names, photos, Live Photos, thumbnails, and edits sync across devices. Timelines and photos deleted locally return if their iCloud copies were kept. Reminders stay on this device; deleted reminders do not return.")
                         LabeledContent("Photos", value: "\(estimate?.photoCount ?? 0)")
                         LabeledContent("Originals to Upload", value: bytes(estimate?.originalBytes ?? 0))
                     }
@@ -126,10 +143,14 @@ struct PhotoStorageSettingsView: View {
         return switch storage.mode {
         case .downloading:
             "Sync is paused while originals download and are verified. iCloud copies are kept until verification finishes."
-        case .local, .deletingCloudCopies, .preparingUpload:
+        case .preparingUpload:
+            "Sync is paused while your local timelines and photos merge with kept iCloud copies. They will sync after preparation finishes. Reminders stay on this device."
+        case .deletingCloudCopies:
+            "Originals are verified on this device. Previously confirmed iCloud copies are being removed across synced devices. Export a backup to protect your local library."
+        case .local:
             "Photos stay on this device only, with sync and device backups off. Export a backup to avoid losing photos if you delete the app or lose this device."
         case .iCloud:
-            syncMonitor.isICloudUnavailable ? syncMonitor.statusDetail : "Photos, Live Photos, thumbnails, and photo details sync privately to your iCloud account."
+            syncMonitor.isICloudUnavailable ? syncMonitor.statusDetail : "Timelines, names, photos, Live Photos, thumbnails, and photo details sync privately to your iCloud account. Reminders stay on this device."
         }
     }
 

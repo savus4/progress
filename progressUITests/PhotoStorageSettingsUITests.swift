@@ -68,12 +68,25 @@ final class PhotoStorageSettingsUITests: XCTestCase {
         app.buttons["Settings"].tap()
         let link = app.buttons["photoStorageSettingsLink"]
         XCTAssertTrue(link.waitForExistence(timeout: 5))
-        XCTAssertLessThan(link.frame.minY, app.buttons["notificationSettingsLink"].frame.minY,
-                          "Photo Storage belongs at the top of Settings with iCloud Sync.")
+        XCTAssertTrue(app.staticTexts["Storage"].exists)
+        let photoImport = app.buttons["importSettingsLink"]
+        XCTAssertFalse(photoImport.exists, "Import belongs in Photo Storage’s Advanced section.")
+        XCTAssertFalse(app.buttons["timelineRemindersLink"].exists,
+                       "Reminders belong inside Edit Timeline.")
         XCTAssertFalse(app.buttons["storageManagementSettingsLink"].exists,
                        "Storage Management belongs inside Photo Storage.")
         link.tap()
         XCTAssertTrue(app.switches["iCloudSyncToggle"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Advanced"].exists)
+        for _ in 0..<4 where !photoImport.isHittable { app.swipeUp() }
+        XCTAssertTrue(photoImport.waitForExistence(timeout: 5))
+        photoImport.tap()
+        XCTAssertTrue(app.navigationBars["Import"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Import Photos"].exists)
+        XCTAssertTrue(app.buttons["Import Album"].exists)
+        XCTAssertTrue(app.buttons["Import Privately (No Live Photos)"].exists)
+        app.navigationBars["Import"].buttons["Photo Storage"].tap()
+        XCTAssertTrue(app.navigationBars["Photo Storage"].waitForExistence(timeout: 5))
         let advanced = app.buttons["storageManagementSettingsLink"]
         for _ in 0..<4 where !advanced.isHittable { app.swipeUp() }
         XCTAssertTrue(advanced.waitForExistence(timeout: 5))

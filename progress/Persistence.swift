@@ -315,6 +315,7 @@ final class PersistenceController: ObservableObject {
         }
         let source = makeBackgroundContext()
         let target = local.newBackgroundContext()
+        try await TimelineLibraryCopy.merge(from: source, to: target)
         let ids = try await source.perform {
             let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
             request.resultType = .managedObjectIDResultType

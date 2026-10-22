@@ -102,7 +102,8 @@ final class PhotoCloudCopyService {
                 let changes = try await database.recordZoneChanges(inZoneWith: zone.zoneID, since: token, desiredKeys: [], resultsLimit: recordPageSize)
                 for (_, modification) in changes.modificationResultsByID {
                     let record = try modification.get().record
-                    if record.recordType == "CD_DailyPhoto" || (recordZoneID != nil && record.recordType == "PhotoAsset") {
+                    if record.recordType == "CD_DailyPhoto" || record.recordType == "CD_Timeline"
+                        || (recordZoneID != nil && record.recordType == "PhotoAsset") {
                         result.insert(record.recordID)
                     }
                 }

@@ -14,6 +14,7 @@
 - Save photos to the system Photos library.
 - Import photos, Live Photos, and full albums from the user’s photo library.
 - Schedule up to seven daily reminder notifications that can deep-link straight into the camera.
+- Create and switch between named timelines in Settings, with separate photos, reminders, and alignment guides. Timeline names sync with the photo library.
 - Export selected photos or the entire library through the system document picker.
 - Delete selected photos, delete photos in a date range, or wipe the library completely.
 - Sync photo metadata through Core Data + CloudKit, while original assets upload in the background.
@@ -47,6 +48,7 @@
 - Eye and mouth guides can be edited directly in the camera UI.
 - After capture, the app shows a preview step with retake/save before committing to storage.
 - Captured location is attached when permission is available.
+- Saving starts with a soft haptic, followed by gentle pulses for at most 1.5 seconds. Successful saves have a stronger takeoff cue and a heavy landing cue tied to the preview's animation, with a small settling bounce. Failure, leaving the camera, or backgrounding stops the pulses.
 
 ### Photo Viewer
 
@@ -62,9 +64,9 @@
 
 `NotificationSettingsView` currently acts as the app’s main settings and maintenance screen.
 
-- Notifications submenu with daily reminder times, notification permission handling, and a default-on “Skip Reminders After Taking a Photo” toggle.
-- Import submenu with photo picker, private import (experimental), and album import.
-- iCloud sync status and failed upload retry action.
+- Edit Timeline groups its name, deletion, and Reminders submenu, including daily times, notification permission handling, and a default-on “Skip Reminders After Taking a Photo” toggle.
+- Switching timelines plays a custom Core Haptics pattern: a crisp snap, rising pull, deep landing, and soft settling tap over about 0.2 seconds. Rapid switches replace the old pattern; leaving Settings or backgrounding stops it. Devices without custom-haptic support use a heavy impact fallback. Live Photo capture preferences belong to each timeline and sync with its metadata; unsupported cameras leave that preference untouched.
+- Storage groups iCloud sync status, failed upload retry, and Photo Storage. Import and Storage Management are in Photo Storage’s Advanced section. Import offers the photo picker, private import (experimental), and album import for the selected timeline.
 - Delete by date range.
 - Delete all local photo records and assets.
 - Optional snack-themed tips at the bottom: chips (US$3), fries (US$5), and custom tips from US$10 to US$100 in US$10 steps. The App Store supplies localized prices and currency. Verified tips show a thank-you screen; cancellation, pending approval, and errors never show success.
@@ -105,6 +107,7 @@ Daily repeating notification triggers cannot omit a single occurrence. After ski
 The `DailyPhoto` Core Data entity currently stores:
 
 - `id`
+- `timelineID` (nil legacy ownership resolves to the permanent default timeline)
 - `captureDate`
 - `thumbnailData`
 - `fullImageAssetName`
@@ -119,7 +122,9 @@ The `DailyPhoto` Core Data entity currently stores:
 - `isHearted`, `isFavoriteLivePhoto`, and `isHiddenFromVideo`
 - upload bookkeeping fields such as `uploadStateRaw`, `uploadAttemptCount`, `uploadErrorMessage`, and `uploadRetryAfter`
 
-`progressVideoVisibility` is the current Core Data model version. The original model remains bundled for lightweight migration; existing and newly captured/imported photos default to inclusion in videos. `isHiddenFromVideo` syncs with the photo metadata and excludes both still and Live Photo video frames, including paused exports. Before release, deploy the additive `CD_isHiddenFromVideo` field on `CD_DailyPhoto` to the production CloudKit schema.
+`progressWithTimelinesLivePhotos` is the current Core Data model version. All five previous models remain bundled for lightweight migration. `Timeline` holds names, stable UUIDs and permanent deletion markers, while photos and device-local reminders carry timeline ownership. Existing libraries resolve to a timeline called Default without rewriting their photos. Settings offers switching, creation, renaming (including the only timeline), and confirmed deletion when another timeline remains. Names and permanent deletion markers sync through Core Data while selection stays device-local. Local timeline removals leave kept iCloud copies untouched; re-enabling sync restores them and their photos, with reminders remaining cleared. See [timeline migration and release notes](docs/timeline-data-migration.md).
+
+`isHiddenFromVideo` syncs with the photo metadata and excludes both still and Live Photo video frames, including paused exports. Existing and newly captured/imported photos default to inclusion in videos. Before release, deploy the additive `CD_isHiddenFromVideo` and timeline ownership fields on `CD_DailyPhoto`, plus `CD_Timeline` including `CD_deletedAt`, `CD_localDeletedAt`, `CD_livePhotoCaptureEnabled`, and `CD_livePhotoPreferenceModifiedAt`, to the production CloudKit schema.
 
 ### Sync Model
 

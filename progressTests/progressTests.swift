@@ -82,7 +82,9 @@ struct ProgressCoreFunctionalityTests {
     @Test("Reminder times are clamped, sorted, deduplicated, and capped")
     func dailyReminderLoadSanitizesPersistedData() throws {
         let key = "dailyPhotoReminderTimes"
-        defer { UserDefaults.standard.removeObject(forKey: key) }
+        let domain = "ReminderSanitizationTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
 
         let persisted: [DailyReminderTime] = [
             .init(id: UUID(), hour: 10, minute: 15),
@@ -96,9 +98,9 @@ struct ProgressCoreFunctionalityTests {
             .init(id: UUID(), hour: 23, minute: 20)
         ]
         let encoded = try JSONEncoder().encode(persisted)
-        UserDefaults.standard.set(encoded, forKey: key)
+        defaults.set(encoded, forKey: key)
 
-        let times = DailyReminderNotificationService.shared.loadReminderTimes()
+        let times = DailyReminderNotificationService(defaults: defaults).loadReminderTimes()
         #expect(times.count == DailyReminderNotificationService.maxRemindersPerDay)
         #expect(times[0].hour == 0)
         #expect(times[0].minute == 0)

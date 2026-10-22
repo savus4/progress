@@ -5,7 +5,9 @@ struct NotificationSettingsView: View {
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
     @State private var storage = PhotoStorageCoordinator.shared
-    @State private var navigationPath: [PhotoSettingsDestination]
+    @State private var navigationPath: NavigationPath
+    @State private var timelines = TimelineSelectionStore.shared
+    @State private var timelineEditor: TimelineEditorSheet.Mode?
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
     @AppStorage(IntroductionPreferences.completedKey) private var hasCompletedIntroduction = false
 
@@ -18,13 +20,15 @@ struct NotificationSettingsView: View {
     private let settingsCreditFadeOverscroll: CGFloat = 40
 
     init(opensPhotoStorage: Bool = false) {
-        _navigationPath = State(initialValue: opensPhotoStorage ? [.photoStorage] : [])
+        _navigationPath = State(initialValue: NavigationPath(opensPhotoStorage ? [PhotoSettingsDestination.photoStorage] : []))
     }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
             Form {
-                Section("iCloud Sync") {
+                TimelineSettingsSection(editor: $timelineEditor)
+
+                Section("Storage") {
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: cloudSyncMonitor.statusSymbolName)
                             .font(.title3)
@@ -64,22 +68,6 @@ struct NotificationSettingsView: View {
                         Label("Photo Storage", systemImage: storage.isLocalOnly ? "iphone" : "icloud")
                     }
                     .accessibilityIdentifier("photoStorageSettingsLink")
-                }
-
-                Section {
-                    NavigationLink {
-                        DailyReminderSettingsView()
-                    } label: {
-                        Label("Notifications", systemImage: "bell.badge")
-                    }
-                    .accessibilityIdentifier("notificationSettingsLink")
-
-                    NavigationLink {
-                        PhotoImportSettingsView()
-                    } label: {
-                        Label("Import", systemImage: "square.and.arrow.down")
-                    }
-                    .accessibilityIdentifier("importSettingsLink")
                 }
 
                 Section("Camera") {
@@ -159,6 +147,14 @@ struct NotificationSettingsView: View {
             } message: {
                 Text("The introduction will appear the next time you launch Work in Progress.")
             }
+        }
+        .sheet(item: $timelineEditor) { mode in
+            TimelineEditorSheet(mode: mode)
+        }
+        .onChange(of: timelines.selectedID) { _, _ in
+            // Destinations capture an owner; do not leave an editor for a remotely
+            // deleted timeline on screen after selection falls back to a survivor.
+            navigationPath = NavigationPath()
         }
     }
 

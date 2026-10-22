@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		51A100012FEA000000000005 /* progress/progress.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 51A100012FEA000000000001 /* progress/progress.xcdatamodeld */; };
 		B17A00102FE4000000000001 /* progress/Resources/Tips.storekit in Resources */ = {isa = PBXBuildFile; fileRef = B17A00102FE4000000000002 /* progress/Resources/Tips.storekit */; };
 /* End PBXBuildFile section */
 
@@ -28,6 +29,12 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		51A100012FEA000000000002 /* progress.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = progress.xcdatamodel; sourceTree = "<group>"; };
+		51A100012FEA000000000003 /* progressVideoVisibility.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = progressVideoVisibility.xcdatamodel; sourceTree = "<group>"; };
+		51A100012FEA000000000004 /* progressWithTimelines.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = progressWithTimelines.xcdatamodel; sourceTree = "<group>"; };
+		51A100012FEA000000000006 /* progressWithTimelinesDeletion.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = progressWithTimelinesDeletion.xcdatamodel; sourceTree = "<group>"; };
+		51A100012FEA000000000007 /* progressWithTimelinesDeletionScope.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = progressWithTimelinesDeletionScope.xcdatamodel; sourceTree = "<group>"; };
+		51A100012FEA000000000008 /* progressWithTimelinesLivePhotos.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = progressWithTimelinesLivePhotos.xcdatamodel; sourceTree = "<group>"; };
 		9A5C9C9A2FB5E11400F1B052 /* progress.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = progress.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A5C9C9B2FB5E11400F1B052 /* progressTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A5C9C9C2FB5E11400F1B052 /* progressUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = progressUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -39,6 +46,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				progress.xcdatamodeld,
 			);
 			target = 9A2471C22F47BB3C0021B434 /* progress */;
 		};
@@ -94,6 +102,7 @@
 			isa = PBXGroup;
 			children = (
 				B17A00102FE4000000000002 /* progress/Resources/Tips.storekit */,
+				51A100012FEA000000000001 /* progress/progress.xcdatamodeld */,
 				9A2471C52F47BB3C0021B434 /* progress */,
 				9A2471DA2F47BB3D0021B434 /* progressTests */,
 				9A2471E42F47BB3D0021B434 /* progressUITests */,
@@ -275,6 +284,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				51A100012FEA000000000005 /* progress/progress.xcdatamodeld in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -659,6 +669,24 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCVersionGroup section */
+		51A100012FEA000000000001 /* progress/progress.xcdatamodeld */ = {
+			isa = XCVersionGroup;
+			children = (
+				51A100012FEA000000000002 /* progress.xcdatamodel */,
+				51A100012FEA000000000003 /* progressVideoVisibility.xcdatamodel */,
+				51A100012FEA000000000004 /* progressWithTimelines.xcdatamodel */,
+				51A100012FEA000000000006 /* progressWithTimelinesDeletion.xcdatamodel */,
+				51A100012FEA000000000007 /* progressWithTimelinesDeletionScope.xcdatamodel */,
+				51A100012FEA000000000008 /* progressWithTimelinesLivePhotos.xcdatamodel */,
+			);
+			currentVersion = 51A100012FEA000000000008 /* progressWithTimelinesLivePhotos.xcdatamodel */;
+			path = progress/progress.xcdatamodeld;
+			sourceTree = "<group>";
+			versionGroupType = wrapper.xcdatamodel;
+		};
+/* End XCVersionGroup section */
 	};
 	rootObject = 9A2471BB2F47BB3C0021B434 /* Project object */;
 }

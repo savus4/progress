@@ -4,13 +4,18 @@ import UserNotifications
 
 struct DailyReminderSettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage(DailyReminderNotificationService.skipAfterPhotoKey) private var skipsAfterPhoto = true
+    let timelineID: UUID
+    @State private var skipsAfterPhoto = true
     @State private var reminderTimes: [DailyReminderTime] = []
     @State private var authorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var hasLoadedReminderTimes = false
     @State private var lastSubmittedReminderTimes: [DailyReminderTime]?
 
     private let notificationService = DailyReminderNotificationService.shared
+
+    init(timelineID: UUID = TimelineIdentity.defaultID) {
+        self.timelineID = timelineID
+    }
 
     var body: some View {
         Form {
@@ -21,7 +26,7 @@ struct DailyReminderSettingsView: View {
                 Text("Once a photo has been saved for today, remaining reminders are skipped until tomorrow. Turn this off to receive every scheduled reminder.")
             }
 
-            Section("Reminder Times") {
+            Section {
                 if reminderTimes.isEmpty {
                     Text("No reminder times configured.")
                         .foregroundStyle(.secondary)
@@ -61,6 +66,10 @@ struct DailyReminderSettingsView: View {
                     Label("Add Time", systemImage: "plus.circle")
                 }
                 .disabled(reminderTimes.count >= DailyReminderNotificationService.maxRemindersPerDay)
+            } header: {
+                Text("Reminder Times")
+            } footer: {
+                Text("Reminders don’t sync between devices.")
             }
             .animation(.easeInOut(duration: 0.2), value: reminderTimes)
 
@@ -74,11 +83,12 @@ struct DailyReminderSettingsView: View {
                 }
             }
         }
-        .navigationTitle("Notifications")
+        .navigationTitle("Reminders")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: scenePhase) {
             if !hasLoadedReminderTimes {
-                reminderTimes = notificationService.loadReminderTimes()
+                reminderTimes = notificationService.loadReminderTimes(timelineID: timelineID)
+                skipsAfterPhoto = notificationService.skipsRemindersAfterPhoto(timelineID: timelineID)
                 lastSubmittedReminderTimes = reminderTimes
                 hasLoadedReminderTimes = true
             }
@@ -86,7 +96,7 @@ struct DailyReminderSettingsView: View {
         }
         .onChange(of: skipsAfterPhoto) { _, _ in
             guard hasLoadedReminderTimes else { return }
-            notificationService.refreshReminders()
+            notificationService.setSkipsRemindersAfterPhoto(skipsAfterPhoto, timelineID: timelineID)
         }
         .onDisappear {
             persistChangesIfNeeded()
@@ -105,7 +115,7 @@ struct DailyReminderSettingsView: View {
     private func persistChangesIfNeeded() {
         guard hasLoadedReminderTimes, lastSubmittedReminderTimes != reminderTimes else { return }
         lastSubmittedReminderTimes = reminderTimes
-        notificationService.submitReminderTimes(reminderTimes)
+        notificationService.submitReminderTimes(reminderTimes, timelineID: timelineID)
     }
 
     private func openAppSettings() {

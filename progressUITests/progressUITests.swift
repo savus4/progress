@@ -32,6 +32,7 @@ final class progressUITests: XCTestCase {
         ]
         app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
         app.launchEnvironment["UI_TEST_MOCK_CAPTURE"] = "1"
+        app.launchEnvironment["UI_TEST_MIN_SAVE_DELAY"] = "2"
         app.launch()
 
         let openCameraButton = app.buttons["emptyStateCaptureButton"]
@@ -46,6 +47,7 @@ final class progressUITests: XCTestCase {
         }
         XCTAssertTrue(doneButton.waitForExistence(timeout: 5))
         doneButton.tap()
+        XCTAssertFalse(doneButton.isEnabled, "A slow save must keep the preview busy until persistence finishes.")
 
         let disappeared = NSPredicate(format: "exists == false")
         expectation(for: disappeared, evaluatedWith: doneButton)

@@ -37,6 +37,8 @@ enum PhotoCloudLibraryPreparation {
 
         let sourceContext = source.newBackgroundContext()
         let targetContext = target.newBackgroundContext()
+        let sourceDeletedIDs = try await TimelineStore.state(in: sourceContext).deletedIDs
+        try await TimelineLibraryCopy.merge(from: sourceContext, to: targetContext, restoringKeptCloudTimelines: true)
         let ids = try await sourceContext.perform {
             let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
             request.resultType = .managedObjectIDResultType
@@ -57,7 +59,10 @@ enum PhotoCloudLibraryPreparation {
                 }
                 return (id, attributes)
             }
+            let owner = attributes["timelineID"]?.value as? UUID ?? TimelineIdentity.defaultID
+            guard !sourceDeletedIDs.contains(owner) else { continue }
             try await targetContext.perform {
+                if try TimelineStore.libraryState(in: targetContext).deletedIDs.contains(owner) { return }
                 let request = DailyPhoto.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", id as NSUUID)
                 request.fetchLimit = 1

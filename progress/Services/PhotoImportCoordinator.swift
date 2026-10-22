@@ -37,6 +37,8 @@ final class PhotoImportCoordinator: ObservableObject {
     private var completionDismissTask: Task<Void, Never>?
     private var importStartedAt: Date?
     private var learnedSecondsPerPhoto: TimeInterval?
+    // A running import owns its destination independently of later UI selection.
+    private var importTimelineID = TimelineIdentity.defaultID
     private let importLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoImport")
     private let importFlushSize = 3
     private let secondsPerPhotoEstimateKey = "photoImportSecondsPerPhotoEstimate"
@@ -81,14 +83,14 @@ final class PhotoImportCoordinator: ObservableObject {
         }
     }
 
-    func importSelectedPhotos(_ items: [PhotosPickerItem]) {
-        beginImport(totalCount: items.count) {
+    func importSelectedPhotos(_ items: [PhotosPickerItem], timelineID: UUID = TimelineIdentity.defaultID) {
+        beginImport(totalCount: items.count, timelineID: timelineID) {
             await self.importItems(items, preserveLivePhotos: true)
         }
     }
 
-    func importSelectedPhotosPrivately(_ items: [PhotosPickerItem]) {
-        beginImport(totalCount: items.count) {
+    func importSelectedPhotosPrivately(_ items: [PhotosPickerItem], timelineID: UUID = TimelineIdentity.defaultID) {
+        beginImport(totalCount: items.count, timelineID: timelineID) {
             await self.importItems(items, preserveLivePhotos: false)
         }
     }
@@ -105,7 +107,7 @@ final class PhotoImportCoordinator: ObservableObject {
         return loadImportAlbums()
     }
 
-    func importAlbum(_ album: PhotoImportAlbum) {
+    func importAlbum(_ album: PhotoImportAlbum, timelineID: UUID = TimelineIdentity.defaultID) {
         let fetchResult = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [album.localIdentifier], options: nil)
         guard let collection = fetchResult.firstObject else {
             statusMessage = "The selected album is no longer available."
@@ -116,18 +118,19 @@ final class PhotoImportCoordinator: ObservableObject {
         assetOptions.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         let assets = allObjects(from: PHAsset.fetchAssets(in: collection, options: assetOptions))
 
-        beginImport(totalCount: assets.count) {
+        beginImport(totalCount: assets.count, timelineID: timelineID) {
             await self.importAssets(assets, preserveLivePhotos: true)
         }
     }
 
-    private func beginImport(totalCount: Int, operation: @escaping @Sendable () async -> Void) {
+    private func beginImport(totalCount: Int, timelineID: UUID, operation: @escaping @Sendable () async -> Void) {
         guard !PhotoStorageModeStore.shared.mode.isMigrating else {
             statusMessage = "Let the photo storage switch finish before importing photos. Check Photo Storage in Settings."
             return
         }
         guard !isImporting else { return }
 
+        importTimelineID = timelineID
         importTask?.cancel()
         completionDismissTask?.cancel()
         isImporting = true
@@ -540,7 +543,9 @@ final class PhotoImportCoordinator: ObservableObject {
         let chunk = payloads
         payloads.removeAll(keepingCapacity: true)
 
-        let result = await PhotoStorageService.shared.saveImportedPhotos(chunk, batchSize: importFlushSize)
+        let result = await PhotoStorageService.shared.saveImportedPhotos(
+            chunk, batchSize: importFlushSize, timelineID: importTimelineID
+        )
         importedCount += result.importedCount
         duplicateCount += result.duplicateCount
         failedCount += result.failedCount

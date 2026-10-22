@@ -40,6 +40,7 @@ struct ImportedPhotoBatchResult: Sendable {
 
 struct DeleteAllPhotosResult: Sendable {
     enum CloudMetadataDeletionState: Sendable {
+        case notRequested
         case confirmed
         case pending
         case failed(String)
@@ -51,6 +52,11 @@ struct DeleteAllPhotosResult: Sendable {
     let shouldRebuildPersistentStore: Bool
     let isDeferredUntilICloudAvailable: Bool
 
+    var isDeviceOnly: Bool {
+        if case .notRequested = cloudMetadataDeletionState { return true }
+        return false
+    }
+
     var isCloudDeletionComplete: Bool {
         if pendingRemoteAssetDeletionCount > 0 {
             return false
@@ -59,7 +65,7 @@ struct DeleteAllPhotosResult: Sendable {
         switch cloudMetadataDeletionState {
         case .confirmed:
             return true
-        case .pending, .failed:
+        case .notRequested, .pending, .failed:
             return false
         }
     }
@@ -124,10 +130,12 @@ final class PhotoStorageService {
         livePhotoVideoURL: URL? = nil,
         location: (latitude: Double, longitude: Double)?,
         context: NSManagedObjectContext,
+        timelineID: UUID = TimelineIdentity.defaultID,
         enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let photoID = UUID()
         try ensureStorageMigrationAllowsLibraryChanges()
+        try await context.perform { try TimelineStore.validateOwner(timelineID, in: context) }
         let sourceImageData = livePhotoImageData ?? imageData
         guard let sourceImageData else {
             throw PhotoStorageError.missingImageData
@@ -148,7 +156,8 @@ final class PhotoStorageService {
             latitude: resolvedLocation?.latitude ?? 0,
             longitude: resolvedLocation?.longitude ?? 0,
             fullImageAssetName: stillAssetName,
-            livePhotoVideoAssetName: livePhotoVideoAssetName
+            livePhotoVideoAssetName: livePhotoVideoAssetName,
+            timelineID: timelineID
         )
         let objectID: NSManagedObjectID
         do {
@@ -156,8 +165,10 @@ final class PhotoStorageService {
             try await pendingUploadManifestService.record(manifestEntry)
             try cloudKitService.uploadStateStore.register(manifestEntry.localUpload)
             objectID = try await context.perform {
+                try TimelineStore.validateOwner(timelineID, in: context)
                 let photo = DailyPhoto(context: context)
                 photo.id = photoID
+                photo.timelineID = timelineID
                 photo.captureDate = manifestEntry.captureDate
                 photo.createdAt = createdAt
                 photo.modifiedAt = createdAt
@@ -205,12 +216,14 @@ final class PhotoStorageService {
         imageData: Data,
         libraryMetadata: ImportedPhotoLibraryMetadata? = nil,
         context: NSManagedObjectContext,
+        timelineID: UUID = TimelineIdentity.defaultID,
         enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: nil,
             libraryMetadata: libraryMetadata,
+            timelineID: timelineID,
             context: context
         )
         if enqueuesPendingUpload {
@@ -226,12 +239,14 @@ final class PhotoStorageService {
         videoURL: URL,
         libraryMetadata: ImportedPhotoLibraryMetadata? = nil,
         context: NSManagedObjectContext,
+        timelineID: UUID = TimelineIdentity.defaultID,
         enqueuesPendingUpload: Bool = true
     ) async throws -> NSManagedObjectID {
         let storedPhoto = try await makeImportedPhoto(
             imageData: imageData,
             livePhotoVideoURL: videoURL,
             libraryMetadata: libraryMetadata,
+            timelineID: timelineID,
             context: context
         )
         if enqueuesPendingUpload {
@@ -246,6 +261,7 @@ final class PhotoStorageService {
         _ payloads: [ImportedPhotoPayload],
         batchSize: Int = 4,
         context: NSManagedObjectContext? = nil,
+        timelineID: UUID = TimelineIdentity.defaultID,
         enqueuesPendingUploads: Bool = true
     ) async -> ImportedPhotoBatchResult {
         guard !payloads.isEmpty else {
@@ -290,6 +306,7 @@ final class PhotoStorageService {
 
         var knownFingerprints = await existingImportedPhotoFingerprints(
             matching: Set(payloadFingerprints.values),
+            timelineID: timelineID,
             context: importContext
         )
 
@@ -311,6 +328,7 @@ final class PhotoStorageService {
                     imageData: payload.imageData,
                     livePhotoVideoURL: payload.livePhotoVideoURL,
                     libraryMetadata: payload.libraryMetadata,
+                    timelineID: timelineID,
                     context: importContext,
                     saveChanges: false
                 )
@@ -415,7 +433,7 @@ final class PhotoStorageService {
         )
     }
 
-    func syncPhotoMetadataFromAssetsIfNeeded(limit: Int? = nil) async {
+    func syncPhotoMetadataFromAssetsIfNeeded(limit: Int? = nil, timelineID: UUID = TimelineIdentity.defaultID) async {
         let batchLimit = max(limit ?? metadataSyncBatchLimit, 1)
         let context = await MainActor.run { PersistenceController.shared.makeBackgroundContext() }
 
@@ -426,9 +444,10 @@ final class PhotoStorageService {
                 NSSortDescriptor(keyPath: \DailyPhoto.createdAt, ascending: false),
                 NSSortDescriptor(keyPath: \DailyPhoto.modifiedAt, ascending: false)
             ]
-            request.predicate = NSPredicate(
-                format: "fullImageAssetName != nil AND (captureDate == nil OR (latitude == 0 AND longitude == 0))"
-            )
+            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                NSPredicate(format: "fullImageAssetName != nil AND (captureDate == nil OR (latitude == 0 AND longitude == 0))"),
+                TimelineIdentity.photoPredicate(for: timelineID)
+            ])
 
             return try context.fetch(request).map {
                 PhotoMetadataSyncCandidate(
@@ -570,6 +589,7 @@ final class PhotoStorageService {
 
     func deletePhoto(_ objectID: NSManagedObjectID, context: NSManagedObjectContext) async throws {
         try ensureStorageMigrationAllowsDeletion()
+        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
         let assetNames = try await context.perform {
             guard let photo = try context.existingObject(with: objectID) as? DailyPhoto else {
                 return Set<String>()
@@ -580,7 +600,7 @@ final class PhotoStorageService {
             try context.save()
             return assetNames
         }
-        await deleteAssets(named: assetNames)
+        await deleteAssets(named: assetNames, deletesCloudCopies: deletesCloudCopies)
     }
 
     func deletePhotos(
@@ -591,6 +611,7 @@ final class PhotoStorageService {
         let uniqueObjectIDs = Array(Set(objectIDs))
         try ensureStorageMigrationAllowsDeletion()
         guard !uniqueObjectIDs.isEmpty else { return 0 }
+        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
 
         let (assetNames, deletedCount) = try await context.perform {
             var assetNames = Set<String>()
@@ -614,9 +635,9 @@ final class PhotoStorageService {
         }
 
         if deletesAssetsInBackground {
-            await deleteAssetsInBackground(named: assetNames)
+            await deleteAssetsInBackground(named: assetNames, deletesCloudCopies: deletesCloudCopies)
         } else {
-            await deleteAssets(named: assetNames)
+            await deleteAssets(named: assetNames, deletesCloudCopies: deletesCloudCopies)
         }
 
         return deletedCount
@@ -640,6 +661,7 @@ final class PhotoStorageService {
         context: NSManagedObjectContext
     ) async throws -> Int {
         try ensureStorageMigrationAllowsDeletion()
+        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
         let (assetNames, deletedCount) = try await context.perform {
             let request = DailyPhoto.fetchRequest()
             request.predicate = Self.dateRangePredicate(from: startDate, to: endDate)
@@ -655,12 +677,13 @@ final class PhotoStorageService {
             return (assetNames, photos.count)
         }
 
-        await deleteAssets(named: assetNames)
+        await deleteAssets(named: assetNames, deletesCloudCopies: deletesCloudCopies)
         return deletedCount
     }
 
     func deleteAllPhotos(context: NSManagedObjectContext) async throws -> DeleteAllPhotosResult {
         try ensureStorageMigrationAllowsDeletion()
+        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
         return try await deleteAllPhotos(
             context: context,
             operations: DeleteAllPhotosOperations(
@@ -670,8 +693,8 @@ final class PhotoStorageService {
                 waitForNextExportCompletion: {
                     await CloudSyncMonitor.shared.waitForNextExportCompletion(timeout: .seconds(30))
                 },
-                deleteAssets: { await self.deleteAssets(named: $0) },
-                deleteAssetsAndWaitForRemoteCleanup: { await self.deleteAssetsAndWaitForRemoteCleanup(named: $0) }
+                deleteAssets: { await self.deleteAssets(named: $0, deletesCloudCopies: deletesCloudCopies) },
+                deleteAssetsAndWaitForRemoteCleanup: { await self.deleteAssetsAndWaitForRemoteCleanup(named: $0, deletesCloudCopies: deletesCloudCopies) }
             )
         )
     }
@@ -680,6 +703,10 @@ final class PhotoStorageService {
         context: NSManagedObjectContext,
         operations: DeleteAllPhotosOperations
     ) async throws -> DeleteAllPhotosResult {
+        var isDeviceOnly = cloudKitService.storageModeStore.mode == .local
+        #if DEBUG && targetEnvironment(simulator)
+        isDeviceOnly = isDeviceOnly || (cloudKitService === CloudKitService.shared && SimulatorExampleLibrary.isEnabled)
+        #endif
         // Freeze the user's deletion targets before upload draining can suspend.
         // Captures saved while deletion is in progress belong to the next library.
         let photoIDsToDelete = try await context.perform {
@@ -705,7 +732,7 @@ final class PhotoStorageService {
         await operations.cancelPendingUploads()
         let uploadsDrainedBeforeDeletion = await operations.waitUntilUploadsIdle()
 
-        if operations.isLocalModeActive() {
+        if isDeviceOnly || operations.isLocalModeActive() {
             let (assetNames, deletedCount) = try await context.perform {
                 let photos = photoIDsToDelete.compactMap { objectID -> DailyPhoto? in
                     guard let photo = try? context.existingObject(with: objectID) as? DailyPhoto,
@@ -727,10 +754,10 @@ final class PhotoStorageService {
 
             return DeleteAllPhotosResult(
                 deletedCount: deletedCount,
-                cloudMetadataDeletionState: .pending,
-                pendingRemoteAssetDeletionCount: assetNames.count,
+                cloudMetadataDeletionState: isDeviceOnly ? .notRequested : .pending,
+                pendingRemoteAssetDeletionCount: isDeviceOnly ? 0 : assetNames.count,
                 shouldRebuildPersistentStore: false,
-                isDeferredUntilICloudAvailable: true
+                isDeferredUntilICloudAvailable: !isDeviceOnly
             )
         }
 
@@ -868,8 +895,28 @@ final class PhotoStorageService {
         await pendingUploadManifestService.recoverPendingUploads(
             context: context,
             cloudKitService: cloudKitService,
-            thumbnailService: thumbnailService
+            thumbnailService: thumbnailService,
+            remoteAssetDeletionService: remoteAssetDeletionService
         )
+    }
+
+    /// Run against the durable local source before dropping local removal markers.
+    /// Journals and upload ownership must not recreate a removed owner's local photos
+    /// in the fresh, restored cloud library after a crash or delayed save.
+    func prepareDeletedTimelinesForICloud(context: NSManagedObjectContext) async throws {
+        let deletedIDs = try await TimelineStore.state(in: context).deletedIDs
+        guard !deletedIDs.isEmpty else { return }
+        var names = try await pendingUploadManifestService.discardEntries(ownedBy: deletedIDs)
+        let photoNames = try await context.perform {
+            let photos = try context.fetch(DailyPhoto.fetchRequest()).filter { deletedIDs.contains($0.effectiveTimelineID) }
+            let names = Set(photos.flatMap(self.assetNames(for:)))
+            for photo in photos { context.delete(photo) }
+            if context.hasChanges { try context.save() }
+            return names
+        }
+        names.formUnion(photoNames)
+        // Storage preparation has cloud writes paused. Kept server assets survive.
+        await deleteAssets(named: names, deletesCloudCopies: false)
     }
 
     /// Copies previous versions' original payloads without deleting the old bytes.
@@ -886,6 +933,7 @@ final class PhotoStorageService {
             guard !Task.isCancelled else { break }
             guard let snapshot = try? await context.perform({
                 guard let photo = try context.existingObject(with: objectID) as? DailyPhoto else { return nil as PhotoSnapshot? }
+                try TimelineStore.validateOwner(photo.effectiveTimelineID, in: context)
                 return PhotoSnapshot(photo: photo)
             }) else { continue }
             if let id = snapshot.id, cloudKitService.uploadStateStore.entry(for: id)?.state == .uploaded { continue }
@@ -900,6 +948,9 @@ final class PhotoStorageService {
     }
 
     private func recoverLegacyOriginals(for original: PhotoSnapshot, context: NSManagedObjectContext?) async throws -> PhotoSnapshot {
+        if let context {
+            try await context.perform { try TimelineStore.validateOwner(original.timelineID, in: context) }
+        }
         #if DEBUG && targetEnvironment(simulator)
         if SimulatorExampleLibrary.assetURL(named: original.fullImageAssetName) != nil { return original }
         #endif
@@ -939,6 +990,14 @@ final class PhotoStorageService {
             return original
         }
 
+        if let context {
+            do { try await context.perform { try TimelineStore.validateOwner(original.timelineID, in: context) } }
+            catch TimelineOperationError.deleted {
+                await deleteAssets(named: Set(assets.compactMap { $0.0 }))
+                throw TimelineOperationError.deleted
+            }
+        }
+
         if wasUploaded { return snapshot }
 
         snapshot.id = photoID
@@ -946,14 +1005,16 @@ final class PhotoStorageService {
             photoID: photoID, captureDate: snapshot.captureDate ?? Date(), createdAt: snapshot.createdAt ?? Date(),
             latitude: snapshot.latitude, longitude: snapshot.longitude,
             fullImageAssetName: stillName, livePhotoVideoAssetName: snapshot.livePhotoVideoAssetName,
-            livePhotoImageAssetName: snapshot.livePhotoImageAssetName
+            livePhotoImageAssetName: snapshot.livePhotoImageAssetName,
+            timelineID: snapshot.timelineID
         )
         try await pendingUploadManifestService.record(entry)
         try cloudKitService.uploadStateStore.register(entry.localUpload)
         if let context {
             let objectID = snapshot.objectID
             let updated = snapshot
-            try await context.perform {
+            do { try await context.perform {
+                try TimelineStore.validateOwner(updated.timelineID, in: context)
                 guard let photo = try context.existingObject(with: objectID) as? DailyPhoto, !photo.isDeleted else { return }
                 if photo.id != updated.id || photo.fullImageAssetName != updated.fullImageAssetName ||
                     photo.livePhotoImageAssetName != updated.livePhotoImageAssetName || photo.livePhotoVideoAssetName != updated.livePhotoVideoAssetName {
@@ -963,6 +1024,10 @@ final class PhotoStorageService {
                     photo.livePhotoVideoAssetName = updated.livePhotoVideoAssetName
                     try context.save()
                 }
+            } } catch TimelineOperationError.deleted {
+                await pendingUploadManifestService.remove(photoID: photoID)
+                await deleteAssets(named: Set(assets.compactMap { $0.0 }))
+                throw TimelineOperationError.deleted
             }
             await pendingUploadManifestService.remove(photoID: photoID)
         }
@@ -1514,21 +1579,21 @@ final class PhotoStorageService {
         ].compactMap { $0 }).map { $0 }
     }
 
-    private func deleteAssets(named assetNames: Set<String>) async {
+    private func deleteAssets(named assetNames: Set<String>, deletesCloudCopies: Bool? = nil) async {
         guard !assetNames.isEmpty else { return }
-        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
+        let shouldDeleteCloudCopies = deletesCloudCopies ?? cloudKitService.storageModeStore.mode.allowsCloudWrites
 
         for assetName in assetNames {
             await cloudKitService.deleteAssetAndWait(named: assetName)
         }
 
-        if deletesCloudCopies { await remoteAssetDeletionService.enqueue(assetNames: assetNames) }
+        if shouldDeleteCloudCopies { await remoteAssetDeletionService.enqueue(assetNames: assetNames) }
     }
 
-    private func deleteAssetsInBackground(named assetNames: Set<String>) async {
+    private func deleteAssetsInBackground(named assetNames: Set<String>, deletesCloudCopies: Bool) async {
         guard !assetNames.isEmpty else { return }
-        guard cloudKitService.storageModeStore.mode.allowsCloudWrites else {
-            await deleteAssets(named: assetNames)
+        guard deletesCloudCopies else {
+            await deleteAssets(named: assetNames, deletesCloudCopies: false)
             return
         }
 
@@ -1544,10 +1609,8 @@ final class PhotoStorageService {
         }
     }
 
-    private func deleteAssetsAndWaitForRemoteCleanup(named assetNames: Set<String>) async -> Set<String> {
+    private func deleteAssetsAndWaitForRemoteCleanup(named assetNames: Set<String>, deletesCloudCopies: Bool) async -> Set<String> {
         guard !assetNames.isEmpty else { return [] }
-        let deletesCloudCopies = cloudKitService.storageModeStore.mode.allowsCloudWrites
-
         for assetName in assetNames {
             await cloudKitService.deleteAssetAndWait(named: assetName)
         }
@@ -1558,6 +1621,7 @@ final class PhotoStorageService {
 
     private func existingImportedPhotoFingerprints(
         matching fingerprints: Set<String>,
+        timelineID: UUID,
         context: NSManagedObjectContext
     ) async -> Set<String> {
         guard !fingerprints.isEmpty else { return [] }
@@ -1567,7 +1631,10 @@ final class PhotoStorageService {
                 let request = NSFetchRequest<NSDictionary>(entityName: "DailyPhoto")
                 request.resultType = .dictionaryResultType
                 request.propertiesToFetch = ["importFingerprint"]
-                request.predicate = NSPredicate(format: "importFingerprint IN %@", Array(fingerprints))
+                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                    NSPredicate(format: "importFingerprint IN %@", Array(fingerprints)),
+                    TimelineIdentity.photoPredicate(for: timelineID)
+                ])
 
                 let rows = try context.fetch(request)
                 let fingerprints = rows.compactMap { $0["importFingerprint"] as? String }
@@ -1594,9 +1661,11 @@ final class PhotoStorageService {
         imageData: Data,
         livePhotoVideoURL: URL?,
         libraryMetadata: ImportedPhotoLibraryMetadata? = nil,
+        timelineID: UUID,
         context: NSManagedObjectContext,
         saveChanges: Bool = true
     ) async throws -> StoredPendingPhoto {
+        try await context.perform { try TimelineStore.validateOwner(timelineID, in: context) }
         try ensureStorageMigrationAllowsLibraryChanges()
         let photoID = UUID()
         let exifMetadata = await Self.exifMetadata(from: imageData)
@@ -1615,15 +1684,18 @@ final class PhotoStorageService {
             latitude: location?.latitude ?? 0,
             longitude: location?.longitude ?? 0,
             fullImageAssetName: imageAssetName,
-            livePhotoVideoAssetName: videoAssetName
+            livePhotoVideoAssetName: videoAssetName,
+            timelineID: timelineID
         )
         do {
             try ensureStorageMigrationAllowsLibraryChanges()
             try await pendingUploadManifestService.record(manifestEntry)
             try cloudKitService.uploadStateStore.register(manifestEntry.localUpload)
             let objectID = try await context.perform {
+                try TimelineStore.validateOwner(timelineID, in: context)
                 let photo = DailyPhoto(context: context)
                 photo.id = photoID
+                photo.timelineID = timelineID
                 photo.captureDate = manifestEntry.captureDate
                 photo.createdAt = createdAt
                 photo.modifiedAt = createdAt
@@ -1679,6 +1751,7 @@ final class PhotoStorageService {
 nonisolated private struct PhotoSnapshot: Sendable {
     let objectID: NSManagedObjectID
     var id: UUID?
+    let timelineID: UUID
     let createdAt: Date?
     let captureDate: Date?
     let latitude: Double
@@ -1693,6 +1766,7 @@ nonisolated private struct PhotoSnapshot: Sendable {
     init(photo: DailyPhoto) {
         objectID = photo.objectID
         id = photo.id
+        timelineID = photo.effectiveTimelineID
         createdAt = photo.createdAt
         captureDate = photo.captureDate
         latitude = photo.latitude
@@ -1737,6 +1811,8 @@ struct PendingUploadManifestEntry: Codable, Sendable {
     let fullImageAssetName: String
     let livePhotoVideoAssetName: String?
     var livePhotoImageAssetName: String? = nil
+    // Optional so journals written before timelines remain recoverable.
+    var timelineID: UUID? = nil
 
     nonisolated var localUpload: LocalPhotoUpload {
         LocalPhotoUpload(
@@ -1785,10 +1861,23 @@ actor PendingUploadManifestService {
         persistEntries()
     }
 
+    func discardEntries(ownedBy timelineIDs: Set<UUID>) throws -> Set<String> {
+        loadEntriesIfNeeded()
+        if let loadError { throw loadError }
+        let removed = entriesByPhotoID.values.filter { timelineIDs.contains($0.timelineID ?? TimelineIdentity.defaultID) }
+        let original = entriesByPhotoID
+        for entry in removed { entriesByPhotoID.removeValue(forKey: entry.photoID) }
+        do { try persistEntriesThrowing() }
+        catch { entriesByPhotoID = original; throw error }
+        for entry in removed { activePhotoIDs.remove(entry.photoID) }
+        return Set(removed.flatMap { $0.localUpload.assetNames })
+    }
+
     func recoverPendingUploads(
         context: NSManagedObjectContext,
         cloudKitService: CloudKitService,
-        thumbnailService: ThumbnailService
+        thumbnailService: ThumbnailService,
+        remoteAssetDeletionService: RemoteAssetDeletionService = .shared
     ) async -> Int {
         guard !isRecovering else { return 0 }
         isRecovering = true
@@ -1797,6 +1886,7 @@ actor PendingUploadManifestService {
         guard loadError == nil else { return 0 }
         guard !entriesByPhotoID.isEmpty else { return 0 }
 
+        let allowsCloudDeletion = await MainActor.run { cloudKitService.storageModeStore.mode.allowsCloudWrites }
         var recoveredCount = 0
         let entries = entriesByPhotoID.values.sorted { $0.createdAt < $1.createdAt }
 
@@ -1804,6 +1894,19 @@ actor PendingUploadManifestService {
             if Task.isCancelled { break }
             guard !activePhotoIDs.contains(entry.photoID), entriesByPhotoID[entry.photoID] != nil else { continue }
             do {
+                let owner = entry.timelineID ?? TimelineIdentity.defaultID
+                let deleted = try await context.perform {
+                    try TimelineStore.libraryState(in: context).deletedIDs.contains(owner)
+                }
+                if deleted {
+                    let names = entry.localUpload.assetNames
+                    // Journal ownership alone must never revive a deleted timeline.
+                    // Queue cloud cleanup before releasing these durable source names.
+                    if allowsCloudDeletion { await remoteAssetDeletionService.enqueueForDeferredProcessing(assetNames: names) }
+                    for name in names { await cloudKitService.deleteAssetAndWait(named: name) }
+                    entriesByPhotoID.removeValue(forKey: entry.photoID)
+                    continue
+                }
                 if try await photoAlreadyExists(for: entry, context: context) {
                     try cloudKitService.uploadStateStore.register(entry.localUpload)
                     entriesByPhotoID.removeValue(forKey: entry.photoID)
@@ -1857,8 +1960,10 @@ actor PendingUploadManifestService {
 
             do {
                 try await context.perform {
+                    try TimelineStore.validateOwner(entry.timelineID ?? TimelineIdentity.defaultID, in: context)
                     let photo = DailyPhoto(context: context)
                     photo.id = entry.photoID
+                    photo.timelineID = entry.timelineID ?? TimelineIdentity.defaultID
                     photo.captureDate = entry.captureDate
                     photo.createdAt = entry.createdAt
                     photo.modifiedAt = entry.createdAt

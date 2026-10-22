@@ -38,19 +38,35 @@ struct ExperimentalCameraView: View {
         }
     }
 
+    @State private var storage = PhotoStorageCoordinator.shared
     @StateObject private var cameraService = CameraService()
     @StateObject private var locationService = LocationService()
-    @ObservedObject private var alignmentGuideStore = AlignmentGuideStore.shared
+    @StateObject private var alignmentGuideStore: AlignmentGuideStore
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage(CameraPreferenceKey.livePhotoCaptureEnabled) private var isLivePhotoCaptureEnabled = true
+    @State private var timelines = TimelineSelectionStore.shared
+    @State private var isUpdatingLivePhotoPreference = false
+    @State private var livePhotoPreferenceError: String?
+
+    private var isLivePhotoCaptureEnabled: Bool {
+        TimelineCameraPreferences.livePhotosEnabled(for: timelineID, in: timelines)
+    }
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
 
     let gridTargetFrameInGlobal: CGRect?
+    let timelineID: UUID
+
+    init(gridTargetFrameInGlobal: CGRect? = nil, timelineID: UUID = TimelineIdentity.defaultID) {
+        self.gridTargetFrameInGlobal = gridTargetFrameInGlobal
+        self.timelineID = timelineID
+        _alignmentGuideStore = StateObject(wrappedValue: AlignmentGuideStore(timelineID: timelineID))
+    }
 
     @State private var isEditingGuides = false
     @State private var isSaving = false
+    @State private var saveHaptics = CaptureSaveHaptics()
+    @State private var isCameraVisible = false
     @State private var showingSaveError = false
     @State private var saveErrorMessage = ""
     @State private var showingCaptureError = false
@@ -61,6 +77,7 @@ struct ExperimentalCameraView: View {
     @State private var pendingLivePhotoImageURL: URL?
     @State private var pendingLivePhotoVideoURL: URL?
     @State private var isCapturing = false
+    @State private var livePhotoPreferenceAtCapture: Bool?
     @State private var isAnimatingPreviewToGrid = false
     @State private var previewDismissOffset: CGFloat = 0
     @State private var captureFeedbackStage: CaptureFeedbackStage?
@@ -77,7 +94,8 @@ struct ExperimentalCameraView: View {
     }
 
     private var controlsDisabled: Bool {
-        guideInteractionDisabled || isEditingGuides || (!usesMockCapture && !cameraService.isReadyForCapture)
+        guideInteractionDisabled || isEditingGuides || isUpdatingLivePhotoPreference
+            || (!usesMockCapture && !cameraService.isReadyForCapture)
     }
 
     private var usesMockCapture: Bool {
@@ -147,6 +165,7 @@ struct ExperimentalCameraView: View {
                         livePhotoVideoURL: pendingLivePhotoVideoURL,
                         isMirrored: isHirsModeEnabled,
                         isSaving: isSaving,
+                        savingDetail: storage.isLocalOnly ? "Saving photo on this device." : "Saving photo for iCloud sync.",
                         isAnimatingToGrid: isAnimatingPreviewToGrid,
                         dismissOffset: previewDismissOffset,
                         targetFrameInGlobal: gridTargetFrameInGlobal,
@@ -154,7 +173,10 @@ struct ExperimentalCameraView: View {
                         onDone: confirmSave,
                         onDismiss: dismissCapturePreview,
                         onDragChanged: updatePreviewDrag,
-                        onDragCancelled: cancelPreviewDrag
+                        onDragCancelled: cancelPreviewDrag,
+                        onFlightStarted: saveHaptics.beginFlight,
+                        onLanding: saveHaptics.land,
+                        onFlightCompleted: finishSavedCapture
                     )
                     .transition(.asymmetric(
                         insertion: .move(edge: .bottom).combined(with: .opacity),
@@ -180,6 +202,8 @@ struct ExperimentalCameraView: View {
                 cameraService.stopSession()
                 return
             }
+            await timelines.start(in: viewContext)
+            guard !Task.isCancelled else { return }
             if usesMockCapture {
                 if !didPresentMockCapture {
                     didPresentMockCapture = true
@@ -193,6 +217,12 @@ struct ExperimentalCameraView: View {
             if cameraService.isAuthorized {
                 await cameraService.setupCamera()
                 guard !Task.isCancelled else { return }
+                do {
+                    try await TimelineCameraPreferences.migrateLegacyPreference(
+                        for: timelineID, supported: cameraService.isLivePhotoCaptureSupported,
+                        timelines: timelines, context: viewContext)
+                } catch { livePhotoPreferenceError = error.localizedDescription }
+                guard !Task.isCancelled else { return }
                 await cameraService.configureLivePhotoAudio(enabled: isLivePhotoCaptureEnabled)
                 guard !Task.isCancelled else { return }
                 cameraService.startSession()
@@ -202,12 +232,26 @@ struct ExperimentalCameraView: View {
                 locationService.requestPermission()
             }
         }
+        .onAppear { isCameraVisible = true }
         .onDisappear {
+            isCameraVisible = false
+            saveHaptics.cancel()
             cameraService.stopSession()
-            if !isSaving { clearPendingCapture() }
+            if !isSaving || isAnimatingPreviewToGrid {
+                clearPendingCapture()
+                isAnimatingPreviewToGrid = false
+                isSaving = false
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { saveHaptics.cancel() }
+        }
+        .onChange(of: showingCapturePreview) { _, isShowing in
+            if isShowing { saveHaptics.prepare() }
         }
         .interactiveDismissDisabled(isSaving || isCapturing)
         .onChange(of: cameraService.captureCompleted) { _, _ in
+            livePhotoPreferenceAtCapture = nil
             isCapturing = false
             captureFeedbackStage = nil
             if let capture = cameraService.livePhotoCapture {
@@ -242,6 +286,7 @@ struct ExperimentalCameraView: View {
         }
         .onChange(of: cameraService.captureErrorMessage) { _, message in
             guard message != nil else { return }
+            livePhotoPreferenceAtCapture = nil
             isCapturing = false
             captureFeedbackStage = nil
             showingCaptureError = true
@@ -250,6 +295,14 @@ struct ExperimentalCameraView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(cameraService.captureErrorMessage ?? "Please try again.")
+        }
+        .alert("Unable to Update Live Photos", isPresented: Binding(
+            get: { livePhotoPreferenceError != nil },
+            set: { if !$0 { livePhotoPreferenceError = nil } }
+        )) {
+            Button("OK", role: .cancel) { livePhotoPreferenceError = nil }
+        } message: {
+            Text(livePhotoPreferenceError ?? "Please try again.")
         }
         .alert("Unable to Save Photo", isPresented: $showingSaveError) {
             Button("OK", role: .cancel) {}
@@ -265,7 +318,8 @@ struct ExperimentalCameraView: View {
 
     private var cameraSessionRequest: CameraSessionRequest {
         CameraSessionRequest(
-            livePhotosEnabled: isLivePhotoCaptureEnabled,
+            // A remote preference change must not reconfigure an exposure in flight.
+            livePhotosEnabled: livePhotoPreferenceAtCapture ?? isLivePhotoCaptureEnabled,
             paused: scenePhase == .background || showingCapturePreview
         )
     }
@@ -275,7 +329,8 @@ struct ExperimentalCameraView: View {
     }
 
     private var shouldCaptureLivePhoto: Bool {
-        isLivePhotoCaptureEnabled && cameraService.isLivePhotoCaptureSupported
+        TimelineCameraPreferences.capturesLivePhoto(preferred: isLivePhotoCaptureEnabled,
+                                                   supported: cameraService.isLivePhotoCaptureSupported)
     }
 
     @ViewBuilder
@@ -393,9 +448,7 @@ struct ExperimentalCameraView: View {
     }
 
     private var livePhotoToggleButton: some View {
-        Button {
-            isLivePhotoCaptureEnabled.toggle()
-        } label: {
+        Button(action: toggleLivePhotos) {
             Image(systemName: livePhotoToggleSymbolName)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
@@ -419,7 +472,22 @@ struct ExperimentalCameraView: View {
         .accessibilityIdentifier("experimentalCameraLivePhotoToggle")
         .accessibilityLabel(livePhotoToggleAccessibilityLabel)
         .accessibilityValue(livePhotoToggleAccessibilityValue)
-        .disabled(guideInteractionDisabled || !cameraService.isLivePhotoCaptureSupported)
+        .disabled(guideInteractionDisabled || isUpdatingLivePhotoPreference || storage.mode.isMigrating
+                  || !cameraService.isLivePhotoCaptureSupported)
+    }
+
+    private func toggleLivePhotos() {
+        guard cameraService.isLivePhotoCaptureSupported, !guideInteractionDisabled,
+              !isUpdatingLivePhotoPreference, !storage.mode.isMigrating else { return }
+        let enabled = !isLivePhotoCaptureEnabled
+        isUpdatingLivePhotoPreference = true
+        Task {
+            defer { isUpdatingLivePhotoPreference = false }
+            do {
+                try await TimelineCameraPreferences.setLivePhotosEnabled(enabled, for: timelineID,
+                    supported: cameraService.isLivePhotoCaptureSupported, timelines: timelines, context: viewContext)
+            } catch { livePhotoPreferenceError = error.localizedDescription }
+        }
     }
 
     private var livePhotoToggleSymbolName: String {
@@ -501,6 +569,7 @@ struct ExperimentalCameraView: View {
             return
         }
 
+        livePhotoPreferenceAtCapture = isLivePhotoCaptureEnabled
         isCapturing = true
         #if targetEnvironment(simulator)
         captureFeedbackStage = .processingCapture
@@ -561,6 +630,7 @@ struct ExperimentalCameraView: View {
     }
 
     private func clearPendingCapture() {
+        livePhotoPreferenceAtCapture = nil
         pendingCaptureImage = nil
         pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
@@ -646,9 +716,9 @@ struct ExperimentalCameraView: View {
         let livePhotoImageData = pendingLivePhotoImageData
         let videoURL = pendingLivePhotoVideoURL
         isSaving = true
+        saveHaptics.beginSaving()
 
         Task {
-            defer { isSaving = false }
             do {
                 try await savePhoto(
                     image: image,
@@ -656,16 +726,30 @@ struct ExperimentalCameraView: View {
                     livePhotoImageData: livePhotoImageData,
                     videoURL: videoURL
                 )
+                guard isCameraVisible else {
+                    saveHaptics.cancel()
+                    clearPendingCapture()
+                    isSaving = false
+                    return
+                }
+                saveHaptics.didSave()
                 isAnimatingPreviewToGrid = true
-                try? await Task.sleep(for: .milliseconds(420))
-                clearPendingCapture()
-                isAnimatingPreviewToGrid = false
-                dismiss()
             } catch {
+                saveHaptics.cancel()
+                isSaving = false
+                guard isCameraVisible else { clearPendingCapture(); return }
                 saveErrorMessage = error.localizedDescription
                 showingSaveError = true
             }
         }
+    }
+
+    private func finishSavedCapture() {
+        guard isCameraVisible, isAnimatingPreviewToGrid else { return }
+        clearPendingCapture()
+        isAnimatingPreviewToGrid = false
+        isSaving = false
+        dismiss()
     }
 
     private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async throws {
@@ -693,7 +777,8 @@ struct ExperimentalCameraView: View {
                 livePhotoImageData: livePhotoImageData,
                 livePhotoVideoURL: videoURL,
                 location: location,
-                context: viewContext
+                context: viewContext,
+                timelineID: timelineID
             )
             try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
         } catch {
@@ -746,6 +831,7 @@ struct ExperimentalCapturePreviewOverlay: View {
     let livePhotoVideoURL: URL?
     let isMirrored: Bool
     let isSaving: Bool
+    let savingDetail: String
     let isAnimatingToGrid: Bool
     let dismissOffset: CGFloat
     let targetFrameInGlobal: CGRect?
@@ -754,8 +840,14 @@ struct ExperimentalCapturePreviewOverlay: View {
     let onDismiss: () -> Void
     let onDragChanged: (CGFloat) -> Void
     let onDragCancelled: () -> Void
+    let onFlightStarted: () -> Void
+    let onLanding: () -> Void
+    let onFlightCompleted: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var previewImageFrameInOverlay: CGRect = .zero
     @State private var animatedFrameInOverlay: CGRect = .zero
+    @State private var landingScale: CGFloat = 1
+    @State private var flightOpacity: Double = 0
 
     private var previewTitle: String {
         livePhotoImageURL != nil && livePhotoVideoURL != nil
@@ -791,6 +883,9 @@ struct ExperimentalCapturePreviewOverlay: View {
                 width: geometry.size.width - 40,
                 height: max(geometry.size.width - 40, 1) * 1.25
             )
+            let startFrame = previewImageFrameInOverlay == .zero ? fallbackStartFrame : previewImageFrameInOverlay
+            let flightFrame = animatedFrameInOverlay == .zero
+                ? (reduceMotion ? localTargetFrame : startFrame) : animatedFrameInOverlay
 
             ZStack(alignment: .topLeading) {
                 Color.black
@@ -880,7 +975,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .padding(.bottom, 28)
 
                     if isSaving {
-                        Text("Uploading the original photo and saving metadata.")
+                        Text(savingDetail)
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.78))
                             .padding(.horizontal, 24)
@@ -894,20 +989,34 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .resizable()
                         .scaledToFill()
                         .frame(
-                            width: animatedFrameInOverlay == .zero ? localTargetFrame.width : animatedFrameInOverlay.width,
-                            height: animatedFrameInOverlay == .zero ? localTargetFrame.height : animatedFrameInOverlay.height
+                            width: flightFrame.width,
+                            height: flightFrame.height
                         )
                         .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
+                        .scaleEffect(landingScale)
+                        .opacity(reduceMotion ? flightOpacity : 1)
                         .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
                         .position(
-                            x: (animatedFrameInOverlay == .zero ? localTargetFrame : animatedFrameInOverlay).midX,
-                            y: (animatedFrameInOverlay == .zero ? localTargetFrame : animatedFrameInOverlay).midY
+                            x: flightFrame.midX,
+                            y: flightFrame.midY
                         )
                         .onAppear {
-                            let startFrame = previewImageFrameInOverlay == .zero ? fallbackStartFrame : previewImageFrameInOverlay
-                            animatedFrameInOverlay = startFrame
-                            withAnimation(.easeInOut(duration: 0.34)) {
+                            onFlightStarted()
+                            withAnimation(.easeInOut(duration: reduceMotion ? 0.15 : 0.34), completionCriteria: .logicallyComplete) {
                                 animatedFrameInOverlay = localTargetFrame
+                                flightOpacity = 1
+                            } completion: {
+                                onLanding()
+                                guard !reduceMotion else { onFlightCompleted(); return }
+                                withAnimation(.easeOut(duration: 0.06)) {
+                                    landingScale = 0.96
+                                } completion: {
+                                    withAnimation(.easeOut(duration: 0.08)) {
+                                        landingScale = 1
+                                    } completion: {
+                                        onFlightCompleted()
+                                    }
+                                }
                             }
                         }
                 }

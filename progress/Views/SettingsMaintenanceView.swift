@@ -6,6 +6,7 @@ struct SettingsMaintenanceView: View {
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @State private var offlineCoordinator = PhotoOfflineCoordinator.shared
     @State private var storage = PhotoStorageCoordinator.shared
+    @State private var timelines = TimelineSelectionStore.shared
     @AppStorage(PhotoOfflineSettings.keepAllKey) private var keepAllPhotos = false
     @AppStorage(PhotoOfflineSettings.keepHeartedKey) private var keepHeartedPhotos = false
     @AppStorage(PhotoOfflineSettings.cellularKey) private var allowCellularDownloads = false
@@ -104,7 +105,7 @@ struct SettingsMaintenanceView: View {
                 }
             }
 
-            Section("Delete Photos") {
+            Section {
                 DatePicker(
                     "From",
                     selection: deleteRangeStartBinding,
@@ -144,6 +145,12 @@ struct SettingsMaintenanceView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            } header: {
+                Text("Delete Photos")
+            } footer: {
+                if timelines.timelines.count > 1 {
+                    Text("Storage management applies to all timelines, including those not currently selected.")
+                }
             }
 
             Section("Start Fresh") {
@@ -158,7 +165,7 @@ struct SettingsMaintenanceView: View {
                 } else {
                     Text(totalPhotoCount == 0
                          ? "There are no stored photos to remove."
-                         : "Delete all \(totalPhotoCount) stored photo\(totalPhotoCount == 1 ? "" : "s") and remove their local assets.")
+                         : "Delete all \(totalPhotoCount) stored photo\(totalPhotoCount == 1 ? "" : "s") across every timeline and remove their local assets.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -213,9 +220,7 @@ struct SettingsMaintenanceView: View {
 
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(cloudSyncMonitor.isICloudUnavailable
-                 ? "This will permanently delete every photo from Work in Progress on this device. iCloud cleanup will resume automatically when iCloud is enabled."
-                 : "This will permanently delete every photo from Work in Progress on this device and remove the matching records and stored assets from iCloud.")
+            Text("Applies to every photo in every timeline. " + PhotoDeletionMessage.scope(isLocalOnly: storage.isLocalOnly))
         }
     }
 
@@ -260,7 +265,7 @@ struct SettingsMaintenanceView: View {
 
     private var deleteRangeConfirmationMessage: String {
         let formatter = Self.deleteRangeDateFormatter
-        return "This will permanently delete \(deleteRangeMatchCount) photo\(deleteRangeMatchCount == 1 ? "" : "s") captured from \(formatter.string(from: deleteRangeStartDate)) to \(formatter.string(from: deleteRangeEndDate))."
+        return "Applies to \(deleteRangeMatchCount) photo\(deleteRangeMatchCount == 1 ? "" : "s") captured from \(formatter.string(from: deleteRangeStartDate)) to \(formatter.string(from: deleteRangeEndDate)) across all timelines. " + PhotoDeletionMessage.scope(isLocalOnly: storage.isLocalOnly)
     }
 
     @MainActor
@@ -392,15 +397,21 @@ struct SettingsMaintenanceView: View {
             return "There were no photos to delete."
         }
 
+        if result.isDeviceOnly {
+            return "\(photoCountDescription) from this device. Any kept iCloud copies are unchanged."
+        }
+
         guard !result.isCloudDeletionComplete else {
             return "\(photoCountDescription) from this device and iCloud."
         }
 
         if result.isDeferredUntilICloudAvailable {
-            return "\(photoCountDescription) from this device. iCloud cleanup will resume automatically when iCloud is enabled."
+            return "\(photoCountDescription) from this device. iCloud cleanup will resume when iCloud is available."
         }
 
         switch result.cloudMetadataDeletionState {
+        case .notRequested:
+            return "\(photoCountDescription) from this device."
         case .failed(let message):
             return "\(photoCountDescription) locally. iCloud metadata deletion still needs attention: \(message)"
         case .pending:

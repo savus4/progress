@@ -51,6 +51,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
     private var fetchedStoreIdentities: Set<ObjectIdentifier> = []
     private weak var context: NSManagedObjectContext?
     private var filter: PhotoGridFilter = .all
+    private(set) var timelineID = TimelineIdentity.defaultID
     private var photosByID: [NSManagedObjectID: DailyPhoto] = [:]
     private(set) var itemsSnapshot: [UIKitPhotoGridItem] = []
     private var localUploadObserver: NSObjectProtocol?
@@ -86,12 +87,14 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         totalPhotoCount > 0
     }
 
-    func configureIfNeeded(context: NSManagedObjectContext, filter: PhotoGridFilter) {
-        let needsNewFetch = self.context !== context || !hasCurrentFetch
+    func configureIfNeeded(context: NSManagedObjectContext, filter: PhotoGridFilter,
+                           timelineID: UUID = TimelineIdentity.defaultID) {
+        let needsNewFetch = self.context !== context || self.timelineID != timelineID || !hasCurrentFetch
         if self.context !== context {
             observeStoreChanges(in: context)
         }
         self.context = context
+        self.timelineID = timelineID
         guard needsNewFetch else {
             setFilter(filter)
             return
@@ -129,7 +132,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
 
     func setFilter(_ filter: PhotoGridFilter) {
         guard hasCurrentFetch else {
-            if let context { configureIfNeeded(context: context, filter: filter) }
+            if let context { configureIfNeeded(context: context, filter: filter, timelineID: timelineID) }
             return
         }
         guard self.filter != filter else { return }
@@ -159,6 +162,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
 
         let request = DailyPhoto.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false)]
+        request.predicate = TimelineIdentity.photoPredicate(for: timelineID)
         request.includesPendingChanges = true
 
         do {
@@ -238,7 +242,7 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         // A batched FRC result can still contain object IDs from a removed store,
         // even though the same view context now points at its replacement.
         guard hasCurrentFetch else {
-            if let context { configureIfNeeded(context: context, filter: filter) }
+            if let context { configureIfNeeded(context: context, filter: filter, timelineID: timelineID) }
             return
         }
         rebuildSnapshot(from: fetchedResultsController?.fetchedObjects ?? [])
@@ -253,17 +257,20 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         changeToken &+= 1
     }
 
-    private var fetchPredicate: NSPredicate? {
+    private var fetchPredicate: NSPredicate {
+        let ownership = TimelineIdentity.photoPredicate(for: timelineID)
+        let filterPredicate: NSPredicate
         switch filter {
         case .all:
-            return nil
+            return ownership
         case .hearted:
-            return NSPredicate(format: "isHearted == YES AND isHiddenFromVideo == NO")
+            filterPredicate = NSPredicate(format: "isHearted == YES AND isHiddenFromVideo == NO")
         case .favoriteLivePhotos:
-            return NSPredicate(format: "isFavoriteLivePhoto == YES AND isHiddenFromVideo == NO")
+            filterPredicate = NSPredicate(format: "isFavoriteLivePhoto == YES AND isHiddenFromVideo == NO")
         case .hidden:
-            return NSPredicate(format: "isHiddenFromVideo == YES")
+            filterPredicate = NSPredicate(format: "isHiddenFromVideo == YES")
         }
+        return NSCompoundPredicate(andPredicateWithSubpredicates: [ownership, filterPredicate])
     }
 
     private func refreshCounts() {
@@ -289,7 +296,10 @@ final class PhotoGridDataController: NSObject, ObservableObject, NSFetchedResult
         let request = NSFetchRequest<NSNumber>(entityName: "DailyPhoto")
         request.resultType = .countResultType
         request.includesPendingChanges = true
-        request.predicate = predicate
+        let ownership = TimelineIdentity.photoPredicate(for: timelineID)
+        request.predicate = predicate.map {
+            NSCompoundPredicate(andPredicateWithSubpredicates: [ownership, $0])
+        } ?? ownership
 
         do {
             return try context.count(for: request)
@@ -1494,7 +1504,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
 
         let alert = UIAlertController(
             title: "Delete photo?",
-            message: "This action cannot be undone.",
+            message: PhotoDeletionMessage.scope(isLocalOnly: PhotoStorageCoordinator.shared.isLocalOnly),
             preferredStyle: .actionSheet
         )
         alert.addAction(UIAlertAction(title: "Delete Photo", style: .destructive) { [weak self] _ in

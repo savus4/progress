@@ -8,6 +8,17 @@ import UIKit
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
 struct PhotoUploadPipelineTests {
+    @Test("Captures persist ownership for default and additional timelines", arguments: [false, true])
+    func capturesRetainTimeline(usesAdditionalTimeline: Bool) async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let timelineID = usesAdditionalTimeline ? UUID() : TimelineIdentity.defaultID
+
+        let photo = try await fixture.saveCapture(timelineID: timelineID)
+
+        #expect(photo.timelineID == timelineID)
+    }
+
     @Test("A saved capture stages exact Live originals and keeps them until the complete upload succeeds")
     func savesAndUploadsCompleteCapture() async throws {
         let fixture = try Fixture()
@@ -143,6 +154,29 @@ struct PhotoUploadPipelineTests {
 
         #expect(counts.reduce(0, +) == 1)
         #expect(try fixture.context.count(for: DailyPhoto.fetchRequest()) == 1)
+    }
+
+    @Test("Crash recovery keeps timeline ownership and accepts journals from before timelines", arguments: [false, true])
+    func recoveryRetainsTimeline(hasTimeline: Bool) async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let timelineID = hasTimeline ? UUID() : nil
+        let entry = try await fixture.recordManifest(timelineID: timelineID)
+        let restarted = fixture.restartedManifest()
+        if hasTimeline == false {
+            let journal = try Data(contentsOf: fixture.root.appendingPathComponent("pending-uploads.json"))
+            let rows = try #require(JSONSerialization.jsonObject(with: journal) as? [[String: Any]])
+            #expect(rows.first?["timelineID"] == nil)
+        }
+
+        let recoveredCount = await restarted.recoverPendingUploads(
+            context: fixture.context, cloudKitService: fixture.cloud, thumbnailService: .shared
+        )
+
+        #expect(recoveredCount == 1)
+        let photo = try #require(fixture.context.fetch(DailyPhoto.fetchRequest()).first)
+        #expect(photo.id == entry.photoID)
+        #expect(photo.timelineID == (timelineID ?? TimelineIdentity.defaultID))
     }
 
     @Test("Failed manifest recovery removes its unsaved row and can recover exactly once later")
@@ -410,11 +444,11 @@ struct PhotoUploadPipelineTests {
             try videoData.write(to: video)
         }
 
-        func saveCapture(isLive: Bool = false) async throws -> DailyPhoto {
+        func saveCapture(isLive: Bool = false, timelineID: UUID = TimelineIdentity.defaultID) async throws -> DailyPhoto {
             let objectID = try await storage.savePhoto(
                 image: image, imageData: imageData,
                 livePhotoVideoURL: isLive ? video : nil,
-                location: nil, context: context, enqueuesPendingUpload: false
+                location: nil, context: context, timelineID: timelineID, enqueuesPendingUpload: false
             )
             return try #require(context.existingObject(with: objectID) as? DailyPhoto)
         }
@@ -423,13 +457,13 @@ struct PhotoUploadPipelineTests {
             Set([photo.fullImageAssetName, photo.livePhotoImageAssetName, photo.livePhotoVideoAssetName].compactMap { $0 })
         }
 
-        func recordManifest() async throws -> PendingUploadManifestEntry {
+        func recordManifest(timelineID: UUID? = nil) async throws -> PendingUploadManifestEntry {
             let id = UUID()
             let name = "\(id)_still.jpeg"
             _ = try cloud.stageAssetData(imageData, named: name, includesInBackup: true)
             let entry = PendingUploadManifestEntry(
                 photoID: id, captureDate: Date(), createdAt: Date(), latitude: 0, longitude: 0,
-                fullImageAssetName: name, livePhotoVideoAssetName: nil
+                fullImageAssetName: name, livePhotoVideoAssetName: nil, timelineID: timelineID
             )
             try await cloud.pendingUploadManifestService.record(entry)
             return entry

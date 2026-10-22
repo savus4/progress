@@ -30,7 +30,10 @@ struct PhotoGridView: View {
 
     @State private var showingCamera = false
     @State private var settingsDestination: PhotoSettingsDestination?
+    @State private var isSettingsSheetPresented = false
     @State private var storage = PhotoStorageCoordinator.shared
+    @State private var timelineSelection = TimelineSelectionStore.shared
+    @State private var cameraTimelineID = TimelineIdentity.defaultID
     @State private var photoDetailPresentation: PhotoDetailPresentation?
     @State private var activePhotoDetailObjectID: NSManagedObjectID?
     @State private var pendingDetailDismissObjectID: NSManagedObjectID?
@@ -59,6 +62,7 @@ struct PhotoGridView: View {
     @State private var mapVisibleRegionSnapshot: MKCoordinateRegion?
     @State private var mapFocusRequest: PhotoMapFocusRequest?
     @State private var metadataSyncTask: Task<Void, Never>?
+    @State private var metadataSyncGeneration = UUID()
     private let enableScrollDateDebugLogs = false
 
     private static let shareTitleDateFormatter: DateFormatter = {
@@ -133,6 +137,7 @@ struct PhotoGridView: View {
                             onOpenPhoto: openPhotoDetail,
                             onOpenSettings: { settingsDestination = .general }
                         )
+                            .id(timelineSelection.selectedID)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else if dataController.isEmpty {
                         filteredEmptyState
@@ -178,6 +183,7 @@ struct PhotoGridView: View {
                                 handlePhotoContextMenuAction(action, objectID: objectID)
                             }
                         )
+                        .id(timelineSelection.selectedID)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .disabled(storage.mode.isMigrating)
                         .ignoresSafeArea(.container, edges: [.top, .bottom])
@@ -236,7 +242,7 @@ struct PhotoGridView: View {
                         .padding(.bottom, dataController.hasAnyPhotos ? 132 : 24)
                 }
             }
-            .navigationTitle("Work in Progress")
+            .navigationTitle(timelineSelection.timelines.count > 1 ? timelineSelection.selectedName : "Work in Progress")
             .navigationBarTitleDisplayMode(isMapModeActive ? .inline : .large)
             .toolbar {
                 if isSelectionMode {
@@ -338,7 +344,7 @@ struct PhotoGridView: View {
 
                             Button("Cancel", role: .cancel) {}
                         } message: {
-                            Text("This action cannot be undone.")
+                            Text(PhotoDeletionMessage.scope(isLocalOnly: storage.isLocalOnly))
                         }
                     } else {
                         if !isMapModeActive {
@@ -360,11 +366,16 @@ struct PhotoGridView: View {
             .toolbar(photoDetailPresentation == nil && !isMapModeActive ? .visible : .hidden, for: .navigationBar)
             .fullScreenCover(isPresented: $showingCamera) {
                 ExperimentalCameraView(
-                    gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal
+                    gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal,
+                    timelineID: cameraTimelineID
                 )
             }
-            .sheet(item: $settingsDestination) { destination in
+            .sheet(item: $settingsDestination, onDismiss: {
+                isSettingsSheetPresented = false
+                openCameraIfNeededFromNotification()
+            }) { destination in
                 NotificationSettingsView(opensPhotoStorage: destination == .photoStorage)
+                    .onAppear { isSettingsSheetPresented = true }
             }
             .sheet(item: $portraitVideoExportPresentation) { presentation in
                 PortraitVideoExportSheet(
@@ -394,10 +405,23 @@ struct PhotoGridView: View {
         .onAppear {
             dataController.configureIfNeeded(
                 context: viewContext,
-                filter: gridFilter
+                filter: gridFilter,
+                timelineID: timelineSelection.selectedID
             )
             openCameraIfNeededFromNotification()
             scheduleMetadataSyncIfNeeded()
+        }
+        .task {
+            await timelineSelection.refresh(in: viewContext)
+        }
+        .onChange(of: timelineSelection.selectedID) { _, _ in
+            resetForSelectedTimeline()
+        }
+        .onChange(of: timelineSelection.deletedIDs) { _, ids in
+            if ids.contains(cameraTimelineID) { showingCamera = false }
+            if let requestedID = notificationNavigation.cameraOpenRequestTimelineID, ids.contains(requestedID) {
+                notificationNavigation.consumeCameraOpenRequest()
+            }
         }
         .onChange(of: gridFilter) { _, newValue in
             selectedPhotoIDs.removeAll()
@@ -425,6 +449,9 @@ struct PhotoGridView: View {
             guard token != nil else { return }
             openCameraIfNeededFromNotification()
         }
+        .onChange(of: isNotificationCameraBlocked) { _, isBlocked in
+            if !isBlocked { openCameraIfNeededFromNotification() }
+        }
         .onDisappear {
             metadataSyncTask?.cancel()
             metadataSyncTask = nil
@@ -433,12 +460,52 @@ struct PhotoGridView: View {
 
     private func openCameraIfNeededFromNotification() {
         guard notificationNavigation.cameraOpenRequestToken != nil else { return }
-        guard !photoImporter.isImporting else {
+        // Keep the request until its owning timeline can be opened safely.
+        guard !isNotificationCameraBlocked else { return }
+        let timelineID = notificationNavigation.cameraOpenRequestTimelineID ?? TimelineIdentity.defaultID
+        guard timelineSelection.select(timelineID) else {
             notificationNavigation.consumeCameraOpenRequest()
             return
         }
+        if dataController.timelineID != timelineID { resetForSelectedTimeline() }
+        cameraTimelineID = timelineID
         showingCamera = true
         notificationNavigation.consumeCameraOpenRequest()
+    }
+
+    private var isNotificationCameraBlocked: Bool {
+        photoImporter.isImporting || storage.mode.isMigrating || settingsDestination != nil
+            || isSettingsSheetPresented || showingCamera || photoDetailPresentation != nil
+            || portraitVideoExportPresentation != nil || contextMenuSharePresentation != nil
+            || showingExportPicker || isExporting || isSavingToPhotoLibrary || isDeletingSelection
+            || exportAlertMessage != nil
+    }
+
+    private func resetForSelectedTimeline() {
+        metadataSyncGeneration = UUID()
+        metadataSyncTask?.cancel()
+        metadataSyncTask = nil
+        didSyncExifMetadata = false
+        selectedPhotoIDs.removeAll()
+        isSelectionMode = false
+        gridFilter = .all
+        pendingDetailDismissObjectID = nil
+        gridCenteringRequest = nil
+        activePhotoDetailObjectID = nil
+        photoDetailPresentation = nil
+        visibleScrollDate = nil
+        isScrollDateVisible = false
+        isScrollGestureActive = false
+        firstGridItemFrameInGlobal = .zero
+        isMapModeActive = false
+        isMapClusterOverlayPresented = false
+        hasInitializedMapCameraInAppLifecycle = false
+        mapCameraSnapshot = nil
+        mapVisibleRegionSnapshot = nil
+        mapFocusRequest = nil
+        dataController.configureIfNeeded(context: viewContext, filter: .all,
+                                         timelineID: timelineSelection.selectedID)
+        scheduleMetadataSyncIfNeeded()
     }
 
     @MainActor
@@ -776,6 +843,7 @@ struct PhotoGridView: View {
             exportAlertMessage = "Photo import is still running. Wait for it to finish before capturing."
             return
         }
+        cameraTimelineID = timelineSelection.selectedID
         showingCamera = true
     }
 
@@ -786,24 +854,27 @@ struct PhotoGridView: View {
         guard !dataController.isEmpty else { return }
         guard metadataSyncTask == nil else { return }
 
+        let timelineID = timelineSelection.selectedID
+        let generation = UUID()
+        metadataSyncGeneration = generation
         metadataSyncTask = Task(priority: .utility) {
             defer {
-                Task { @MainActor in
+                if metadataSyncGeneration == generation {
                     metadataSyncTask = nil
                 }
             }
 
             try? await Task.sleep(for: .seconds(0.8))
             guard !Task.isCancelled else { return }
-            await syncPhotoMetadataFromExifIfNeeded()
+            await syncPhotoMetadataFromExifIfNeeded(timelineID: timelineID)
         }
     }
 
-    private func syncPhotoMetadataFromExifIfNeeded() async {
+    private func syncPhotoMetadataFromExifIfNeeded(timelineID: UUID) async {
         guard !didSyncExifMetadata else { return }
         guard !dataController.isEmpty else { return }
-        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded(limit: 24)
-        guard !Task.isCancelled else { return }
+        await PhotoStorageService.shared.syncPhotoMetadataFromAssetsIfNeeded(limit: 24, timelineID: timelineID)
+        guard !Task.isCancelled, timelineSelection.selectedID == timelineID else { return }
         await MainActor.run {
             didSyncExifMetadata = true
         }
@@ -1109,6 +1180,7 @@ struct PhotoGridView: View {
     }
 
     private func deleteContextMenuPhoto(_ objectID: NSManagedObjectID) {
+        guard photo(for: objectID) != nil else { return }
         Task { @MainActor in
             do {
                 try await PhotoStorageService.shared.deletePhoto(objectID, context: viewContext)
@@ -1120,7 +1192,9 @@ struct PhotoGridView: View {
     }
 
     private func photo(for objectID: NSManagedObjectID) -> DailyPhoto? {
-        (try? viewContext.existingObject(with: objectID)) as? DailyPhoto
+        guard let photo = (try? viewContext.existingObject(with: objectID)) as? DailyPhoto,
+              photo.effectiveTimelineID == timelineSelection.selectedID else { return nil }
+        return photo
     }
 
     private func deleteSelectedPhotos() {

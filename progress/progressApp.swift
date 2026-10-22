@@ -26,6 +26,10 @@ struct progressApp: App {
         if ProcessInfo.processInfo.environment["UI_TEST_RESET_REMINDERS"] == "1" {
             UserDefaults.standard.removeObject(forKey: "dailyPhotoReminderTimes")
             UserDefaults.standard.removeObject(forKey: DailyReminderNotificationService.skipAfterPhotoKey)
+            UserDefaults.standard.removeObject(forKey: DailyReminderNotificationService.timelinePreferencesKey)
+        }
+        if ProcessInfo.processInfo.environment["UI_TEST_RESET_TIMELINES"] == "1" {
+            UserDefaults.standard.removeObject(forKey: TimelineSelectionStore.selectedTimelineKey)
         }
         #endif
     }
@@ -196,6 +200,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didStartPersistenceServices = true
         _ = CloudSyncMonitor.shared
         DailyReminderNotificationService.shared.start(context: PersistenceController.shared.makeBackgroundContext())
+        // UI fixtures must never recover or clean the simulator's normal originals.
+        guard !StorageTestConfiguration.usesEphemeralLibrary else { return }
 
         #if DEBUG && targetEnvironment(simulator)
         // Keep normal-library upload journals, originals, and maintenance untouched.
@@ -239,6 +245,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
     func handleEnteredBackground() {
         guard !StorageTestConfiguration.isIsolatedHost else { return }
+        guard !StorageTestConfiguration.usesEphemeralLibrary else { return }
         #if DEBUG && targetEnvironment(simulator)
         if SimulatorExampleLibrary.isEnabled { return }
         #endif
@@ -260,6 +267,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         if didStartPersistenceServices {
             DailyReminderNotificationService.shared.refreshReminders()
         }
+        guard !StorageTestConfiguration.usesEphemeralLibrary else { return }
 
         Task {
             guard PersistenceController.shared.isLoaded else { return }
@@ -294,12 +302,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         DailyReminderNotificationService.shared.clearAllDeliveredNotifications()
 
         let userInfo = response.notification.request.content.userInfo
-        guard DailyReminderNotificationService.shared.isDailyReminderNotification(userInfo: userInfo) else {
+        guard let timelineID = DailyReminderNotificationService.shared.timelineID(forReminder: userInfo) else {
             return
         }
 
         await MainActor.run {
-            NotificationNavigationCoordinator.shared.requestCameraOpenFromNotification()
+            NotificationNavigationCoordinator.shared.requestCameraOpenFromNotification(timelineID: timelineID)
         }
     }
 

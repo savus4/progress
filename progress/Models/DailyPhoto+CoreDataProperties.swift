@@ -6,7 +6,11 @@ nonisolated extension DailyPhoto {
         NSFetchRequest<DailyPhoto>(entityName: "DailyPhoto")
     }
 
+    @NSManaged var timelineID: UUID?
     @NSManaged var id: UUID?
+    /// Older stores and photos imported by older app versions have no owner field.
+    var effectiveTimelineID: UUID { timelineID ?? TimelineIdentity.defaultID }
+
     @NSManaged var captureDate: Date?
     @NSManaged var thumbnailData: Data?
     @NSManaged var fullImageAssetName: String?

@@ -70,6 +70,51 @@ struct PhotoImportLibraryMetadataTests {
         #expect(photo.longitude == 0)
     }
 
+    @Test("Still, Live, and batch imports retain their destination timeline", arguments: ImportFlow.allCases)
+    func importsRetainTimeline(flow: ImportFlow) async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let timelineID = UUID()
+
+        let photo = try await fixture.importPhoto(
+            imageData: makeJPEG(), metadata: nil, flow: flow, timelineID: timelineID
+        )
+
+        #expect(photo.timelineID == timelineID)
+    }
+
+    @Test("Import duplicates are isolated by timeline, including legacy photos without an owner")
+    func duplicatesAreScopedToTimeline() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let imageData = try makeJPEG()
+        let legacyPhoto = try await fixture.importPhoto(imageData: imageData, metadata: nil, flow: .still)
+        legacyPhoto.timelineID = nil
+        try fixture.context.save()
+        let secondTimelineID = UUID()
+        let payload = ImportedPhotoPayload(imageData: imageData)
+
+        let defaultResult = await fixture.storage.saveImportedPhotos(
+            [payload], context: fixture.context, enqueuesPendingUploads: false
+        )
+        let secondResult = await fixture.storage.saveImportedPhotos(
+            [payload], context: fixture.context, timelineID: secondTimelineID, enqueuesPendingUploads: false
+        )
+        let repeatedResult = await fixture.storage.saveImportedPhotos(
+            [payload], context: fixture.context, timelineID: secondTimelineID, enqueuesPendingUploads: false
+        )
+
+        #expect(defaultResult.importedCount == 0)
+        #expect(defaultResult.duplicateCount == 1)
+        #expect(secondResult.importedCount == 1)
+        #expect(secondResult.duplicateCount == 0)
+        #expect(repeatedResult.importedCount == 0)
+        #expect(repeatedResult.duplicateCount == 1)
+        let photos = try fixture.context.fetch(DailyPhoto.fetchRequest())
+        #expect(photos.count == 2)
+        #expect(Set(photos.map(\.effectiveTimelineID)) == [TimelineIdentity.defaultID, secondTimelineID])
+    }
+
     nonisolated enum ImportFlow: CaseIterable, Sendable { case batch, batchLive, still, live }
     nonisolated enum EXIFFields: CaseIterable, Sendable { case dateOnly, locationOnly, both }
 
@@ -122,7 +167,10 @@ struct PhotoImportLibraryMetadataTests {
             ))
         }
 
-        func importPhoto(imageData: Data, metadata: ImportedPhotoLibraryMetadata?, flow: ImportFlow) async throws -> DailyPhoto {
+        func importPhoto(
+            imageData: Data, metadata: ImportedPhotoLibraryMetadata?, flow: ImportFlow,
+            timelineID: UUID = TimelineIdentity.defaultID
+        ) async throws -> DailyPhoto {
             let objectID: NSManagedObjectID
             switch flow {
             case .batch, .batchLive:
@@ -136,15 +184,15 @@ struct PhotoImportLibraryMetadataTests {
                 }
                 let result = await storage.saveImportedPhotos([
                     ImportedPhotoPayload(imageData: imageData, livePhotoVideoURL: videoURL, libraryMetadata: metadata)
-                ], context: context, enqueuesPendingUploads: false)
+                ], context: context, timelineID: timelineID, enqueuesPendingUploads: false)
                 try #require(result.importedCount == 1 && result.failedCount == 0)
                 return try #require(context.fetch(DailyPhoto.fetchRequest()).first)
             case .still:
-                objectID = try await storage.saveImportedPhoto(imageData: imageData, libraryMetadata: metadata, context: context, enqueuesPendingUpload: false)
+                objectID = try await storage.saveImportedPhoto(imageData: imageData, libraryMetadata: metadata, context: context, timelineID: timelineID, enqueuesPendingUpload: false)
             case .live:
                 let videoURL = root.appendingPathComponent("paired.mov")
                 try Data("paired video bytes".utf8).write(to: videoURL)
-                objectID = try await storage.saveImportedLivePhoto(imageData: imageData, videoURL: videoURL, libraryMetadata: metadata, context: context, enqueuesPendingUpload: false)
+                objectID = try await storage.saveImportedLivePhoto(imageData: imageData, videoURL: videoURL, libraryMetadata: metadata, context: context, timelineID: timelineID, enqueuesPendingUpload: false)
             }
             return try #require(context.existingObject(with: objectID) as? DailyPhoto)
         }

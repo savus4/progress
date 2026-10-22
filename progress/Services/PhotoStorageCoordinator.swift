@@ -40,6 +40,9 @@ final class PhotoStorageCoordinator {
              guard await PhotoUploadService.shared.waitUntilIdle(timeout: .seconds(30)) else {
                  throw PhotoStorageMigrationError.attention("Waiting for an earlier upload to finish. Retry the switch in a moment.")
              }
+             // Finish local asset cleanup before a kept cloud owner becomes active
+             // again, so an old cleanup task cannot revoke its restored asset access.
+             await TimelineDeletionService.shared.waitForPendingCleanup()
          }, resumeServices: @escaping @MainActor () async -> Void = {
              await ICloudAvailabilityMonitor.shared.refresh()
              PhotoOfflineCoordinator.shared.requestReconciliation(delay: .zero)
@@ -143,9 +146,11 @@ final class PhotoStorageCoordinator {
         var plan: PhotoCloudDeletionPlan?
         if removeCloudCopies, let account {
             let ids = try await context.perform {
-                let request = NSFetchRequest<NSManagedObjectID>(entityName: "DailyPhoto")
-                request.resultType = .managedObjectIDResultType
-                return try context.fetch(request)
+                try ["DailyPhoto", "Timeline"].flatMap { entityName in
+                    let request = NSFetchRequest<NSManagedObjectID>(entityName: entityName)
+                    request.resultType = .managedObjectIDResultType
+                    return try context.fetch(request)
+                }
             }
             let records = (persistence.container as? NSPersistentCloudKitContainer)?.recordIDs(for: ids) ?? [:]
             plan = PhotoCloudDeletionPlan(accountID: account,
@@ -341,6 +346,8 @@ final class PhotoStorageCoordinator {
         // A previous attempt may have opened its new store before the final
         // checkpoint failed. Always resume from the durable local source.
         try await persistence.reloadCloudConfiguration(cloudEnabled: false)
+        try await PhotoStorageService(cloudKitService: cloud, remoteAssetDeletionService: remoteAssetDeletionService)
+            .prepareDeletedTimelinesForICloud(context: persistence.makeBackgroundContext())
         statusMessage = "Preparing originals for private iCloud upload…"
         try await checkDownloadAccount()
         let photos = try await photos(in: persistence.makeBackgroundContext())
@@ -390,7 +397,8 @@ final class PhotoStorageCoordinator {
         try await context.perform {
             let request = DailyPhoto.fetchRequest()
             request.fetchBatchSize = 100
-            return try context.fetch(request).map { photo in
+            let deletedIDs = try TimelineStore.libraryState(in: context).deletedIDs
+            return try context.fetch(request).filter { !deletedIDs.contains($0.effectiveTimelineID) }.map { photo in
                 guard let id = photo.id, let still = photo.fullImageAssetName, !still.isEmpty else {
                     throw PhotoStorageMigrationError.attention("An older photo’s original couldn’t be recovered. The switch is paused; no original was removed.")
                 }
