@@ -19,6 +19,9 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     @Published var captureFinished: Int = 0
     @Published var sensorAspectRatio: CGFloat
     @Published var isLivePhotoCaptureSupported = false
+    @Published private(set) var cameraPosition: CameraPosition = .front
+    @Published private(set) var canSwitchCamera = false
+    @Published private(set) var isConfiguringCamera = false
     @Published private(set) var captureErrorMessage: String?
     private var captureInFlight = false
     private var captureGeneration = UUID()
@@ -67,14 +70,23 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
     
-    func setupCamera() async {
+    func setupCamera(position: CameraPosition = .front) async {
+        let configurationID = UUID()
+        sessionConfigurationID = configurationID
+        isConfiguringCamera = true
+        isReadyForCapture = false
         let configuration = await withCheckedContinuation { continuation in
             sessionQueue.async { [self] in
-                continuation.resume(returning: configureCameraOnSessionQueue())
+                continuation.resume(returning: configureCameraOnSessionQueue(position: position))
             }
         }
+        guard sessionConfigurationID == configurationID else { return }
+        isConfiguringCamera = false
+        guard !Task.isCancelled else { return }
         sensorAspectRatio = configuration.sensorAspectRatio
         isLivePhotoCaptureSupported = configuration.isLivePhotoCaptureSupported
+        cameraPosition = configuration.position ?? position
+        canSwitchCamera = Self.captureDevice(for: .front) != nil && Self.captureDevice(for: .back) != nil
     }
 
     func configureLivePhotoAudio(enabled: Bool) async {
@@ -117,43 +129,50 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         return true
     }
 
-    nonisolated private func configureCameraOnSessionQueue() -> (
+    nonisolated static func captureDevice(for position: CameraPosition) -> AVCaptureDevice? {
+        AVCaptureDevice.default(position.captureDeviceType, for: .video, position: position.captureDevicePosition)
+    }
+
+    nonisolated private func configureCameraOnSessionQueue(position: CameraPosition) -> (
         sensorAspectRatio: CGFloat,
-        isLivePhotoCaptureSupported: Bool
+        isLivePhotoCaptureSupported: Bool,
+        position: CameraPosition?
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
-        if session.outputs.contains(photoOutput) {
-            return (Self.portraitPhotoAspectRatio(for: photoOutput.maxPhotoDimensions),
-                    photoOutput.isLivePhotoCaptureSupported)
-        }
         session.beginConfiguration()
+        defer { session.commitConfiguration() }
         
         // Set session preset for high quality
         session.sessionPreset = .photo
         
-        // Add video input
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
-              let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
-              session.canAddInput(videoInput) else {
-            session.commitConfiguration()
-            return (Self.defaultPortraitPhotoAspectRatio, false)
+        let videoInputs = session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+            .filter { $0.device.hasMediaType(.video) }
+        if videoInputs.first?.device.position != position.captureDevicePosition,
+           let device = Self.captureDevice(for: position),
+           let input = try? AVCaptureDeviceInput(device: device) {
+            for previous in videoInputs { session.removeInput(previous) }
+            if session.canAddInput(input) {
+                session.addInput(input)
+            } else {
+                // Leave the working camera intact if a replacement cannot be connected.
+                for previous in videoInputs where session.canAddInput(previous) { session.addInput(previous) }
+            }
         }
-        
-        session.addInput(videoInput)
         
         // Add photo output
-        if session.canAddOutput(photoOutput) {
+        if !session.outputs.contains(photoOutput), session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
-
-            // Enable Live Photo capture
-            photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
-            photoOutput.maxPhotoQualityPrioritization = .quality
         }
-        
-        session.commitConfiguration()
+        // Capabilities can change with the input, even when the output is reused.
+        photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported
+        photoOutput.maxPhotoQualityPrioritization = .quality
+        let activeDevice = session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+            .first { $0.device.hasMediaType(.video) }?.device
+        let activePosition: CameraPosition? = activeDevice.map { $0.position == .back ? .back : .front }
         return (
             Self.portraitPhotoAspectRatio(for: photoOutput.maxPhotoDimensions),
-            photoOutput.isLivePhotoCaptureSupported
+            photoOutput.isLivePhotoCaptureSupported,
+            activePosition
         )
     }
 
@@ -191,6 +210,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
 
     func stopSession() {
         sessionConfigurationID = UUID()
+        isConfiguringCamera = false
         isReadyForCapture = false
         sessionQueue.async { [weak self] in
             guard let self, self.session.isRunning else { return }

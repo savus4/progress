@@ -188,7 +188,7 @@ struct LivePhotoContainerView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
-        coordinator.activeRequestID = nil
+        coordinator.cancelRequest()
         coordinator.livePhotoView?.stopPlayback()
         coordinator.livePhotoView?.livePhoto = nil
     }
@@ -198,17 +198,24 @@ struct LivePhotoContainerView: UIViewRepresentable {
         fallbackImageView: UIImageView,
         coordinator: Coordinator
     ) {
+        coordinator.cancelRequest()
         let requestID = UUID()
         coordinator.activeRequestID = requestID
 
-        PHLivePhoto.request(
+        coordinator.photoRequestID = PHLivePhoto.request(
             withResourceFileURLs: [imageURL, videoURL],
             placeholderImage: nil,
             targetSize: .zero,
             contentMode: .aspectFit
-        ) { livePhoto, _ in
+        ) { livePhoto, info in
+            // The prepared still is already visible. Installing Photos' temporary
+            // degraded result would decode another poster and then replace it again.
+            guard (info[PHLivePhotoInfoIsDegradedKey] as? NSNumber)?.boolValue != true,
+                  (info[PHLivePhotoInfoCancelledKey] as? NSNumber)?.boolValue != true else { return }
             DispatchQueue.main.async {
                 guard coordinator.activeRequestID == requestID else { return }
+                coordinator.activeRequestID = nil
+                coordinator.photoRequestID = nil
 
                 if let livePhoto {
                     view.livePhoto = livePhoto
@@ -234,10 +241,19 @@ struct LivePhotoContainerView: UIViewRepresentable {
         var currentImageURL: URL?
         var currentVideoURL: URL?
         var activeRequestID: UUID?
+        var photoRequestID: PHLivePhotoRequestID?
         var onLoadCompleted: (Bool) -> Void
 
         init(onLoadCompleted: @escaping (Bool) -> Void) {
             self.onLoadCompleted = onLoadCompleted
+        }
+
+        func cancelRequest() {
+            activeRequestID = nil
+            if let photoRequestID {
+                PHLivePhoto.cancelRequest(withRequestID: photoRequestID)
+                self.photoRequestID = nil
+            }
         }
 
         @objc func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -301,16 +317,32 @@ struct PhotoDetailItem: Identifiable, Equatable {
 }
 
 struct PhotoDetailView: View {
+    let openingSource: PhotoDetailOpeningSource?
     let onClose: (NSManagedObjectID?) -> Void
+    let dismissalTargetFrame: CGRect?
+    let onDismissalCompleted: () -> Void
     let onCurrentItemChanged: (NSManagedObjectID?) -> Void
     let onShowOnMap: (NSManagedObjectID) -> Void
 
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var detailItems: [PhotoDetailItem]
     @State private var selectedIndex: Int
+    @State private var isOpening: Bool
+    @State private var hasExpandedOpeningImage = false
+    @State private var openingSignpost = PhotoDetailOpeningSignpost()
+    @State private var chromeVisibility = PhotoDetailChromeVisibility()
     @State private var resolvedLocationName = "Unknown location"
-    @State private var verticalDismissOffset: CGFloat = 0
+    @State private var loadedImage: UIImage?
+    @State private var loadedImageObjectID: NSManagedObjectID?
+    @State private var dismissalImage: UIImage?
+    @State private var dismissalOffset: CGSize = .zero
+    @State private var isDismissalActive = false
+    @State private var isReturningToDetail = false
+    @State private var isClosing = false
+    @State private var flightFrame: CGRect?
+    @State private var dismissalOpacity = 1.0
     @State private var areControlsVisible = true
     @State private var sharePresentation: ActivityPresentation?
     @State private var actionError: PhotoDetailActionError?
@@ -322,37 +354,110 @@ struct PhotoDetailView: View {
     init(
         items: [PhotoDetailItem],
         initialIndex: Int,
+        openingSource: PhotoDetailOpeningSource?,
         onClose: @escaping (NSManagedObjectID?) -> Void,
+        dismissalTargetFrame: CGRect?,
+        onDismissalCompleted: @escaping () -> Void,
         onCurrentItemChanged: @escaping (NSManagedObjectID?) -> Void,
         onShowOnMap: @escaping (NSManagedObjectID) -> Void
     ) {
+        self.openingSource = openingSource
         self.onClose = onClose
+        self.dismissalTargetFrame = dismissalTargetFrame
+        self.onDismissalCompleted = onDismissalCompleted
         self.onCurrentItemChanged = onCurrentItemChanged
         self.onShowOnMap = onShowOnMap
         _detailItems = State(initialValue: items)
         _selectedIndex = State(initialValue: initialIndex)
+        _isOpening = State(initialValue: openingSource != nil)
         _librarySaveState = State(initialValue: PhotoDetailLibrarySaveState(
             initialObjectID: items.indices.contains(initialIndex) ? items[initialIndex].objectID : nil
         ))
     }
 
     var body: some View {
-        ZStack {
-            Color.black
-                .opacity(backgroundOpacity)
-                .ignoresSafeArea()
+        GeometryReader { geometry in
+            ZStack {
+                Color.black
+                    .opacity(backgroundOpacity)
 
-            PhotoDetailPagingView(
-                items: detailItems,
-                currentIndex: $selectedIndex,
-                deleteTransition: deleteTransition,
-                onDeleteTransitionCompleted: completeDeleteTransition
-            )
-            .ignoresSafeArea(.container, edges: [.top, .bottom])
+                PhotoDetailPagingView(
+                    items: detailItems,
+                    currentIndex: $selectedIndex,
+                    deleteTransition: deleteTransition,
+                    onDeleteTransitionCompleted: completeDeleteTransition,
+                    isOpening: isOpening,
+                    isDismissalEnabled: currentImage != nil && !isOpening && !isPerformingAction && !isClosing && !isReturningToDetail,
+                    isDismissalActive: isDismissalActive,
+                    onImageChanged: updateCurrentImage,
+                    onDismissDragChanged: updateDismissalDrag,
+                    onDismissDragEnded: endDismissalDrag
+                )
+                .opacity(pagerOpacity)
+                .allowsHitTesting(!isOpening)
+                .accessibilityIdentifier("photoDetailPager")
+
+                if isOpening, let openingSource, openingSource.canExpand, let image = openingSource.image {
+                    let destinationFrame = PhotoDetailDismissalGeometry.draggedFrame(
+                        imageSize: image.size,
+                        viewportSize: geometry.size,
+                        translation: .zero,
+                        reduceMotion: false
+                    )
+                    if reduceMotion {
+                        PhotoDetailDismissalImage(image: image, frame: destinationFrame, cornerRadius: 0)
+                            .opacity(hasExpandedOpeningImage ? 1 : 0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    } else {
+                        PhotoDetailNativeOpeningView(
+                            image: image,
+                            sourceFrame: openingSource.frameInGlobal.offsetBy(
+                                dx: -geometry.frame(in: .global).minX,
+                                dy: -geometry.frame(in: .global).minY
+                            ),
+                            destinationFrame: destinationFrame,
+                            onStart: openingSignpost.begin,
+                            onComplete: completeOpening
+                        )
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    }
+                }
+
+                if isDismissalActive, let dismissalImage {
+                    PhotoDetailDismissalImage(
+                        image: dismissalImage,
+                        frame: flightFrame ?? PhotoDetailDismissalGeometry.draggedFrame(
+                            imageSize: dismissalImage.size,
+                            viewportSize: geometry.size,
+                            translation: dismissalOffset,
+                            reduceMotion: reduceMotion
+                        ),
+                        cornerRadius: flightFrame == nil ? min(max(dismissalOffset.height / 12, 0), 12) : 0
+                    )
+                    .opacity(dismissalOpacity)
+                    .allowsHitTesting(false)
+                }
+            }
+            .onChange(of: dismissalTargetFrame) { _, targetFrame in
+                guard let targetFrame else { return }
+                finishDismissal(to: targetFrame, viewport: geometry.frame(in: .global))
+            }
+        }
+        .ignoresSafeArea()
+        .background {
+            if isOpening, reduceMotion || openingSource?.canExpand != true {
+                PhotoDetailOpeningReadinessView(onReady: animateOpening)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
         .background {
             PhotoDetailBottomToolbarConfigurator(
-                isVisible: areControlsVisible,
+                isVisible: areControlsVisible && !isOpening && !isDismissalActive,
+                chromeVisibility: chromeVisibility,
                 locationTitle: resolvedLocationName,
                 dateTitle: currentDateText,
                 isShareEnabled: !isPerformingAction && currentItem != nil,
@@ -395,9 +500,8 @@ struct PhotoDetailView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: hiddenFavoriteNoticeID != nil)
-        .offset(y: verticalDismissOffset)
-        .simultaneousGesture(verticalDismissGesture)
         .animation(.easeInOut(duration: 0.18), value: areControlsVisible)
+        .accessibilityAction(.escape, closeCurrentPhoto)
         .onAppear(perform: clampSelectedIndex)
         .onAppear {
             onCurrentItemChanged(currentItem?.objectID)
@@ -411,6 +515,7 @@ struct PhotoDetailView: View {
         }
         .onDisappear {
             hiddenFavoriteNoticeID = nil
+            openingSignpost.end()
         }
         .task(id: currentItem?.objectID) {
             await updateLocationName()
@@ -441,51 +546,97 @@ struct PhotoDetailView: View {
         selectedIndex = min(max(selectedIndex, 0), detailItems.count - 1)
     }
 
+    private var currentImage: UIImage? {
+        guard let currentItem else { return nil }
+        if loadedImageObjectID == currentItem.objectID, let loadedImage {
+            return loadedImage
+        }
+        return DecodedThumbnailCache.shared.cachedImage(for: currentItem.objectID)
+    }
+
     private var backgroundOpacity: Double {
-        let progress = min(max(verticalDismissOffset / 240, 0), 1)
-        return 1 - (Double(progress) * 0.22)
+        if isOpening { return hasExpandedOpeningImage ? 1 : 0 }
+        guard flightFrame == nil else { return 0 }
+        let progress = min(max(dismissalOffset.height / 300, 0), 1)
+        return (1 - Double(progress)) * dismissalOpacity
     }
 
-    private var verticalDismissGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .local)
-            .onChanged { value in
-                let horizontalDistance = abs(value.translation.width)
-                let verticalDistance = value.translation.height
-                let isPredominantlyVertical = verticalDistance > 0 && abs(verticalDistance) > (horizontalDistance * 1.15)
-
-                guard isPredominantlyVertical else {
-                    if verticalDismissOffset != 0 {
-                        verticalDismissOffset = 0
-                    }
-                    return
-                }
-
-                verticalDismissOffset = verticalDistance
-            }
-            .onEnded { value in
-                let horizontalDistance = abs(value.translation.width)
-                let verticalDistance = value.translation.height
-                let predictedVerticalDistance = value.predictedEndTranslation.height
-                let isPredominantlyVertical = verticalDistance > 0 && abs(verticalDistance) > (horizontalDistance * 1.15)
-
-                guard isPredominantlyVertical else {
-                    resetVerticalDismissOffset()
-                    return
-                }
-
-                if verticalDistance > 120 || predictedVerticalDistance > 220 {
-                    verticalDismissOffset = max(verticalDistance, 160)
-                    onClose(currentItem?.objectID)
-                } else {
-                    resetVerticalDismissOffset()
-                }
-            }
+    private var pagerOpacity: Double {
+        guard !isDismissalActive else { return 0 }
+        guard isOpening else { return 1 }
+        return openingSource?.canExpand != true && hasExpandedOpeningImage ? 1 : 0
     }
 
-    private func resetVerticalDismissOffset() {
-        guard verticalDismissOffset != 0 else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-            verticalDismissOffset = 0
+    private func animateOpening() {
+        guard isOpening, !hasExpandedOpeningImage else { return }
+        openingSignpost.begin()
+        let canExpand = openingSource?.canExpand == true && !reduceMotion
+        var transaction = Transaction(animation: canExpand ? .smooth(duration: 0.28) : .easeInOut(duration: 0.14))
+        // The cover mounts without UIKit's modal animation; expansion has its own transaction.
+        transaction.disablesAnimations = false
+        transaction.addAnimationCompletion(criteria: .logicallyComplete) {
+            completeOpening()
+        }
+        withTransaction(transaction) {
+            hasExpandedOpeningImage = true
+        }
+    }
+
+    private func completeOpening() {
+        openingSignpost.end()
+        guard !isClosing else { return }
+        isOpening = false
+    }
+
+    private func updateCurrentImage(objectID: NSManagedObjectID, image: UIImage?) {
+        guard currentItem?.objectID == objectID else { return }
+        loadedImageObjectID = objectID
+        loadedImage = image
+    }
+
+    private func updateDismissalDrag(_ translation: CGSize) {
+        guard !isOpening, !isClosing, !isReturningToDetail else { return }
+        if !isDismissalActive {
+            guard let currentImage else { return }
+            chromeVisibility.hideImmediately()
+            dismissalImage = currentImage
+            isDismissalActive = true
+        }
+        dismissalOffset = translation
+    }
+
+    private func endDismissalDrag(_ translation: CGSize, velocity: CGSize, cancelled: Bool) {
+        guard isDismissalActive, !isClosing else { return }
+        dismissalOffset = translation
+        let projectedDistance = translation.height + max(velocity.height, 0) * 0.18
+        if !cancelled, translation.height > 0,
+           translation.height > 120 || projectedDistance > 220 {
+            closeCurrentPhoto()
+        } else {
+            isReturningToDetail = true
+            withAnimation(reduceMotion ? .easeOut(duration: 0.14) : .smooth(duration: 0.22), completionCriteria: .logicallyComplete) {
+                dismissalOffset = .zero
+            } completion: {
+                guard !isClosing else { return }
+                isDismissalActive = false
+                isReturningToDetail = false
+                dismissalImage = nil
+                chromeVisibility.restore()
+            }
+        }
+    }
+
+    private func finishDismissal(to targetFrame: CGRect, viewport: CGRect) {
+        let canFlyToGrid = !reduceMotion && dismissalImage != nil
+            && targetFrame.width > 0 && targetFrame.height > 0
+        withAnimation(canFlyToGrid ? .smooth(duration: 0.28) : .easeOut(duration: 0.14), completionCriteria: .logicallyComplete) {
+            if canFlyToGrid {
+                flightFrame = targetFrame.offsetBy(dx: -viewport.minX, dy: -viewport.minY)
+            } else {
+                dismissalOpacity = 0
+            }
+        } completion: {
+            onDismissalCompleted()
         }
     }
 
@@ -495,7 +646,18 @@ struct PhotoDetailView: View {
     }
 
     private func closeCurrentPhoto() {
-        onClose(currentItem?.objectID)
+        requestClose(currentItem?.objectID)
+    }
+
+    private func requestClose(_ objectID: NSManagedObjectID?) {
+        guard !isOpening, !isClosing else { return }
+        chromeVisibility.hideImmediately()
+        isClosing = true
+        if !isDismissalActive {
+            dismissalImage = currentImage
+            isDismissalActive = true
+        }
+        onClose(objectID)
     }
 
     private var currentDateText: String {
@@ -714,7 +876,7 @@ struct PhotoDetailView: View {
         let remainingItemCount = detailItems.count - 1
         guard remainingItemCount > 0 else {
             isPerformingAction = false
-            onClose(nil)
+            requestClose(nil)
             return
         }
 
@@ -745,7 +907,7 @@ struct PhotoDetailView: View {
         isPerformingAction = false
 
         guard !detailItems.isEmpty else {
-            onClose(nil)
+            requestClose(nil)
             return
         }
 
@@ -857,6 +1019,7 @@ private enum PhotoDetailHeartError: Error {
 
 private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentable {
     let isVisible: Bool
+    let chromeVisibility: PhotoDetailChromeVisibility
     let locationTitle: String
     let dateTitle: String
     let isShareEnabled: Bool
@@ -885,6 +1048,7 @@ private struct PhotoDetailBottomToolbarConfigurator: UIViewControllerRepresentab
     }
 
     func updateUIViewController(_ controller: ToolbarConfigViewController, context: Context) {
+        controller.chromeVisibility = chromeVisibility
         controller.configuration = .init(
             isVisible: isVisible,
             locationTitle: locationTitle,
@@ -965,6 +1129,7 @@ private final class ToolbarConfigViewController: UIViewController {
     }
 
     var configuration: Configuration?
+    var chromeVisibility: PhotoDetailChromeVisibility?
     private var appliedConfiguration: Configuration?
     private weak var configuredViewController: UIViewController?
     private weak var configuredNavigationController: UINavigationController?
@@ -1033,8 +1198,16 @@ private final class ToolbarConfigViewController: UIViewController {
               navigationController.view.bounds.width > 0 else { return }
 
         let chromeViewController = navigationController.topViewController ?? parentViewController
+        chromeVisibility?.attach(
+            to: navigationController,
+            toolbarOwner: chromeViewController,
+            toolbarItems: bottomItems
+        )
 
-        guard appliedConfiguration != configuration || configuredViewController !== chromeViewController else { return }
+        guard appliedConfiguration != configuration || configuredViewController !== chromeViewController else {
+            chromeVisibility?.setVisible(configuration.isVisible)
+            return
+        }
         let previousConfiguration = appliedConfiguration
         let needsInstallation = configuredViewController !== chromeViewController
         appliedConfiguration = configuration
@@ -1088,22 +1261,21 @@ private final class ToolbarConfigViewController: UIViewController {
         }
 
         if needsInstallation {
+            parentViewController.view.backgroundColor = .clear
+            navigationController.view.backgroundColor = .clear
+            chromeViewController.view.backgroundColor = .clear
             applyNavigationAppearance(to: navigationController)
             navigationController.navigationBar.tintColor = .white
             navigationController.toolbar.tintColor = .white
             navigationController.setNavigationBarHidden(false, animated: false)
-            navigationController.setToolbarHidden(false, animated: false)
-            // Give the initially hidden toolbar its geometry before adding items.
-            navigationController.view.layoutIfNeeded()
+            // Let UIKit coalesce the initial chrome layout with the cover's layout.
+            navigationController.setToolbarHidden(!configuration.isVisible, animated: false)
             chromeViewController.navigationItem.hidesBackButton = true
             chromeViewController.navigationItem.leftItemsSupplementBackButton = false
             chromeViewController.navigationItem.leftBarButtonItem = backButton
             chromeViewController.navigationItem.rightBarButtonItem = moreButton
-            chromeViewController.setToolbarItems(bottomItems, animated: false)
         }
-        if needsInstallation || previousConfiguration?.isVisible != configuration.isVisible {
-            setChromeVisible(configuration.isVisible, in: navigationController)
-        }
+        chromeVisibility?.setVisible(configuration.isVisible)
     }
 
     func clearToolbar() {
@@ -1111,6 +1283,7 @@ private final class ToolbarConfigViewController: UIViewController {
               let configuredNavigationController else { return }
 
         appliedConfiguration = nil
+        chromeVisibility?.detach()
         self.configuredViewController = nil
         self.configuredNavigationController = nil
         configuredViewController.navigationItem.leftBarButtonItem = nil
@@ -1304,21 +1477,6 @@ private final class ToolbarConfigViewController: UIViewController {
         configuration?.onFavoriteLivePhoto()
     }
 
-    private func setChromeVisible(_ isVisible: Bool, in navigationController: UINavigationController) {
-        let alpha: CGFloat = isVisible ? 1 : 0
-        navigationController.navigationBar.isUserInteractionEnabled = isVisible
-        navigationController.toolbar.isUserInteractionEnabled = isVisible
-
-        UIViewPropertyAnimator.runningPropertyAnimator(
-            withDuration: 0.18,
-            delay: 0,
-            options: [.beginFromCurrentState, .curveEaseInOut]
-        ) {
-            navigationController.navigationBar.alpha = alpha
-            navigationController.toolbar.alpha = alpha
-        }
-    }
-
     private func makeTitleView(configuration: Configuration) -> UIView {
         let titleLabel = UILabel()
         titleLabel.font = .preferredFont(forTextStyle: .subheadline)
@@ -1349,6 +1507,8 @@ private final class ToolbarConfigViewController: UIViewController {
 private struct PhotoDetailPageView: View {
     let item: PhotoDetailItem
     let isCurrentPage: Bool
+    let allowsLivePhotoPresentation: Bool
+    let onImageChanged: (NSManagedObjectID, UIImage?) -> Void
 
     private let topChromeClearance: CGFloat = 116
     private static let thumbnailDataProvider = PhotoThumbnailDataProvider()
@@ -1368,7 +1528,7 @@ private struct PhotoDetailPageView: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
-                if isCurrentPage, let livePhotoResources, let displayedImage {
+                if isCurrentPage, allowsLivePhotoPresentation, let livePhotoResources, let displayedImage {
                     SnapBackZoomContainer {
                         LivePhotoContainerView(
                             imageURL: livePhotoResources.imageURL,
@@ -1399,6 +1559,10 @@ private struct PhotoDetailPageView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Photo")
+            .accessibilityAddTraits(.isImage)
+            .accessibilityIdentifier("photoDetailImage")
 
             Group {
                 if shouldShowLivePhotoStatusIndicator {
@@ -1423,6 +1587,12 @@ private struct PhotoDetailPageView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 100)
             }
+        }
+        .onChange(of: displayedImage) { _, image in
+            if isCurrentPage { onImageChanged(item.objectID, image) }
+        }
+        .onChange(of: isCurrentPage, initial: true) { _, isCurrent in
+            if isCurrent { onImageChanged(item.objectID, displayedImage) }
         }
         .task(id: loadingTaskKey) {
             await loadImage()
@@ -1596,11 +1766,18 @@ private struct PhotoDetailPagingView: UIViewControllerRepresentable {
     @Binding var currentIndex: Int
     let deleteTransition: PhotoDetailDeleteTransition?
     let onDeleteTransitionCompleted: (PhotoDetailDeleteTransition) -> Void
+    let isOpening: Bool
+    let isDismissalEnabled: Bool
+    let isDismissalActive: Bool
+    let onImageChanged: (NSManagedObjectID, UIImage?) -> Void
+    let onDismissDragChanged: (CGSize) -> Void
+    let onDismissDragEnded: (CGSize, CGSize, Bool) -> Void
 
     func makeUIViewController(context: Context) -> PhotoDetailPagingViewController {
         PhotoDetailPagingViewController(
             items: items,
             initialIndex: currentIndex,
+            isOpening: isOpening,
             onIndexChanged: { index in
                 currentIndex = index
             }
@@ -1612,6 +1789,12 @@ private struct PhotoDetailPagingView: UIViewControllerRepresentable {
             currentIndex = index
         }
         controller.onDeleteTransitionCompleted = onDeleteTransitionCompleted
+        controller.onImageChanged = onImageChanged
+        controller.onDismissDragChanged = onDismissDragChanged
+        controller.onDismissDragEnded = onDismissDragEnded
+        controller.isDismissalEnabled = isDismissalEnabled
+        controller.setDismissalActive(isDismissalActive)
+        controller.setOpeningActive(isOpening)
 
         if let deleteTransition {
             controller.performDeleteTransitionIfNeeded(
@@ -1629,10 +1812,17 @@ private struct PhotoDetailPagingView: UIViewControllerRepresentable {
 private final class PhotoDetailPagingViewController: UIViewController {
     var onIndexChanged: (Int) -> Void
     var onDeleteTransitionCompleted: (PhotoDetailDeleteTransition) -> Void = { _ in }
+    var onImageChanged: (NSManagedObjectID, UIImage?) -> Void = { _, _ in }
+    var onDismissDragChanged: (CGSize) -> Void = { _ in }
+    var onDismissDragEnded: (CGSize, CGSize, Bool) -> Void = { _, _, _ in }
+    var isDismissalEnabled = false
+
+    private lazy var dismissalPan = UIPanGestureRecognizer(target: self, action: #selector(handleDismissalPan(_:)))
 
     private let collectionView: UICollectionView
     private var items: [PhotoDetailItem]
     private var currentIndex: Int
+    private var isOpening: Bool
     private var didSetInitialOffset = false
     private var activeDeleteTransition: PhotoDetailDeleteTransition?
     private var completedDeleteTransitionID: UUID?
@@ -1641,10 +1831,12 @@ private final class PhotoDetailPagingViewController: UIViewController {
     init(
         items: [PhotoDetailItem],
         initialIndex: Int,
+        isOpening: Bool,
         onIndexChanged: @escaping (Int) -> Void
     ) {
         self.items = items
         self.currentIndex = items.indices.contains(initialIndex) ? initialIndex : 0
+        self.isOpening = isOpening
         self.onIndexChanged = onIndexChanged
 
         let layout = UICollectionViewFlowLayout()
@@ -1670,6 +1862,10 @@ private final class PhotoDetailPagingViewController: UIViewController {
         view.backgroundColor = .clear
         view.insetsLayoutMarginsFromSafeArea = false
         configureCollectionView()
+        dismissalPan.maximumNumberOfTouches = 1
+        dismissalPan.delegate = self
+        view.addGestureRecognizer(dismissalPan)
+        collectionView.panGestureRecognizer.require(toFail: dismissalPan)
         schedulePrefetch(around: currentIndex)
     }
 
@@ -1680,6 +1876,36 @@ private final class PhotoDetailPagingViewController: UIViewController {
         guard !didSetInitialOffset, collectionView.bounds.width > 0 else { return }
         didSetInitialOffset = true
         scrollToIndex(currentIndex, animated: false)
+    }
+
+    func setDismissalActive(_ isActive: Bool) {
+        collectionView.isScrollEnabled = !isActive
+    }
+
+    func setOpeningActive(_ isActive: Bool) {
+        guard isOpening != isActive else { return }
+        isOpening = isActive
+        refreshVisibleCells()
+        if !isActive { schedulePrefetch(around: currentIndex) }
+    }
+
+    @objc private func handleDismissalPan(_ gesture: UIPanGestureRecognizer) {
+        // The window coordinate space stays fixed while the photo follows the finger.
+        let translation = gesture.translation(in: view.window)
+        let offset = CGSize(width: translation.x, height: translation.y)
+        switch gesture.state {
+        case .began, .changed:
+            onDismissDragChanged(offset)
+        case .ended, .cancelled, .failed:
+            let velocity = gesture.velocity(in: view.window)
+            onDismissDragEnded(
+                offset,
+                CGSize(width: velocity.x, height: velocity.y),
+                gesture.state != .ended
+            )
+        default:
+            break
+        }
     }
 
     func updateItems(_ nextItems: [PhotoDetailItem], currentIndex nextIndex: Int) {
@@ -1844,7 +2070,10 @@ private final class PhotoDetailPagingViewController: UIViewController {
     }
 
     private func schedulePrefetch(around index: Int) {
-        let wanted = Set([index - 2, index - 1, index, index + 1, index + 2].filter { items.indices.contains($0) })
+        guard !isOpening else { return }
+        // The visible page already loads the current photo. Keep neighbor work
+        // out of the opening animation and avoid a duplicate current-image decode.
+        let wanted = Set([index - 2, index - 1, index + 1, index + 2].filter { items.indices.contains($0) })
 
         for (taskIndex, task) in prefetchTasks where !wanted.contains(taskIndex) {
             task.cancel()
@@ -1877,6 +2106,7 @@ private final class PhotoDetailPagingViewController: UIViewController {
             cell.configure(
                 with: items[indexPath.item],
                 isCurrentPage: indexPath.item == currentIndex,
+                allowsLivePhotoPresentation: !isOpening,
                 parentViewController: self
             )
         }
@@ -1902,13 +2132,15 @@ extension PhotoDetailPagingViewController: UICollectionViewDataSource, UICollect
         pagingCell.configure(
             with: items[indexPath.item],
             isCurrentPage: indexPath.item == currentIndex,
+            allowsLivePhotoPresentation: !isOpening,
             parentViewController: self
         )
         return pagingCell
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
-        for indexPath in indexPaths where items.indices.contains(indexPath.item) {
+        guard !isOpening else { return }
+        for indexPath in indexPaths where items.indices.contains(indexPath.item) && indexPath.item != currentIndex {
             let item = items[indexPath.item]
             if prefetchTasks[indexPath.item] == nil {
                 prefetchTasks[indexPath.item] = Task(priority: .utility) { [weak self] in
@@ -1967,12 +2199,32 @@ extension PhotoDetailPagingViewController: UICollectionViewDataSource, UICollect
     }
 }
 
+extension PhotoDetailPagingViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === dismissalPan, isDismissalEnabled,
+              activeDeleteTransition == nil,
+              !collectionView.isDragging, !collectionView.isDecelerating else { return false }
+        let velocity = dismissalPan.velocity(in: view.window)
+        guard velocity.y > abs(velocity.x) * 1.1 else { return false }
+        return !hasActiveZoom(in: collectionView)
+    }
+
+    private func hasActiveZoom(in view: UIView) -> Bool {
+        if let scrollView = view as? UIScrollView,
+           scrollView.zoomScale > 1.01 || scrollView.isZooming || scrollView.isZoomBouncing {
+            return true
+        }
+        return view.subviews.contains { hasActiveZoom(in: $0) }
+    }
+}
+
 @MainActor
 private final class PhotoDetailPagingCell: UICollectionViewCell {
     static let reuseIdentifier = "PhotoDetailPagingCell"
 
     private var representedObjectID: NSManagedObjectID?
     private var isCurrentPage = false
+    private var allowsLivePhotoPresentation = true
     private weak var parentViewController: UIViewController?
     private var hostingController: UIHostingController<AnyView>?
     private let deletionFadeOverlay = UIView()
@@ -2003,21 +2255,28 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
     func configure(
         with item: PhotoDetailItem,
         isCurrentPage: Bool,
+        allowsLivePhotoPresentation: Bool,
         parentViewController: UIViewController
     ) {
         attachHostingControllerIfNeeded(to: parentViewController)
 
-        guard representedObjectID != item.objectID || self.isCurrentPage != isCurrentPage else { return }
+        guard representedObjectID != item.objectID || self.isCurrentPage != isCurrentPage
+                || self.allowsLivePhotoPresentation != allowsLivePhotoPresentation else { return }
 
         representedObjectID = item.objectID
         self.isCurrentPage = isCurrentPage
+        self.allowsLivePhotoPresentation = allowsLivePhotoPresentation
         deletionFadeOverlay.layer.removeAllAnimations()
         deletionFadeOverlay.alpha = 0
 
         hostingController?.rootView = AnyView(
             PhotoDetailPageView(
                 item: item,
-                isCurrentPage: isCurrentPage
+                isCurrentPage: isCurrentPage,
+                allowsLivePhotoPresentation: allowsLivePhotoPresentation,
+                onImageChanged: { [weak parentViewController] objectID, image in
+                    (parentViewController as? PhotoDetailPagingViewController)?.onImageChanged(objectID, image)
+                }
             )
             .id(item.objectID)
             .background(Color.black)

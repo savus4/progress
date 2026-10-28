@@ -6,6 +6,57 @@ import UIKit
 
 @MainActor
 struct PhotoGridThumbnailTests {
+    @Test("Opening retains the displayed thumbnail after cache eviction and cell reuse")
+    func openingUsesDisplayedThumbnailAfterCacheEviction() async throws {
+        let persistence = PersistenceController(inMemory: true)
+        let photo = DailyPhoto(context: persistence.container.viewContext)
+        try persistence.container.viewContext.obtainPermanentIDs(for: [photo])
+        let cache = DecodedThumbnailCache()
+        let image = try #require(await cache.image(for: photo.objectID, data: makeJPEG()))
+        let frame = CGRect(x: 20, y: 80, width: 120, height: 160)
+        let cell = PhotoGridCollectionViewCell(frame: frame)
+        cell.setThumbnailImage(image)
+        cache.removeAllImages()
+        try #require(cache.cachedImage(for: photo.objectID) == nil)
+
+        let source = cell.openingSource(frameInGlobal: frame)
+        cell.prepareForReuse()
+
+        #expect(source.canExpand)
+        #expect(source.frameInGlobal == frame)
+        #expect(source.image === image)
+        #expect(cell.openingSource(frameInGlobal: frame).image == nil)
+    }
+
+    @Test("A flying photo leaves its grid space empty through thumbnail updates and cell reuse")
+    func destinationStaysEmptyUntilTheFlightFinishes() throws {
+        let persistence = PersistenceController(inMemory: true)
+        let context = persistence.container.viewContext
+        let photo = DailyPhoto(context: context)
+        try context.obtainPermanentIDs(for: [photo])
+        let item = UIKitPhotoGridItem(photo: photo)
+        let frame = CGRect(x: 20, y: 80, width: 120, height: 160)
+        let cell = PhotoGridCollectionViewCell(frame: frame)
+
+        cell.configure(with: item, showsUploadStatus: false, isSelectionMode: false,
+                       isSelected: false, isHiddenForTransition: true)
+        // Thumbnail work can finish while the detail photo is still flying.
+        cell.setThumbnailImage(UIImage())
+        cell.layoutIfNeeded()
+        #expect(cell.contentView.alpha == 0)
+        #expect(cell.frame == frame)
+        #expect(cell.isHidden == false)
+
+        cell.configure(with: item, showsUploadStatus: false, isSelectionMode: false,
+                       isSelected: false, isHiddenForTransition: false)
+        #expect(cell.contentView.alpha == 1)
+
+        cell.configure(with: item, showsUploadStatus: false, isSelectionMode: false,
+                       isSelected: false, isHiddenForTransition: true)
+        cell.prepareForReuse()
+        #expect(cell.contentView.alpha == 1)
+    }
+
     @Test("Canceling a queued thumbnail removes its decode and permits a later retry")
     func canceledDecodeCanBeRetried() async throws {
         let persistence = PersistenceController(inMemory: true)

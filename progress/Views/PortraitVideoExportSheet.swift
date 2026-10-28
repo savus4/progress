@@ -15,6 +15,7 @@ struct PortraitVideoExportSheet: View {
     @AppStorage("portraitVideoIncludesLocationBanner") private var includesLocationBanner = false
     @AppStorage("portraitVideoIncludesFavoriteLivePhotoVideos") private var includesFavoriteLivePhotoVideos = false
     @AppStorage("portraitVideoHoldsHeartedPhotos") private var holdsHeartedPhotos = false
+    @AppStorage("portraitVideoReversesPhotoOrder") private var reversesPhotoOrder = false
     @AppStorage(PortraitVideoExportStorageKeys.usesAllPhotos) private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
@@ -218,6 +219,16 @@ struct PortraitVideoExportSheet: View {
             )
             .accessibilityLabel("Pictures per second")
 
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: $reversesPhotoOrder) {
+                    Label("Reverse Mode", systemImage: "backward.end.fill")
+                }
+
+                Text("Show photos from newest to oldest.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Toggle(isOn: $includesDateBanner) {
                 Label("Show Date Banner", systemImage: "calendar")
             }
@@ -418,7 +429,8 @@ struct PortraitVideoExportSheet: View {
             holdsHeartedPhotos: effectiveHoldsHeartedPhotos,
             usesAllPhotos: usesAllPhotos,
             startDate: startDate,
-            endDate: endDate
+            endDate: endDate,
+            reversesPhotoOrder: reversesPhotoOrder
         )
     }
 
@@ -904,6 +916,7 @@ struct PortraitVideoExportSheet: View {
         includesLocationBanner = configuration.includesLocationBanner
         includesFavoriteLivePhotoVideos = configuration.includesFavoriteLivePhotoVideo
         holdsHeartedPhotos = configuration.holdsHeartedPhotos
+        reversesPhotoOrder = configuration.reversesPhotoOrder
         usesAllPhotos = configuration.usesAllPhotos
         startDate = Self.clampedSelectedDate(configuration.startDate, in: availableDateRange, calendar: calendar)
         endDate = Self.clampedSelectedDate(configuration.endDate, in: availableDateRange, calendar: calendar)

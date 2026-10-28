@@ -29,8 +29,10 @@ struct AlignmentGuideStoreTests {
         let guide = AlignmentGuideStore(localDefaults: defaults, ubiquitousStore: cloud, storageModeStore: mode)
         #expect(guide.eyeLinePosition == Double(AlignmentGuide.default.eyeLinePosition))
         guide.eyeLinePosition = 0.45
+        guide.isVisible = false
         let reopened = AlignmentGuideStore(localDefaults: defaults, ubiquitousStore: cloud, storageModeStore: mode)
         #expect(reopened.eyeLinePosition == 0.45)
+        #expect(reopened.isVisible == false)
         reopened.synchronizeStorageMode()
         #expect(cloud.writes == 0)
         #expect(cloud.synchronizations == 0)
@@ -38,6 +40,7 @@ struct AlignmentGuideStoreTests {
         reopened.synchronizeStorageMode()
         let synced = try JSONDecoder().decode(AlignmentGuide.self, from: #require(cloud.values[key]))
         #expect(synced.eyeLinePosition == 0.45)
+        #expect(synced.isVisible == false)
         #expect(cloud.writes == 1)
         #expect(!defaults.bool(forKey: key + ".pendingSync"))
     }
@@ -72,8 +75,8 @@ struct AlignmentGuideStoreTests {
         defaults.set(0.42, forKey: "eyeLinePosition")
         defaults.set(0.72, forKey: "mouthLinePosition")
         if usesEncodedGuide {
-            let guide = AlignmentGuide(eyeLinePosition: 0.44, mouthLinePosition: 0.74)
-            defaults.set(try JSONEncoder().encode(guide), forKey: "alignmentGuide")
+            let legacyGuide = Data(#"{"eyeLinePosition":0.44,"mouthLinePosition":0.74}"#.utf8)
+            defaults.set(legacyGuide, forKey: "alignmentGuide")
         }
 
         let original = AlignmentGuideStore(localDefaults: defaults, ubiquitousStore: nil)
@@ -83,11 +86,14 @@ struct AlignmentGuideStoreTests {
         #expect(original.mouthLinePosition == (usesEncodedGuide ? 0.74 : 0.72))
         #expect(additional.eyeLinePosition == Double(AlignmentGuide.default.eyeLinePosition))
         #expect(additional.mouthLinePosition == Double(AlignmentGuide.default.mouthLinePosition))
+        #expect(original.isVisible)
+        #expect(additional.isVisible)
         let migrated = try JSONDecoder().decode(
             AlignmentGuide.self, from: #require(defaults.data(forKey: "alignmentGuide"))
         )
         #expect(Double(migrated.eyeLinePosition) == original.eyeLinePosition)
         #expect(Double(migrated.mouthLinePosition) == original.mouthLinePosition)
+        #expect(migrated.isVisible)
     }
 
     @Test("Editing and reopening a person's guide leaves other timelines and legacy keys unchanged")
@@ -106,6 +112,7 @@ struct AlignmentGuideStoreTests {
 
         first.eyeLinePosition = 0.28
         first.mouthLinePosition = 0.58
+        first.isVisible = false
         second.eyeLinePosition = 0.38
         second.mouthLinePosition = 0.68
         let reopenedFirst = AlignmentGuideStore(timelineID: firstID, localDefaults: defaults, ubiquitousStore: nil)
@@ -113,12 +120,58 @@ struct AlignmentGuideStoreTests {
 
         #expect(reopenedFirst.eyeLinePosition == 0.28)
         #expect(reopenedFirst.mouthLinePosition == 0.58)
+        #expect(reopenedFirst.isVisible == false)
         #expect(reopenedSecond.eyeLinePosition == 0.38)
         #expect(reopenedSecond.mouthLinePosition == 0.68)
+        #expect(reopenedSecond.isVisible)
+        #expect(original.isVisible)
         #expect(original.eyeLinePosition == 0.41)
         #expect(original.mouthLinePosition == 0.71)
         #expect(defaults.data(forKey: "alignmentGuide") == originalBytes)
         #expect(defaults.double(forKey: "eyeLinePosition") == 0.41)
         #expect(defaults.double(forKey: "mouthLinePosition") == 0.71)
+    }
+
+    @Test("Guide visibility syncs only to the owning timeline", arguments: [false, true])
+    func visibilitySyncsPerTimeline(usesDefaultTimeline: Bool) throws {
+        let domain = "GuideVisibilitySync-\(UUID())"
+        let firstDefaults = try #require(UserDefaults(suiteName: domain + ".first"))
+        let secondDefaults = try #require(UserDefaults(suiteName: domain + ".second"))
+        let modeURL = FileManager.default.temporaryDirectory.appendingPathComponent(domain + "/mode.json")
+        defer {
+            firstDefaults.removePersistentDomain(forName: domain + ".first")
+            secondDefaults.removePersistentDomain(forName: domain + ".second")
+            try? FileManager.default.removeItem(at: modeURL.deletingLastPathComponent())
+        }
+        let mode = PhotoStorageModeStore(storageURL: modeURL)
+        let cloud = Cloud()
+        let timelineID = usesDefaultTimeline ? TimelineIdentity.defaultID : UUID()
+        let otherTimelineID = usesDefaultTimeline ? UUID() : TimelineIdentity.defaultID
+        let first = AlignmentGuideStore(timelineID: timelineID, localDefaults: firstDefaults,
+                                        ubiquitousStore: cloud, storageModeStore: mode)
+        let second = AlignmentGuideStore(timelineID: timelineID, localDefaults: secondDefaults,
+                                         ubiquitousStore: cloud, storageModeStore: mode)
+        let other = AlignmentGuideStore(timelineID: otherTimelineID, localDefaults: secondDefaults,
+                                        ubiquitousStore: cloud, storageModeStore: mode)
+
+        first.isVisible = false
+        second.synchronizeStorageMode()
+        other.synchronizeStorageMode()
+
+        #expect(second.isVisible == false)
+        #expect(other.isVisible)
+        #expect(second.eyeLinePosition == Double(AlignmentGuide.default.eyeLinePosition))
+        #expect(second.mouthLinePosition == Double(AlignmentGuide.default.mouthLinePosition))
+        #expect(cloud.values[AlignmentGuideStore.storageKey(for: otherTimelineID)] == nil)
+        #expect(cloud.writes == 1)
+
+        let reopened = AlignmentGuideStore(timelineID: timelineID, localDefaults: secondDefaults,
+                                           ubiquitousStore: cloud, storageModeStore: mode)
+        #expect(reopened.isVisible == false)
+
+        first.isVisible = true
+        second.synchronizeStorageMode()
+        #expect(second.isVisible)
+        #expect(cloud.writes == 2)
     }
 }

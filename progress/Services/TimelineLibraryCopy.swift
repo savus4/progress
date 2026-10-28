@@ -50,11 +50,20 @@ enum TimelineLibraryCopy {
                     if incoming.supersedes(preference) { preference = incoming }
                 }
                 if max(targetRank, incomingRank) > 0 { preference = nil }
+                var cameraPreference = TimelineStore.cameraPreference(in: rows)
+                if let raw = attributes["cameraPositionRaw"]?.value as? String,
+                   let position = CameraPosition(rawValue: raw) {
+                    let incoming = TimelineCameraPreference(position: position,
+                        modifiedAt: attributes["cameraPreferenceModifiedAt"]?.value as? Date)
+                    if incoming.supersedes(cameraPreference) { cameraPreference = incoming }
+                }
+                if max(targetRank, incomingRank) > 0 { cameraPreference = nil }
                 let destinations = rows.isEmpty ? [Timeline(context: target)] : rows
                 for row in destinations {
                     if copiesMetadata {
                         for key in row.entity.attributesByName.keys
-                            where key != "livePhotoCaptureEnabled" && key != "livePhotoPreferenceModifiedAt" {
+                            where key != "livePhotoCaptureEnabled" && key != "livePhotoPreferenceModifiedAt"
+                                && key != "cameraPositionRaw" && key != "cameraPreferenceModifiedAt" {
                             row.setValue(attributes[key]?.value, forKey: key)
                         }
                     }
@@ -62,6 +71,12 @@ enum TimelineLibraryCopy {
                     if row.livePhotoCaptureEnabled != enabled { row.livePhotoCaptureEnabled = enabled }
                     if row.livePhotoPreferenceModifiedAt != preference?.modifiedAt {
                         row.livePhotoPreferenceModifiedAt = preference?.modifiedAt
+                    }
+                    if row.cameraPositionRaw != cameraPreference?.position.rawValue {
+                        row.cameraPositionRaw = cameraPreference?.position.rawValue
+                    }
+                    if row.cameraPreferenceModifiedAt != cameraPreference?.modifiedAt {
+                        row.cameraPreferenceModifiedAt = cameraPreference?.modifiedAt
                     }
                 }
                 if target.hasChanges { try target.save() }

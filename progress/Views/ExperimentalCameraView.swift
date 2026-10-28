@@ -48,6 +48,12 @@ struct ExperimentalCameraView: View {
     @State private var timelines = TimelineSelectionStore.shared
     @State private var isUpdatingLivePhotoPreference = false
     @State private var livePhotoPreferenceError: String?
+    @State private var isUpdatingCameraPreference = false
+    @State private var cameraPreferenceError: String?
+
+    private var preferredCameraPosition: CameraPosition {
+        TimelineCameraPreferences.cameraPosition(for: timelineID, in: timelines)
+    }
 
     private var isLivePhotoCaptureEnabled: Bool {
         TimelineCameraPreferences.livePhotosEnabled(for: timelineID, in: timelines)
@@ -78,11 +84,13 @@ struct ExperimentalCameraView: View {
     @State private var pendingLivePhotoVideoURL: URL?
     @State private var isCapturing = false
     @State private var livePhotoPreferenceAtCapture: Bool?
+    @State private var cameraPositionAtCapture: CameraPosition?
     @State private var isAnimatingPreviewToGrid = false
     @State private var previewDismissOffset: CGFloat = 0
     @State private var captureFeedbackStage: CaptureFeedbackStage?
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
+    @State private var draftGuidesVisible: Bool?
     @State private var didPresentMockCapture = false
     #if DEBUG
     @State private var didInjectSaveFailure = false
@@ -94,7 +102,8 @@ struct ExperimentalCameraView: View {
     }
 
     private var controlsDisabled: Bool {
-        guideInteractionDisabled || isEditingGuides || isUpdatingLivePhotoPreference
+        guideInteractionDisabled || isEditingGuides || isUpdatingLivePhotoPreference || isUpdatingCameraPreference
+            || cameraService.isConfiguringCamera
             || (!usesMockCapture && !cameraService.isReadyForCapture)
     }
 
@@ -117,18 +126,20 @@ struct ExperimentalCameraView: View {
                     ZStack {
                         Color.black
 
-                        ExperimentalCameraPreviewView(session: cameraService.session)
+                        ExperimentalCameraPreviewView(session: cameraService.session, position: cameraService.cameraPosition)
                             .frame(width: previewWidth, height: actualPreviewHeight)
                             .background(Color.black)
 
-                        ExperimentalGuidesOverlay(
-                            eyeLinePosition: eyeLinePositionBinding,
-                            mouthLinePosition: mouthLinePositionBinding,
-                            isEditingGuides: $isEditingGuides,
-                            isInteractionDisabled: guideInteractionDisabled
-                        )
-                        .frame(width: previewWidth, height: actualPreviewHeight)
-                        .allowsHitTesting(isEditingGuides && !guideInteractionDisabled)
+                        if areGuidesVisible {
+                            ExperimentalGuidesOverlay(
+                                eyeLinePosition: eyeLinePositionBinding,
+                                mouthLinePosition: mouthLinePositionBinding,
+                                isEditingGuides: $isEditingGuides,
+                                isInteractionDisabled: guideInteractionDisabled
+                            )
+                            .frame(width: previewWidth, height: actualPreviewHeight)
+                            .allowsHitTesting(isEditingGuides && !guideInteractionDisabled)
+                        }
 
                         if let captureFeedbackStage, !showingCapturePreview {
                             captureStatusOverlay(for: captureFeedbackStage)
@@ -137,11 +148,12 @@ struct ExperimentalCameraView: View {
                         if shouldShowLivePhotoToggle {
                             VStack {
                                 HStack {
+                                    cameraSwitchButton
                                     Spacer()
                                     livePhotoToggleButton
                                 }
                                 .padding(.top, 16)
-                                .padding(.trailing, 16)
+                                .padding(.horizontal, 16)
 
                                 Spacer()
                             }
@@ -215,7 +227,7 @@ struct ExperimentalCameraView: View {
             await cameraService.checkAuthorization()
             guard !Task.isCancelled else { return }
             if cameraService.isAuthorized {
-                await cameraService.setupCamera()
+                await cameraService.setupCamera(position: cameraSessionRequest.position)
                 guard !Task.isCancelled else { return }
                 do {
                     try await TimelineCameraPreferences.migrateLegacyPreference(
@@ -252,6 +264,7 @@ struct ExperimentalCameraView: View {
         .interactiveDismissDisabled(isSaving || isCapturing)
         .onChange(of: cameraService.captureCompleted) { _, _ in
             livePhotoPreferenceAtCapture = nil
+            cameraPositionAtCapture = nil
             isCapturing = false
             captureFeedbackStage = nil
             if let capture = cameraService.livePhotoCapture {
@@ -287,6 +300,7 @@ struct ExperimentalCameraView: View {
         .onChange(of: cameraService.captureErrorMessage) { _, message in
             guard message != nil else { return }
             livePhotoPreferenceAtCapture = nil
+            cameraPositionAtCapture = nil
             isCapturing = false
             captureFeedbackStage = nil
             showingCaptureError = true
@@ -309,10 +323,19 @@ struct ExperimentalCameraView: View {
         } message: {
             Text("Your capture is still available. Try saving again.\n\n\(saveErrorMessage)")
         }
+        .alert("Unable to Switch Camera", isPresented: Binding(
+            get: { cameraPreferenceError != nil },
+            set: { if !$0 { cameraPreferenceError = nil } }
+        )) {
+            Button("OK", role: .cancel) { cameraPreferenceError = nil }
+        } message: {
+            Text(cameraPreferenceError ?? "Please try again.")
+        }
     }
 
     private struct CameraSessionRequest: Equatable {
         let livePhotosEnabled: Bool
+        let position: CameraPosition
         let paused: Bool
     }
 
@@ -320,6 +343,7 @@ struct ExperimentalCameraView: View {
         CameraSessionRequest(
             // A remote preference change must not reconfigure an exposure in flight.
             livePhotosEnabled: livePhotoPreferenceAtCapture ?? isLivePhotoCaptureEnabled,
+            position: cameraPositionAtCapture ?? preferredCameraPosition,
             paused: scenePhase == .background || showingCapturePreview
         )
     }
@@ -341,8 +365,11 @@ struct ExperimentalCameraView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     if isEditingGuides {
-                        Spacer(minLength: 0)
-                            .frame(maxWidth: .infinity)
+                        HStack {
+                            guideVisibilityButton
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity)
                     } else {
                         HStack {
                             Button(action: { dismiss() }) {
@@ -418,7 +445,7 @@ struct ExperimentalCameraView: View {
                         } else {
                             Button(action: beginGuideEditing) {
                                 VStack(spacing: 4) {
-                                    Image(systemName: "eye")
+                                    Image(systemName: areGuidesVisible ? "eye" : "eye.slash")
                                         .font(.title3)
                                     Text("Guides")
                                         .font(.caption2)
@@ -447,6 +474,34 @@ struct ExperimentalCameraView: View {
         .frame(height: height)
     }
 
+    private var areGuidesVisible: Bool {
+        draftGuidesVisible ?? alignmentGuideStore.isVisible
+    }
+
+    private var guideVisibilityButton: some View {
+        Button {
+            draftGuidesVisible = !areGuidesVisible
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: areGuidesVisible ? "eye.slash" : "eye")
+                    .font(.title3)
+                Text(areGuidesVisible ? "Hide" : "Show")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+            }
+            .foregroundStyle(.white)
+            .frame(width: 64, height: 64)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+            )
+        }
+        .accessibilityLabel(areGuidesVisible ? "Hide Guides" : "Show Guides")
+        .accessibilityValue(areGuidesVisible ? "Visible" : "Hidden")
+        .accessibilityIdentifier("experimentalCameraGuideVisibilityButton")
+        .disabled(guideInteractionDisabled)
+    }
+
     private var livePhotoToggleButton: some View {
         Button(action: toggleLivePhotos) {
             Image(systemName: livePhotoToggleSymbolName)
@@ -472,13 +527,45 @@ struct ExperimentalCameraView: View {
         .accessibilityIdentifier("experimentalCameraLivePhotoToggle")
         .accessibilityLabel(livePhotoToggleAccessibilityLabel)
         .accessibilityValue(livePhotoToggleAccessibilityValue)
-        .disabled(guideInteractionDisabled || isUpdatingLivePhotoPreference || storage.mode.isMigrating
+        .disabled(guideInteractionDisabled || isUpdatingLivePhotoPreference || isUpdatingCameraPreference
+                  || cameraService.isConfiguringCamera || storage.mode.isMigrating
                   || !cameraService.isLivePhotoCaptureSupported)
+    }
+
+    private var cameraSwitchButton: some View {
+        Button(cameraService.cameraPosition == .front ? "Switch to Back Camera" : "Switch to Front Camera",
+               systemImage: "arrow.triangle.2.circlepath.camera", action: switchCamera)
+            .labelStyle(.iconOnly)
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 44, height: 44)
+            .background(.black.opacity(0.46), in: Circle())
+            .overlay(Circle().stroke(.white.opacity(0.44), lineWidth: 1))
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("experimentalCameraSwitchCamera")
+            .accessibilityValue(cameraService.cameraPosition == .front ? "Front Camera" : "Back Camera")
+            .disabled(guideInteractionDisabled || isUpdatingCameraPreference || isUpdatingLivePhotoPreference
+                      || cameraService.isConfiguringCamera || storage.mode.isMigrating || !cameraService.canSwitchCamera)
+    }
+
+    private func switchCamera() {
+        guard !guideInteractionDisabled, !isUpdatingCameraPreference, !isUpdatingLivePhotoPreference,
+              !cameraService.isConfiguringCamera, !storage.mode.isMigrating,
+              cameraService.canSwitchCamera else { return }
+        let position = cameraService.cameraPosition.opposite
+        isUpdatingCameraPreference = true
+        Task {
+            defer { isUpdatingCameraPreference = false }
+            do {
+                try await timelines.setCameraPosition(position, for: timelineID, in: viewContext)
+            } catch { cameraPreferenceError = error.localizedDescription }
+        }
     }
 
     private func toggleLivePhotos() {
         guard cameraService.isLivePhotoCaptureSupported, !guideInteractionDisabled,
-              !isUpdatingLivePhotoPreference, !storage.mode.isMigrating else { return }
+              !isUpdatingLivePhotoPreference, !isUpdatingCameraPreference,
+              !cameraService.isConfiguringCamera, !storage.mode.isMigrating else { return }
         let enabled = !isLivePhotoCaptureEnabled
         isUpdatingLivePhotoPreference = true
         Task {
@@ -540,12 +627,14 @@ struct ExperimentalCameraView: View {
     private func beginGuideEditing() {
         draftEyeLinePosition = alignmentGuideStore.eyeLinePosition
         draftMouthLinePosition = alignmentGuideStore.mouthLinePosition
+        draftGuidesVisible = alignmentGuideStore.isVisible
         isEditingGuides = true
     }
 
     private func cancelGuideEditing() {
         draftEyeLinePosition = nil
         draftMouthLinePosition = nil
+        draftGuidesVisible = nil
         isEditingGuides = false
     }
 
@@ -556,8 +645,12 @@ struct ExperimentalCameraView: View {
         if let draftMouthLinePosition {
             alignmentGuideStore.mouthLinePosition = draftMouthLinePosition
         }
+        if let draftGuidesVisible {
+            alignmentGuideStore.isVisible = draftGuidesVisible
+        }
         draftEyeLinePosition = nil
         draftMouthLinePosition = nil
+        draftGuidesVisible = nil
         isEditingGuides = false
     }
 
@@ -570,6 +663,7 @@ struct ExperimentalCameraView: View {
         }
 
         livePhotoPreferenceAtCapture = isLivePhotoCaptureEnabled
+        cameraPositionAtCapture = preferredCameraPosition
         isCapturing = true
         #if targetEnvironment(simulator)
         captureFeedbackStage = .processingCapture
@@ -631,6 +725,7 @@ struct ExperimentalCameraView: View {
 
     private func clearPendingCapture() {
         livePhotoPreferenceAtCapture = nil
+        cameraPositionAtCapture = nil
         pendingCaptureImage = nil
         pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
@@ -1190,16 +1285,14 @@ struct ExperimentalGuidesOverlay: View {
 
 struct ExperimentalCameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
+    let position: CameraPosition
 
     func makeUIView(context: Context) -> PreviewContainerView {
         let view = PreviewContainerView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspect
 
-        if let connection = view.previewLayer.connection,
-           connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
-        }
+        configureConnection(view.previewLayer.connection)
 
         return view
     }
@@ -1207,9 +1300,15 @@ struct ExperimentalCameraPreviewView: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewContainerView, context: Context) {
         uiView.previewLayer.session = session
 
-        if let connection = uiView.previewLayer.connection,
-           connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
+        configureConnection(uiView.previewLayer.connection)
+    }
+
+    private func configureConnection(_ connection: AVCaptureConnection?) {
+        guard let connection else { return }
+        if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = position == .front
         }
     }
 }

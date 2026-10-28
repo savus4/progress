@@ -84,6 +84,7 @@ final class PhotoImportCoordinator: ObservableObject {
     }
 
     func importSelectedPhotos(_ items: [PhotosPickerItem], timelineID: UUID = TimelineIdentity.defaultID) {
+        guard hasFullLibraryAccess else { return }
         beginImport(totalCount: items.count, timelineID: timelineID) {
             await self.importItems(items, preserveLivePhotos: true)
         }
@@ -95,19 +96,15 @@ final class PhotoImportCoordinator: ObservableObject {
         }
     }
 
-    func requestImportAlbums() async -> [PhotoImportAlbum] {
+    func importAlbums() -> [PhotoImportAlbum] {
         guard !isImporting else { return [] }
-
-        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-        guard status == .authorized || status == .limited else {
-            statusMessage = "Photos access is required to import an album."
-            return []
-        }
+        guard hasFullLibraryAccess else { return [] }
 
         return loadImportAlbums()
     }
 
     func importAlbum(_ album: PhotoImportAlbum, timelineID: UUID = TimelineIdentity.defaultID) {
+        guard hasFullLibraryAccess else { return }
         let fetchResult = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [album.localIdentifier], options: nil)
         guard let collection = fetchResult.firstObject else {
             statusMessage = "The selected album is no longer available."
@@ -121,6 +118,14 @@ final class PhotoImportCoordinator: ObservableObject {
         beginImport(totalCount: assets.count, timelineID: timelineID) {
             await self.importAssets(assets, preserveLivePhotos: true)
         }
+    }
+
+    private var hasFullLibraryAccess: Bool {
+        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
+            statusMessage = "Full Photos access is needed for Live Photos and albums. You can still import photos privately."
+            return false
+        }
+        return true
     }
 
     private func beginImport(totalCount: Int, timelineID: UUID, operation: @escaping @Sendable () async -> Void) {
@@ -251,7 +256,8 @@ final class PhotoImportCoordinator: ObservableObject {
     }
 
     private func loadImportPayload(for item: PhotosPickerItem, preserveLivePhotos: Bool) async throws -> ImportedPhotoPayload? {
-        let asset = photoAsset(for: item)
+        // Private imports use only the files shared by the system picker.
+        let asset = preserveLivePhotos ? photoAsset(for: item) : nil
         let metadata = asset.map { libraryMetadata(for: $0) }
         if let asset,
            let payload = try await loadImportPayload(for: asset, preserveLivePhotos: preserveLivePhotos) {

@@ -356,10 +356,11 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let dataController: PhotoGridDataController
     let changeToken: Int
     let centeringRequest: PhotoGridCenteringRequest?
+    let hiddenPhotoObjectID: NSManagedObjectID?
     let showsUploadStatus: Bool
     @Binding var isSelectionMode: Bool
     @Binding var selectedPhotoIDs: Set<NSManagedObjectID>
-    let onOpenPhoto: (NSManagedObjectID, Int, CGRect) -> Void
+    let onOpenPhoto: (NSManagedObjectID, Int, PhotoDetailOpeningSource) -> Void
     let onPhotoFrameChanged: (NSManagedObjectID, CGRect) -> Void
     let onPhotoCentered: (NSManagedObjectID, CGRect) -> Void
     let onFirstItemFrameChanged: (CGRect) -> Void
@@ -385,7 +386,8 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             centeringRequest: centeringRequest,
             showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
-            selectedPhotoIDs: selectedPhotoIDs
+            selectedPhotoIDs: selectedPhotoIDs,
+            hiddenPhotoObjectID: hiddenPhotoObjectID
         )
     }
 
@@ -396,8 +398,8 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             self.parent = parent
         }
 
-        func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, frame: CGRect) {
-            parent.onOpenPhoto(objectID, index, frame)
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, source: PhotoDetailOpeningSource) {
+            parent.onOpenPhoto(objectID, index, source)
         }
 
         func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdatePhotoFrameFor objectID: NSManagedObjectID, frame: CGRect) {
@@ -443,7 +445,7 @@ enum PhotoGridContextAction {
 
 @MainActor
 protocol PhotoGridCollectionViewControllerDelegate: AnyObject {
-    func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, frame: CGRect)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, source: PhotoDetailOpeningSource)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdatePhotoFrameFor objectID: NSManagedObjectID, frame: CGRect)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didCenterPhotoWith objectID: NSManagedObjectID, frame: CGRect)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>)
@@ -465,6 +467,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var showsUploadStatus = true
     private var isSelectionMode = false
     private var selectedPhotoIDs: Set<NSManagedObjectID> = []
+    private var hiddenPhotoObjectID: NSManagedObjectID?
     private var lastAppliedSelectedPhotoIDs: Set<NSManagedObjectID> = []
     private var selectionPanRecognizer: UIPanGestureRecognizer!
     private var gridPinchRecognizer: UIPinchGestureRecognizer!
@@ -691,15 +694,18 @@ final class PhotoGridCollectionViewController: UIViewController {
         centeringRequest: PhotoGridCenteringRequest?,
         showsUploadStatus: Bool,
         isSelectionMode: Bool,
-        selectedPhotoIDs: Set<NSManagedObjectID>
+        selectedPhotoIDs: Set<NSManagedObjectID>,
+        hiddenPhotoObjectID: NSManagedObjectID? = nil
     ) {
         let didChangeItems = currentChangeToken != changeToken
         let didChangeSelectionMode = self.isSelectionMode != isSelectionMode
         let didChangeUploadStatusVisibility = self.showsUploadStatus != showsUploadStatus
+        let didChangeHiddenPhoto = self.hiddenPhotoObjectID != hiddenPhotoObjectID
 
         self.showsUploadStatus = showsUploadStatus
         self.isSelectionMode = isSelectionMode
         self.selectedPhotoIDs = selectedPhotoIDs
+        self.hiddenPhotoObjectID = hiddenPhotoObjectID
         if didChangeSelectionMode, !isSelectionMode {
             stopSelectionPan()
         }
@@ -721,7 +727,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
 
         synchronizeSelection(animated: false)
-        if didChangeItems || didChangeSelectionMode || didChangeUploadStatusVisibility {
+        if didChangeItems || didChangeSelectionMode || didChangeUploadStatusVisibility || didChangeHiddenPhoto {
             refreshVisibleCells()
         }
         handleCenteringRequestIfNeeded(centeringRequest)
@@ -736,7 +742,8 @@ final class PhotoGridCollectionViewController: UIViewController {
                 with: item,
                 showsUploadStatus: self.showsUploadStatus,
                 isSelectionMode: self.isSelectionMode,
-                isSelected: self.selectedPhotoIDs.contains(objectID)
+                isSelected: self.selectedPhotoIDs.contains(objectID),
+                isHiddenForTransition: self.hiddenPhotoObjectID == objectID
             )
             self.loadThumbnail(for: item, into: cell)
         }
@@ -787,7 +794,8 @@ final class PhotoGridCollectionViewController: UIViewController {
             with: item,
             showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
-            isSelected: selectedPhotoIDs.contains(item.objectID)
+            isSelected: selectedPhotoIDs.contains(item.objectID),
+            isHiddenForTransition: hiddenPhotoObjectID == item.objectID
         )
     }
 
@@ -1210,7 +1218,13 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
         let indexPath = IndexPath(item: index, section: 0)
         collectionView.layoutIfNeeded()
-        collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
+        let unobscuredBounds = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
+        let isFullyVisible = collectionView.layoutAttributesForItem(at: indexPath).map {
+            unobscuredBounds.contains($0.frame)
+        } ?? false
+        if !isFullyVisible {
+            collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1429,14 +1443,22 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                     with: items[indexPath.item],
                     showsUploadStatus: showsUploadStatus,
                     isSelectionMode: true,
-                    isSelected: true
+                    isSelected: true,
+                    isHiddenForTransition: hiddenPhotoObjectID == objectID
                 )
             }
         } else {
             collectionView.deselectItem(at: indexPath, animated: false)
             let frame = frameForPhoto(with: objectID)
+            // A visible cell retains its image even if the thumbnail cache evicts it.
+            let source = (collectionView.cellForItem(at: indexPath) as? PhotoGridCollectionViewCell)?
+                .openingSource(frameInGlobal: frame)
+                ?? PhotoDetailOpeningSource(
+                    frameInGlobal: frame,
+                    image: DecodedThumbnailCache.shared.cachedImage(for: objectID)
+                )
             delegate?.photoGridController(self, didUpdatePhotoFrameFor: objectID, frame: frame)
-            delegate?.photoGridController(self, didOpenPhotoWith: objectID, at: indexPath.item, frame: frame)
+            delegate?.photoGridController(self, didOpenPhotoWith: objectID, at: indexPath.item, source: source)
         }
     }
 
@@ -1450,7 +1472,8 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                 with: items[indexPath.item],
                 showsUploadStatus: showsUploadStatus,
                 isSelectionMode: true,
-                isSelected: false
+                isSelected: false,
+                isHiddenForTransition: hiddenPhotoObjectID == objectID
             )
         }
     }
@@ -1565,7 +1588,8 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             with: item,
             showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
-            isSelected: selectedPhotoIDs.contains(item.objectID)
+            isSelected: selectedPhotoIDs.contains(item.objectID),
+            isHiddenForTransition: hiddenPhotoObjectID == item.objectID
         )
         loadThumbnail(for: item, into: gridCell)
     }
@@ -1645,7 +1669,10 @@ extension PhotoGridCollectionViewController: UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        gestureRecognizer === gridPinchRecognizer || otherGestureRecognizer === gridPinchRecognizer
+        if gestureRecognizer is TimelineSwipeGesture.Recognizer || otherGestureRecognizer is TimelineSwipeGesture.Recognizer {
+            return false
+        }
+        return gestureRecognizer === gridPinchRecognizer || otherGestureRecognizer === gridPinchRecognizer
     }
 }
 
@@ -1671,6 +1698,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        contentView.alpha = 1
         representedObjectID = nil
         imageView.image = nil
         statusLabel.isHidden = true
@@ -1684,9 +1712,11 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         with item: UIKitPhotoGridItem,
         showsUploadStatus: Bool,
         isSelectionMode: Bool,
-        isSelected: Bool
+        isSelected: Bool,
+        isHiddenForTransition: Bool = false
     ) {
-        isAccessibilityElement = true
+        contentView.alpha = isHiddenForTransition ? 0 : 1
+        isAccessibilityElement = !isHiddenForTransition
         accessibilityIdentifier = "photoGridItem"
         accessibilityValue = accessibilityValue(for: item)
 
@@ -1733,6 +1763,10 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
 
     func setThumbnailImage(_ image: UIImage?) {
         imageView.image = image
+    }
+
+    func openingSource(frameInGlobal: CGRect) -> PhotoDetailOpeningSource {
+        PhotoDetailOpeningSource(frameInGlobal: frameInGlobal, image: imageView.image)
     }
 
     private func configureViews() {

@@ -39,7 +39,7 @@ struct TimelineMigrationTests {
     }
 
     @Test("Previous SQLite models migrate without rewriting the existing library",
-          arguments: ["progress", "progressVideoVisibility", "progressWithTimelines", "progressWithTimelinesDeletion", "progressWithTimelinesDeletionScope"])
+          arguments: ["progress", "progressVideoVisibility", "progressWithTimelines", "progressWithTimelinesDeletion", "progressWithTimelinesDeletionScope", "progressWithTimelinesLivePhotos"])
     func existingLibraryMigrates(modelVersion: String) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("TimelineMigration-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -73,7 +73,16 @@ struct TimelineMigrationTests {
         // Nil ownership is deliberately retained: old devices may still sync it.
         #expect(photo.timelineID == nil)
         #expect(photo.effectiveTimelineID == TimelineIdentity.defaultID)
-        #expect(try context.fetch(Timeline.fetchRequest()).allSatisfy { $0.livePhotoPreference == nil })
+        if modelVersion == "progressWithTimelinesLivePhotos" {
+            let timeline = try #require(try context.fetch(Timeline.fetchRequest()).first)
+            #expect(timeline.id == TimelineIdentity.defaultID)
+            #expect(timeline.name == "Legacy timeline")
+            #expect(timeline.livePhotoCaptureEnabled?.boolValue == false)
+            #expect(timeline.livePhotoPreferenceModifiedAt == captureDate)
+        } else {
+            #expect(try context.fetch(Timeline.fetchRequest()).allSatisfy { $0.livePhotoPreference == nil })
+        }
+        #expect(try context.fetch(Timeline.fetchRequest()).allSatisfy { $0.cameraPreference == nil })
 
         let otherTimelineID = UUID()
         let otherPhoto = DailyPhoto(context: context)
@@ -101,6 +110,12 @@ struct TimelineMigrationTests {
         #expect(restoredLegacyPhoto.timelineID == nil)
         #expect(restoredLegacyPhoto.effectiveTimelineID == TimelineIdentity.defaultID)
         #expect(photos.filter { $0.effectiveTimelineID == otherTimelineID }.count == 1)
+        if modelVersion == "progressWithTimelinesLivePhotos" {
+            let timeline = try #require(try reopened.container.viewContext.fetch(Timeline.fetchRequest()).first)
+            #expect(timeline.name == "Legacy timeline")
+            #expect(timeline.livePhotoCaptureEnabled?.boolValue == false)
+            #expect(timeline.cameraPreference == nil)
+        }
     }
 
     @Test("Switching to a clean local store preserves timeline metadata and photo ownership")
@@ -115,6 +130,8 @@ struct TimelineMigrationTests {
         let preferenceRow = try #require(try context.fetch(Timeline.fetchRequest()).first)
         preferenceRow.livePhotoCaptureEnabled = false
         preferenceRow.livePhotoPreferenceModifiedAt = modifiedAt
+        preferenceRow.cameraPositionRaw = "back"
+        preferenceRow.cameraPreferenceModifiedAt = modifiedAt
         let photo = DailyPhoto(context: context)
         photo.id = photoID
         photo.timelineID = timelineID
@@ -135,6 +152,7 @@ struct TimelineMigrationTests {
         #expect(copiedTimeline.modifiedAt == modifiedAt)
         #expect(copiedTimeline.livePhotoCaptureEnabled?.boolValue == false)
         #expect(copiedTimeline.livePhotoPreferenceModifiedAt == modifiedAt)
+        #expect(copiedTimeline.cameraPreference == TimelineCameraPreference(position: .back, modifiedAt: modifiedAt))
     }
 
     @Test("Cloud library preparation retains cloud-only timelines and merges newer timeline metadata",
@@ -152,6 +170,8 @@ struct TimelineMigrationTests {
         let localPreference = try #require(try context.fetch(Timeline.fetchRequest()).first)
         localPreference.livePhotoCaptureEnabled = false
         localPreference.livePhotoPreferenceModifiedAt = newer
+        localPreference.cameraPositionRaw = "back"
+        localPreference.cameraPreferenceModifiedAt = newer
         let photo = DailyPhoto(context: context)
         photo.id = photoID
         photo.timelineID = sharedTimelineID
@@ -166,6 +186,8 @@ struct TimelineMigrationTests {
             let cloudPreference = try #require(try target.viewContext.fetch(Timeline.fetchRequest()).first { $0.id == sharedTimelineID })
             cloudPreference.livePhotoCaptureEnabled = true
             cloudPreference.livePhotoPreferenceModifiedAt = older
+            cloudPreference.cameraPositionRaw = "front"
+            cloudPreference.cameraPreferenceModifiedAt = older
             try target.viewContext.save()
         }, validateAccount: {})
 
@@ -177,6 +199,7 @@ struct TimelineMigrationTests {
         #expect(timelines.first { $0.id == cloudOnlyTimelineID }?.name == "Cloud-only timeline")
         #expect(timelines.first { $0.id == sharedTimelineID }?.livePhotoCaptureEnabled?.boolValue == false)
         #expect(timelines.first { $0.id == sharedTimelineID }?.livePhotoPreferenceModifiedAt == newer)
+        #expect(timelines.first { $0.id == sharedTimelineID }?.cameraPreference == TimelineCameraPreference(position: .back, modifiedAt: newer))
         let restoredPhoto = try #require(try merged.viewContext.fetch(DailyPhoto.fetchRequest()).first)
         #expect(restoredPhoto.id == photoID)
         #expect(restoredPhoto.timelineID == sharedTimelineID)
@@ -189,6 +212,9 @@ struct TimelineMigrationTests {
         // Legacy objects must not run the current DailyPhoto insertion/save hooks.
         let entity = try #require(model.entitiesByName["DailyPhoto"])
         entity.managedObjectClassName = "NSManagedObject"
+        if version == "progressWithTimelinesLivePhotos" {
+            model.entitiesByName["Timeline"]?.managedObjectClassName = "NSManagedObject"
+        }
         let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
         let store = try coordinator.addPersistentStore(ofType: NSSQLiteStoreType, configurationName: nil, at: url, options: nil)
         defer { try? coordinator.remove(store) }
@@ -207,6 +233,13 @@ struct TimelineMigrationTests {
         photo.setValue(48.1, forKey: "latitude")
         photo.setValue(11.6, forKey: "longitude")
         photo.setValue(true, forKey: "isHearted")
+        if version == "progressWithTimelinesLivePhotos" {
+            let timeline = NSEntityDescription.insertNewObject(forEntityName: "Timeline", into: context)
+            timeline.setValue(TimelineIdentity.defaultID, forKey: "id")
+            timeline.setValue("Legacy timeline", forKey: "name")
+            timeline.setValue(false, forKey: "livePhotoCaptureEnabled")
+            timeline.setValue(captureDate, forKey: "livePhotoPreferenceModifiedAt")
+        }
         try context.save()
         context.reset()
     }

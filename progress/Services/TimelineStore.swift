@@ -60,11 +60,15 @@ enum TimelineStore {
         var byID: [UUID: TimelineSnapshot] = [:]
         var deletedIDs = Set<UUID>()
         var preferences: [UUID: TimelineLivePhotoPreference] = [:]
+        var cameraPreferences: [UUID: TimelineCameraPreference] = [:]
         for timeline in try context.fetch(Timeline.fetchRequest()) {
             guard let id = timeline.id else { continue }
             if timeline.deletedAt != nil || timeline.localDeletedAt != nil { deletedIDs.insert(id) }
             if let preference = timeline.livePhotoPreference, preference.supersedes(preferences[id]) {
                 preferences[id] = preference
+            }
+            if let preference = timeline.cameraPreference, preference.supersedes(cameraPreferences[id]) {
+                cameraPreferences[id] = preference
             }
             let snapshot = TimelineSnapshot(
                 id: id, name: timeline.name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -78,10 +82,10 @@ enum TimelineStore {
             }
             byID[id] = snapshot
         }
-        for (id, preference) in preferences {
-            guard let metadata = byID[id] else { continue }
+        for (id, metadata) in byID {
             byID[id] = TimelineSnapshot(id: id, name: metadata.name, createdAt: metadata.createdAt,
-                                        modifiedAt: metadata.modifiedAt, livePhotoPreference: preference)
+                                        modifiedAt: metadata.modifiedAt, livePhotoPreference: preferences[id],
+                                        cameraPreference: cameraPreferences[id])
         }
         if byID[TimelineIdentity.defaultID] == nil, !deletedIDs.contains(TimelineIdentity.defaultID) {
             byID[TimelineIdentity.defaultID] = TimelineSnapshot(
@@ -118,7 +122,7 @@ enum TimelineStore {
             let request = Timeline.fetchRequest()
             request.predicate = NSPredicate(format: "id == %@", id as NSUUID)
             var rows = try context.fetch(request)
-            let originals = rows.map { ($0, $0.name, $0.modifiedAt, $0.deletedAt, $0.localDeletedAt, $0.livePhotoCaptureEnabled, $0.livePhotoPreferenceModifiedAt) }
+            let originals = rows.map { ($0, $0.name, $0.modifiedAt, $0.deletedAt, $0.localDeletedAt, $0.livePhotoCaptureEnabled, $0.livePhotoPreferenceModifiedAt, $0.cameraPositionRaw, $0.cameraPreferenceModifiedAt) }
             var inserted: Timeline?
             if rows.isEmpty {
                 let row = Timeline(context: context)
@@ -133,6 +137,8 @@ enum TimelineStore {
                 row.name = nil
                 row.livePhotoCaptureEnabled = nil
                 row.livePhotoPreferenceModifiedAt = nil
+                row.cameraPositionRaw = nil
+                row.cameraPreferenceModifiedAt = nil
                 row.deletedAt = storageMode.allowsCloudWrites ? now : nil
                 row.localDeletedAt = storageMode.allowsCloudWrites ? nil : now
                 row.modifiedAt = now
@@ -140,9 +146,10 @@ enum TimelineStore {
             do { try context.save() }
             catch {
                 if let inserted { context.delete(inserted) }
-                for (row, name, modifiedAt, deletedAt, localDeletedAt, enabled, preferenceDate) in originals {
+                for (row, name, modifiedAt, deletedAt, localDeletedAt, enabled, preferenceDate, position, cameraDate) in originals {
                     row.name = name; row.modifiedAt = modifiedAt; row.deletedAt = deletedAt; row.localDeletedAt = localDeletedAt
                     row.livePhotoCaptureEnabled = enabled; row.livePhotoPreferenceModifiedAt = preferenceDate
+                    row.cameraPositionRaw = position; row.cameraPreferenceModifiedAt = cameraDate
                 }
                 throw error
             }
@@ -167,6 +174,8 @@ enum TimelineStore {
                 if row.name != nil { row.name = nil; changed = true }
                 if row.livePhotoCaptureEnabled != nil { row.livePhotoCaptureEnabled = nil; changed = true }
                 if row.livePhotoPreferenceModifiedAt != nil { row.livePhotoPreferenceModifiedAt = nil; changed = true }
+                if row.cameraPositionRaw != nil { row.cameraPositionRaw = nil; changed = true }
+                if row.cameraPreferenceModifiedAt != nil { row.cameraPreferenceModifiedAt = nil; changed = true }
                 if row.deletedAt != permanent[id] { row.deletedAt = permanent[id]; changed = true }
                 if row.localDeletedAt != localDate { row.localDeletedAt = localDate; changed = true }
             }
@@ -243,6 +252,45 @@ enum TimelineStore {
 
     static func setLivePhotoCaptureEnabled(_ enabled: Bool, for id: UUID, in context: NSManagedObjectContext) async throws {
         try await updateLivePhotoPreference(enabled, for: id, in: context, onlyIfUnset: false, changedAt: Date())
+    }
+
+    nonisolated static func cameraPreference(in rows: [Timeline]) -> TimelineCameraPreference? {
+        rows.compactMap(\.cameraPreference).reduce(nil) { latest, candidate in
+            candidate.supersedes(latest) ? candidate : latest
+        }
+    }
+
+    static func setCameraPosition(_ position: CameraPosition, for id: UUID, in context: NSManagedObjectContext) async throws {
+        try ensureLibraryAllowsChanges()
+        try await context.perform {
+            try validateOwner(id, in: context)
+            let request = Timeline.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id as NSUUID)
+            var rows = try context.fetch(request)
+            guard cameraPreference(in: rows)?.position != position else { return }
+            let originals = rows.map { ($0, $0.cameraPositionRaw, $0.cameraPreferenceModifiedAt) }
+            var inserted: Timeline?
+            if rows.isEmpty {
+                let row = Timeline(context: context)
+                row.id = id
+                row.createdAt = Date()
+                rows = [row]
+                inserted = row
+            }
+            let now = Date()
+            for row in rows {
+                row.cameraPositionRaw = position.rawValue
+                row.cameraPreferenceModifiedAt = now
+            }
+            do { try context.save() }
+            catch {
+                if let inserted { context.delete(inserted) }
+                for (row, position, date) in originals {
+                    row.cameraPositionRaw = position; row.cameraPreferenceModifiedAt = date
+                }
+                throw error
+            }
+        }
     }
 
     static func seedLegacyLivePhotoPreference(_ enabled: Bool, in context: NSManagedObjectContext) async throws {

@@ -3,6 +3,10 @@ import Foundation
 
 /// A camera's capabilities affect capture, never the timeline's synced choice.
 enum TimelineCameraPreferences {
+    static func cameraPosition(for id: UUID, in timelines: TimelineSelectionStore) -> CameraPosition {
+        timelines.timelines.first { $0.id == id }?.cameraPreference?.position ?? .front
+    }
+
     static func livePhotosEnabled(for id: UUID, in timelines: TimelineSelectionStore,
                                   legacyDefaults: UserDefaults = .standard) -> Bool {
         if let preference = timelines.timelines.first(where: { $0.id == id })?.livePhotoPreference {

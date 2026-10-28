@@ -42,6 +42,14 @@ nonisolated final class Timeline: NSManagedObject {
     @NSManaged var localDeletedAt: Date?
     @NSManaged var livePhotoCaptureEnabled: NSNumber?
     @NSManaged var livePhotoPreferenceModifiedAt: Date?
+    @NSManaged var cameraPositionRaw: String?
+    @NSManaged var cameraPreferenceModifiedAt: Date?
+
+    var cameraPreference: TimelineCameraPreference? {
+        cameraPositionRaw.flatMap(CameraPosition.init(rawValue:)).map {
+            TimelineCameraPreference(position: $0, modifiedAt: cameraPreferenceModifiedAt)
+        }
+    }
 
     var livePhotoPreference: TimelineLivePhotoPreference? {
         livePhotoCaptureEnabled.map {
@@ -56,14 +64,17 @@ nonisolated struct TimelineSnapshot: Identifiable, Equatable, Sendable {
     let createdAt: Date?
     let modifiedAt: Date?
     let livePhotoPreference: TimelineLivePhotoPreference?
+    let cameraPreference: TimelineCameraPreference?
 
     init(id: UUID, name: String, createdAt: Date?, modifiedAt: Date?,
-         livePhotoPreference: TimelineLivePhotoPreference? = nil) {
+         livePhotoPreference: TimelineLivePhotoPreference? = nil,
+         cameraPreference: TimelineCameraPreference? = nil) {
         self.id = id
         self.name = name
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
         self.livePhotoPreference = livePhotoPreference
+        self.cameraPreference = cameraPreference
     }
 }
 

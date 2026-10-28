@@ -46,7 +46,7 @@ does not add sharing between accounts.
 
 ## Existing users
 
-`progressWithTimelinesLivePhotos` is the current Core Data model version. All five
+`progressWithTimelinesPreferredCamera` is the current Core Data model version. All six
 previous versions remain bundled, including the first timeline model. The existing
 automatic, inferred lightweight migration adds the optional owner field, metadata
 entity and deletion dates as needed without deleting or recreating the store.
@@ -121,7 +121,7 @@ marker into the cloud library.
 ## Release and follow-up work
 
 Before shipping, initialize and verify the additive development CloudKit schema,
-then deploy `CD_Timeline` (including `CD_deletedAt`, `CD_localDeletedAt`, `CD_livePhotoCaptureEnabled`, and `CD_livePhotoPreferenceModifiedAt`) and the new `CD_DailyPhoto`
+then deploy `CD_Timeline` (including `CD_deletedAt`, `CD_localDeletedAt`, `CD_livePhotoCaptureEnabled`, `CD_livePhotoPreferenceModifiedAt`, `CD_cameraPositionRaw`, and `CD_cameraPreferenceModifiedAt`) and the new `CD_DailyPhoto`
 owner field to Production.
 Production CloudKit schema changes are additive; do not remove existing fields or
 reset users' stores. Validate sync on two devices, including offline deletion and
@@ -247,3 +247,31 @@ restoration, unsupported-camera protection, capture saving, and the × editor.
 The final camera-session guard passed a further nine focused checks. Cloud merges
 use isolated fixtures; authenticated two-device sync and physical Live Photo
 capture remain release checks.
+
+## Timeline camera selection
+
+`progressWithTimelinesPreferredCamera` adds optional `cameraPositionRaw` and
+`cameraPreferenceModifiedAt` attributes through lightweight migration. Existing
+timelines use the front camera until explicitly changed. The upper-left camera
+control saves the front/back choice to timeline metadata, including local store
+copies and cloud library merges. Its clock is independent of both names and Live
+Photo preferences, and duplicate metadata uses a deterministic tie resolution.
+Deletion clears the choice alongside other camera preferences.
+
+The back camera uses the physical wide-angle main lens rather than a virtual
+multi-camera device. Switching refreshes capture capabilities and preview
+mirroring, and is disabled during capture and camera configuration. Remote
+changes wait for an active capture to finish. Hardware availability never
+rewrites the synced choice. Deploy the two additive CloudKit fields before
+release; physical camera switching and authenticated two-device sync require
+device verification.
+
+Keep new model version names alphabetically after prior versions. Xcode's
+synchronized folders can otherwise reset `.xccurrentversion` while loading the
+project, even with an explicit model version group. This naming workaround is
+also [documented by Apple DTS](https://developer.apple.com/forums/thread/779939).
+
+The camera-selection follow-up passed 17 focused tests on iPhone 18 Pro, covering
+timeline isolation, saved choices after reopening, independent preference merges,
+duplicate metadata, deletion cleanup, all six prior model migrations, local/cloud
+library copies, and safe camera reconfiguration without simulator hardware.

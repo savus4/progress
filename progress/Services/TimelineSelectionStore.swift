@@ -137,6 +137,11 @@ final class TimelineSelectionStore: NSObject, NSFetchedResultsControllerDelegate
         await refresh(in: context)
     }
 
+    func setCameraPosition(_ position: CameraPosition, for id: UUID, in context: NSManagedObjectContext) async throws {
+        try await TimelineStore.setCameraPosition(position, for: id, in: context)
+        await refresh(in: context)
+    }
+
     func delete(id: UUID, in context: NSManagedObjectContext, using service: TimelineDeletionService = .shared) async throws {
         guard !isDeleting else { return }
         isDeleting = true

@@ -84,7 +84,14 @@ final class PhotoStorageSettingsUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Import"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Import Photos"].exists)
         XCTAssertTrue(app.buttons["Import Album"].exists)
-        XCTAssertTrue(app.buttons["Import Privately (No Live Photos)"].exists)
+        XCTAssertTrue(app.buttons["Import Photos"].value as? String == "Includes Live Photos. Requires Full Photos access." ||
+                      app.buttons["Import Photos"].value as? String == "Includes Live Photos. Full Photos access enabled.")
+        let hasFullPhotosAccess = app.buttons["Import Photos"].value as? String == "Includes Live Photos. Full Photos access enabled."
+        XCTAssertEqual(app.buttons["Import Photos Privately"].exists, !hasFullPhotosAccess)
+        if !hasFullPhotosAccess {
+            XCTAssertEqual(app.buttons["Import Photos Privately"].value as? String,
+                           "Still photos only. No library access needed.")
+        }
         app.navigationBars["Import"].buttons["Photo Storage"].tap()
         XCTAssertTrue(app.navigationBars["Photo Storage"].waitForExistence(timeout: 5))
         let advanced = app.buttons["storageManagementSettingsLink"]

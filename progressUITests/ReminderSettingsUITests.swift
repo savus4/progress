@@ -112,7 +112,8 @@ final class ReminderSettingsUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Import"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Import Photos"].exists)
         XCTAssertTrue(app.buttons["Import Album"].exists)
-        XCTAssertTrue(app.buttons["Import Privately (No Live Photos)"].exists)
+        let hasFullPhotosAccess = app.buttons["Import Photos"].value as? String == "Includes Live Photos. Full Photos access enabled."
+        XCTAssertEqual(app.buttons["Import Photos Privately"].exists, !hasFullPhotosAccess)
     }
 
     @MainActor

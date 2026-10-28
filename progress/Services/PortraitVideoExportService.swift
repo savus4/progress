@@ -56,18 +56,6 @@ nonisolated struct PortraitVideoExportResult: Sendable {
     let failedPhotos: [PortraitVideoExportFailedPhoto]
 }
 
-nonisolated struct PortraitVideoExportConfiguration: Equatable, Codable, Sendable {
-    let picturesPerSecond: Int
-    let quality: PortraitVideoExportQuality
-    let includesDateBanner: Bool
-    let includesLocationBanner: Bool
-    let includesFavoriteLivePhotoVideo: Bool
-    let holdsHeartedPhotos: Bool
-    let usesAllPhotos: Bool
-    let startDate: Date
-    let endDate: Date
-}
-
 nonisolated struct PortraitVideoExportPausedSession: Identifiable, Equatable, Codable, Sendable {
     let id: UUID
     let createdAt: Date
@@ -96,6 +84,7 @@ nonisolated private struct PortraitVideoSegmentWriter {
     let input: AVAssetWriterInput
     let adaptor: AVAssetWriterInputPixelBufferAdaptor
     let fileURL: URL
+    let outputFrameRate: Int
     let audio: PortraitVideoSegmentAudio
 }
 
@@ -458,12 +447,13 @@ final class PortraitVideoExportService {
 
     nonisolated func pausedSession() -> PortraitVideoExportPausedSession? {
         let defaults = UserDefaults.standard
-        guard let data = defaults.data(forKey: pausedSessionStorageKey) ??
-            defaults.data(forKey: pausedSessionStagingStorageKey) else {
-            return nil
+        for key in [pausedSessionStorageKey, pausedSessionStagingStorageKey] {
+            if let data = defaults.data(forKey: key),
+               let session = try? JSONDecoder().decode(PortraitVideoExportPausedSession.self, from: data) {
+                return session
+            }
         }
-
-        return try? JSONDecoder().decode(PortraitVideoExportPausedSession.self, from: data)
+        return nil
     }
 
     nonisolated func discardPausedSession(_ session: PortraitVideoExportPausedSession? = nil) {
@@ -503,11 +493,14 @@ final class PortraitVideoExportService {
         shouldPause: @escaping @MainActor () -> Bool = { false },
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
     ) async throws -> PortraitVideoExportResponse {
-        let sortedPhotos = photos.filter { !$0.isHiddenFromVideo }.sorted { lhs, rhs in
+        var sortedPhotos = photos.filter { !$0.isHiddenFromVideo }.sorted { lhs, rhs in
             if lhs.captureDate == rhs.captureDate {
                 return lhs.objectID.uriRepresentation().absoluteString < rhs.objectID.uriRepresentation().absoluteString
             }
             return lhs.captureDate < rhs.captureDate
+        }
+        if configuration.reversesPhotoOrder {
+            sortedPhotos.reverse()
         }
         guard !sortedPhotos.isEmpty else { throw PortraitVideoExportError.noPhotos }
         var workEstimate = makeWorkEstimate(
@@ -517,7 +510,7 @@ final class PortraitVideoExportService {
         let photoIDs = sortedPhotos.map { $0.objectID.uriRepresentation().absoluteString }
         let sessionID = pausedSession?.id ?? UUID()
         let createdAt = pausedSession?.createdAt ?? Date()
-        let compatiblePausedSession = compatiblePausedSession(
+        let compatiblePausedSession = try await compatiblePausedSession(
             pausedSession,
             photoIDs: photoIDs,
             configuration: configuration
@@ -530,10 +523,12 @@ final class PortraitVideoExportService {
         let resumedFailedPhotos = failedPhotos
         let pausedDirectoryURL = pausedExportDirectoryURL(for: sessionID)
         try FileManager.default.createDirectory(at: pausedDirectoryURL, withIntermediateDirectories: true)
+        let outputFrameRate = max(clampedPicturesPerSecond(configuration.picturesPerSecond), 30)
         var segmentWriter = try makeSegmentWriter(
             in: pausedDirectoryURL,
             segmentIndex: segmentFileNames.count,
-            quality: configuration.quality
+            quality: configuration.quality,
+            outputFrameRate: outputFrameRate
         )
         let assetPrefetcher = PortraitVideoExportAssetPrefetcher(
             cloudKitService: cloudKitService,
@@ -561,7 +556,6 @@ final class PortraitVideoExportService {
 
         do {
             var writtenFrameCount = 0
-            let outputFrameRate = max(clampedPicturesPerSecond(configuration.picturesPerSecond), 30)
             let stillFrameCount = max(1, Int((Double(outputFrameRate) / Double(clampedPicturesPerSecond(configuration.picturesPerSecond))).rounded()))
             let heartedStillFrameCount = outputFrameRate
 
@@ -695,7 +689,8 @@ final class PortraitVideoExportService {
                     segmentWriter = try makeSegmentWriter(
                         in: pausedDirectoryURL,
                         segmentIndex: segmentFileNames.count,
-                        quality: configuration.quality
+                        quality: configuration.quality,
+                        outputFrameRate: outputFrameRate
                     )
                     hasOpenSegmentWriter = true
                     writtenFrameCount = 0
@@ -718,7 +713,7 @@ final class PortraitVideoExportService {
             }
 
             if writtenFrameCount > 0 {
-                segmentFileNames.append(try await finishSegment(segmentWriter))
+                segmentFileNames.append(try await finishSegment(segmentWriter, frameCount: writtenFrameCount))
             } else {
                 cancelSegment(segmentWriter)
             }
@@ -807,21 +802,43 @@ final class PortraitVideoExportService {
         _ session: PortraitVideoExportPausedSession?,
         photoIDs: [String],
         configuration: PortraitVideoExportConfiguration
-    ) -> PortraitVideoExportPausedSession? {
+    ) async throws -> PortraitVideoExportPausedSession? {
         guard let session,
               session.photoIDs == photoIDs,
               session.configuration == configuration,
               (!configuration.includesFavoriteLivePhotoVideo || session.audioFormatVersion == 1),
+              session.completedPhotoCount >= 0,
               session.completedPhotoCount <= photoIDs.count else {
             return nil
         }
 
-        let directoryURL = pausedExportDirectoryURL(for: session.id)
-        let segmentFilesExist = session.segmentFileNames.allSatisfy { fileName in
-            FileManager.default.fileExists(atPath: directoryURL.appendingPathComponent(fileName).path)
+        let failedIDs = Set(session.failedPhotos.map(\.id))
+        guard failedIDs.count == session.failedPhotos.count,
+              failedIDs.isSubset(of: Set(photoIDs.prefix(session.completedPhotoCount))),
+              session.segmentFileNames.isEmpty == (session.completedPhotoCount == session.failedPhotos.count),
+              Set(session.segmentFileNames).count == session.segmentFileNames.count else {
+            return nil
         }
-        guard segmentFilesExist else { return nil }
 
+        let directoryURL = pausedExportDirectoryURL(for: session.id)
+        for fileName in session.segmentFileNames {
+            try Task.checkCancellation()
+            let url = directoryURL.appendingPathComponent(fileName)
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            do {
+                let asset = AVURLAsset(url: url)
+                let tracks = try await asset.loadTracks(withMediaType: .video)
+                let duration = try await asset.load(.duration).seconds
+                guard !tracks.isEmpty, duration.isFinite, duration > 0 else { return nil }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                return nil
+            }
+        }
+
+        try Task.checkCancellation()
         return session
     }
 
@@ -839,7 +856,7 @@ final class PortraitVideoExportService {
         var pausedSegmentFileNames = segmentFileNames
 
         if writtenFrameCount > 0 {
-            pausedSegmentFileNames.append(try await finishSegment(segmentWriter))
+            pausedSegmentFileNames.append(try await finishSegment(segmentWriter, frameCount: writtenFrameCount))
         } else {
             cancelSegment(segmentWriter)
         }
@@ -869,7 +886,7 @@ final class PortraitVideoExportService {
         var checkpointSegmentFileNames = segmentFileNames
 
         if writtenFrameCount > 0 {
-            checkpointSegmentFileNames.append(try await finishSegment(segmentWriter))
+            checkpointSegmentFileNames.append(try await finishSegment(segmentWriter, frameCount: writtenFrameCount))
         } else {
             cancelSegment(segmentWriter)
         }
@@ -939,7 +956,8 @@ final class PortraitVideoExportService {
     nonisolated private func makeSegmentWriter(
         in directoryURL: URL,
         segmentIndex: Int,
-        quality: PortraitVideoExportQuality
+        quality: PortraitVideoExportQuality,
+        outputFrameRate: Int
     ) throws -> PortraitVideoSegmentWriter {
         let fileName = "segment_\(segmentIndex).mp4"
         let fileURL = directoryURL.appendingPathComponent(fileName)
@@ -989,11 +1007,17 @@ final class PortraitVideoExportService {
             input: input,
             adaptor: adaptor,
             fileURL: fileURL,
+            outputFrameRate: outputFrameRate,
             audio: PortraitVideoSegmentAudio(directoryURL: directoryURL)
         )
     }
 
-    nonisolated private func finishSegment(_ segmentWriter: PortraitVideoSegmentWriter) async throws -> String {
+    nonisolated private func finishSegment(_ segmentWriter: PortraitVideoSegmentWriter, frameCount: Int) async throws -> String {
+        // A single-frame segment has no timestamp interval for the encoder to
+        // infer. Give every segment its exact duration before combining it.
+        segmentWriter.writer.endSession(atSourceTime: CMTime(
+            value: CMTimeValue(frameCount), timescale: CMTimeScale(segmentWriter.outputFrameRate)
+        ))
         segmentWriter.input.markAsFinished()
         await finishWriting(segmentWriter.writer)
 

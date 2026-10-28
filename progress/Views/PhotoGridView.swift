@@ -7,6 +7,7 @@ import UIKit
 private struct PhotoDetailPresentation: Identifiable {
     let items: [PhotoDetailItem]
     let initialIndex: Int
+    let openingSource: PhotoDetailOpeningSource?
 
     var id: NSManagedObjectID {
         guard items.indices.contains(initialIndex) else {
@@ -23,6 +24,9 @@ private struct PortraitVideoExportPresentation: Identifiable {
 
 struct PhotoGridView: View {
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.layoutDirection) private var layoutDirection
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var notificationNavigation = NotificationNavigationCoordinator.shared
     @StateObject private var dataController = PhotoGridDataController()
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
@@ -33,10 +37,14 @@ struct PhotoGridView: View {
     @State private var isSettingsSheetPresented = false
     @State private var storage = PhotoStorageCoordinator.shared
     @State private var timelineSelection = TimelineSelectionStore.shared
+    @State private var timelineSwitchHaptics = TimelineSwitchHaptics()
+    @State private var timelineTransitionEdge: Edge = .trailing
+    @State private var isTimelineTransitioning = false
     @State private var cameraTimelineID = TimelineIdentity.defaultID
     @State private var photoDetailPresentation: PhotoDetailPresentation?
     @State private var activePhotoDetailObjectID: NSManagedObjectID?
     @State private var pendingDetailDismissObjectID: NSManagedObjectID?
+    @State private var detailDismissalTargetFrame: CGRect?
     @State private var gridCenteringRequest: PhotoGridCenteringRequest?
     @State private var visibleScrollDate: Date?
     @State private var isScrollDateVisible = false
@@ -81,6 +89,7 @@ struct PhotoGridView: View {
     var body: some View {
         NavigationStack {
             ZStack {
+                ZStack {
                     if !dataController.hasAnyPhotos {
                         VStack(spacing: 20) {
                             if !storage.isLocalOnly && cloudSyncMonitor.isMetadataImportActive {
@@ -148,11 +157,12 @@ struct PhotoGridView: View {
                             dataController: dataController,
                             changeToken: dataController.changeToken,
                             centeringRequest: gridCenteringRequest,
+                            hiddenPhotoObjectID: activePhotoDetailObjectID,
                             showsUploadStatus: !cloudSyncMonitor.isICloudUnavailable,
                             isSelectionMode: $isSelectionMode,
                             selectedPhotoIDs: $selectedPhotoIDs,
-                            onOpenPhoto: { objectID, _, _ in
-                                openPhotoDetail(for: objectID)
+                            onOpenPhoto: { objectID, _, source in
+                                openPhotoDetail(for: objectID, from: source)
                             },
                             onPhotoFrameChanged: { _, _ in },
                             onPhotoCentered: { objectID, frame in
@@ -196,7 +206,18 @@ struct PhotoGridView: View {
                         }
                     }
 
+                }
+                .id(timelineSelection.selectedID)
+                .transition(reduceMotion ? .opacity : .push(from: timelineTransitionEdge))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .allowsHitTesting(!isTimelineTransitioning)
+            .gesture(TimelineSwipeGesture(
+                isEnabled: canSwipeTimelines,
+                onBegan: timelineSwitchHaptics.prepare,
+                onSwipe: switchTimeline
+            ))
             .overlay(alignment: .bottom) {
                 if storage.mode.isMigrating {
                     Button {
@@ -363,7 +384,7 @@ struct PhotoGridView: View {
                     }
                 }
             }
-            .toolbar(photoDetailPresentation == nil && !isMapModeActive ? .visible : .hidden, for: .navigationBar)
+            .toolbar(!isMapModeActive ? .visible : .hidden, for: .navigationBar)
             .fullScreenCover(isPresented: $showingCamera) {
                 ExperimentalCameraView(
                     gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal,
@@ -384,6 +405,7 @@ struct PhotoGridView: View {
             }
             .fullScreenCover(item: $photoDetailPresentation) { presentation in
                 photoDetailView(for: presentation)
+                    .presentationBackground(.clear)
             }
             .sheet(isPresented: $showingExportPicker, onDismiss: {
                 exportedFileURLs = []
@@ -415,7 +437,9 @@ struct PhotoGridView: View {
             await timelineSelection.refresh(in: viewContext)
         }
         .onChange(of: timelineSelection.selectedID) { _, _ in
-            resetForSelectedTimeline()
+            if dataController.timelineID != timelineSelection.selectedID {
+                resetForSelectedTimeline()
+            }
         }
         .onChange(of: timelineSelection.deletedIDs) { _, ids in
             if ids.contains(cameraTimelineID) { showingCamera = false }
@@ -433,7 +457,7 @@ struct PhotoGridView: View {
         .onChange(of: dataController.changeToken) { _, _ in
             selectedPhotoIDs.formIntersection(dataController.itemsSnapshot.map(\.objectID))
             if pendingDetailDismissObjectID != nil, dataController.isEmpty {
-                finalizePhotoDetailDismissal()
+                detailDismissalTargetFrame = .zero
             }
             scheduleMetadataSyncIfNeeded()
         }
@@ -455,6 +479,38 @@ struct PhotoGridView: View {
         .onDisappear {
             metadataSyncTask?.cancel()
             metadataSyncTask = nil
+            timelineSwitchHaptics.cancel()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { timelineSwitchHaptics.cancel() }
+        }
+    }
+
+    private var canSwipeTimelines: Bool {
+        timelineSelection.isLoaded && timelineSelection.timelines.count > 1
+            && !timelineSelection.isDeleting && !isSelectionMode && !isMapModeActive
+            && !isTimelineTransitioning && !isNotificationCameraBlocked
+    }
+
+    private func switchTimeline(_ direction: TimelineSwipeGesture.Direction) {
+        guard canSwipeTimelines,
+              let destinationID = direction.destinationID(
+                in: timelineSelection.timelines.map(\.id),
+                selectedID: timelineSelection.selectedID,
+                layoutDirection: layoutDirection
+              ) else { return }
+
+        let entersFromTrailing = (direction == .left) == (layoutDirection == .leftToRight)
+        timelineTransitionEdge = entersFromTrailing ? .trailing : .leading
+        isTimelineTransitioning = true
+        withAnimation(reduceMotion ? .easeOut(duration: 0.18) : .smooth(duration: 0.35)) {
+            if timelineSelection.select(destinationID) {
+                // Update the fetch in the same transaction as the incoming timeline's identity.
+                resetForSelectedTimeline()
+                timelineSwitchHaptics.play()
+            }
+        } completion: {
+            isTimelineTransitioning = false
         }
     }
 
@@ -492,6 +548,7 @@ struct PhotoGridView: View {
         pendingDetailDismissObjectID = nil
         gridCenteringRequest = nil
         activePhotoDetailObjectID = nil
+        detailDismissalTargetFrame = nil
         photoDetailPresentation = nil
         visibleScrollDate = nil
         isScrollDateVisible = false
@@ -510,16 +567,26 @@ struct PhotoGridView: View {
 
     @MainActor
     private func openPhotoDetail(for objectID: NSManagedObjectID) {
+        openPhotoDetail(for: objectID, from: nil)
+    }
+
+    @MainActor
+    private func openPhotoDetail(for objectID: NSManagedObjectID, from openingSource: PhotoDetailOpeningSource?) {
+        guard photoDetailPresentation == nil else { return }
         let items = dataController.itemsSnapshot.map(PhotoDetailItem.init(gridItem:))
         guard let index = items.firstIndex(where: { $0.objectID == objectID }) else {
             return
         }
 
         activePhotoDetailObjectID = objectID
-        withAnimation(.easeInOut(duration: 0.2)) {
+        detailDismissalTargetFrame = nil
+        var transaction = Transaction(animation: .easeInOut(duration: 0.2))
+        transaction.disablesAnimations = openingSource != nil
+        withTransaction(transaction) {
             photoDetailPresentation = PhotoDetailPresentation(
                 items: items,
-                initialIndex: index
+                initialIndex: index,
+                openingSource: openingSource
             )
         }
     }
@@ -530,9 +597,16 @@ struct PhotoGridView: View {
             PhotoDetailView(
                 items: presentation.items,
                 initialIndex: presentation.initialIndex,
+                openingSource: presentation.openingSource,
                 onClose: closePhotoDetail,
+                dismissalTargetFrame: detailDismissalTargetFrame,
+                onDismissalCompleted: finalizePhotoDetailDismissal,
                 onCurrentItemChanged: { objectID in
+                    let didChangeCurrentItem = activePhotoDetailObjectID != objectID
                     activePhotoDetailObjectID = objectID
+                    if didChangeCurrentItem, let objectID, !isMapModeActive {
+                        gridCenteringRequest = PhotoGridCenteringRequest(objectID: objectID, token: UUID())
+                    }
                 },
                 onShowOnMap: showPhotoOnMap
             )
@@ -543,16 +617,9 @@ struct PhotoGridView: View {
 
     private func closePhotoDetail(_ objectID: NSManagedObjectID?) {
         guard photoDetailPresentation != nil else { return }
-        guard !isMapModeActive else {
-            finalizePhotoDetailDismissal()
-            return
-        }
-        guard let objectID else {
-            finalizePhotoDetailDismissal()
-            return
-        }
-        guard dataController.hasAnyPhotos, !dataController.isEmpty else {
-            finalizePhotoDetailDismissal()
+        guard !isMapModeActive, let objectID,
+              dataController.hasAnyPhotos, !dataController.isEmpty else {
+            detailDismissalTargetFrame = .zero
             return
         }
 
@@ -563,16 +630,19 @@ struct PhotoGridView: View {
     private func handlePhotoCenteredForDetailDismiss(objectID: NSManagedObjectID, frame: CGRect) {
         guard pendingDetailDismissObjectID == objectID else { return }
         pendingDetailDismissObjectID = nil
-        withAnimation(.easeInOut(duration: 0.18)) {
-            finalizePhotoDetailDismissal()
-        }
+        detailDismissalTargetFrame = frame
     }
 
     private func finalizePhotoDetailDismissal() {
-        pendingDetailDismissObjectID = nil
-        gridCenteringRequest = nil
-        activePhotoDetailObjectID = nil
-        photoDetailPresentation = nil
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            pendingDetailDismissObjectID = nil
+            gridCenteringRequest = nil
+            activePhotoDetailObjectID = nil
+            detailDismissalTargetFrame = nil
+            photoDetailPresentation = nil
+        }
     }
 
     private func showPhotoOnMap(_ objectID: NSManagedObjectID) {
