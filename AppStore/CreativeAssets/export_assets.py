@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Normalize approved artwork to Apple's dimensions; produce local review crops.
-
-Requires Pillow. This script changes file size/color encoding only; composition
-and image content are authored with imagegen, not redrawn here.
-"""
+"""Compose supplied photos, export upload assets, and produce local review crops."""
 
 from hashlib import sha256
 from io import BytesIO
+import argparse
 import json
 from pathlib import Path
+import sys
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image, ImageCms, ImageDraw
+
+sys.dont_write_bytecode = True
+from compose_artwork import LAYOUTS, compose
 
 
 ROOT = Path(__file__).resolve().parent
 SRGB = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 ASSETS = (
     {
+        "key": "header",
         "placement": "Product page header",
         "source": "header-artwork.png",
         "output": "header.png",
@@ -25,6 +28,7 @@ ASSETS = (
         "safe_area": (1100, 496, 2740, 1151),
     },
     {
+        "key": "search",
         "placement": "Search results",
         "source": "search-artwork.png",
         "output": "search-results.png",
@@ -35,11 +39,18 @@ ASSETS = (
 )
 
 
-def export():
+def export(placement="all"):
+    photo_sources = compose(None if placement == "all" else {placement})
     review = ROOT / "Review"
     review.mkdir(exist_ok=True)
+    previous_path = ROOT / "manifest.json"
+    previous = json.loads(previous_path.read_text()) if previous_path.exists() else {}
+    previous_assets = {record["file"]: record for record in previous.get("assets", [])}
     records = []
     for asset in ASSETS:
+        if placement != "all" and asset["key"] != placement:
+            records.append(previous_assets[asset["output"]])
+            continue
         with Image.open(ROOT / "Sources" / asset["source"]) as raw:
             raw.load()
             original_size = raw.size
@@ -88,8 +99,14 @@ def export():
             "profile": "sRGB",
             "alpha": False,
             "source_dimensions": list(original_size),
-            "export_resampling": "Lanczos; source raster resized, not native 4K rendering",
+            "composition": "Native canvas with the three supplied photographs; cropped and resized with Lanczos",
             "review_safe_rectangle": list(safe),
+            "composition_bounds": list(LAYOUTS[asset["key"]].get("bounds", safe)),
+            "crop_policy": (
+                "Expanded header composition extends beyond the conservative central guide"
+                if "bounds" in LAYOUTS[asset["key"]]
+                else "Headline and all portrait cards fit the central guide"
+            ),
             "bytes": output.stat().st_size,
             "sha256": sha256(output.read_bytes()).hexdigest(),
         }
@@ -97,9 +114,15 @@ def export():
         print(f"{asset['output']}: {target[0]} x {target[1]}, RGB PNG, no alpha")
 
     (ROOT / "manifest.json").write_text(
-        json.dumps({"created": "2026-10-18", "assets": records}, indent=2) + "\n"
+        json.dumps({"created": "2026-10-18", "updated": "2026-10-28",
+                    "photo_sources": photo_sources, "assets": records}, indent=2) + "\n"
     )
+    with ZipFile(ROOT.parent / "work-in-progress-app-store-creatives.zip", "w", compression=ZIP_DEFLATED) as archive:
+        for asset in ASSETS:
+            archive.write(ROOT / asset["output"], asset["output"])
 
 
 if __name__ == "__main__":
-    export()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--placement", choices=("all", "header", "search"), default="all")
+    export(parser.parse_args().placement)

@@ -1,5 +1,9 @@
 # Work in Progress — creative prompts
 
+Historical first-draft prompts. The current header and search artwork were
+updated on 28 October 2026 using the three supplied HEIC photos directly in
+`compose_artwork.py`; these prompts are no longer used to render the stills.
+
 Generated with the built-in imagegen tool on 18 October 2026. Final exports are normalized to Apple's exact pixel dimensions by `export_assets.py`.
 
 ## Header: initial composition

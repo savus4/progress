@@ -33,6 +33,8 @@ struct PhotoGridView: View {
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
 
     @State private var showingCamera = false
+    @State private var captureGridTransition: PhotoGridCaptureTransition?
+    @State private var captureLandingFrame: CGRect?
     @State private var settingsDestination: PhotoSettingsDestination?
     @State private var isSettingsSheetPresented = false
     @State private var storage = PhotoStorageCoordinator.shared
@@ -49,7 +51,6 @@ struct PhotoGridView: View {
     @State private var visibleScrollDate: Date?
     @State private var isScrollDateVisible = false
     @State private var isScrollGestureActive = false
-    @State private var firstGridItemFrameInGlobal: CGRect = .zero
     @State private var isSelectionMode = false
     @State private var selectedPhotoIDs: Set<NSManagedObjectID> = []
     @State private var isExporting = false
@@ -157,7 +158,8 @@ struct PhotoGridView: View {
                             dataController: dataController,
                             changeToken: dataController.changeToken,
                             centeringRequest: gridCenteringRequest,
-                            hiddenPhotoObjectID: activePhotoDetailObjectID,
+                            captureTransition: captureGridTransition,
+                            hiddenPhotoObjectID: captureGridTransition?.photoObjectID ?? activePhotoDetailObjectID,
                             showsUploadStatus: !cloudSyncMonitor.isICloudUnavailable,
                             isSelectionMode: $isSelectionMode,
                             selectedPhotoIDs: $selectedPhotoIDs,
@@ -168,11 +170,11 @@ struct PhotoGridView: View {
                             onPhotoCentered: { objectID, frame in
                                 handlePhotoCenteredForDetailDismiss(objectID: objectID, frame: frame)
                             },
-                            onFirstItemFrameChanged: { frame in
-                                if frame != .zero {
-                                    firstGridItemFrameInGlobal = frame
-                                }
+                            onCaptureTargetReady: { token, frame in
+                                guard captureGridTransition?.token == token else { return }
+                                captureLandingFrame = frame
                             },
+                            onFirstItemFrameChanged: { _ in },
                             onTopVisibleDateChanged: { date in
                                 guard let date else { return }
                                 if isScrollGestureActive {
@@ -385,11 +387,19 @@ struct PhotoGridView: View {
                 }
             }
             .toolbar(!isMapModeActive ? .visible : .hidden, for: .navigationBar)
-            .fullScreenCover(isPresented: $showingCamera) {
+            .fullScreenCover(isPresented: $showingCamera, onDismiss: resetCaptureGridTransition) {
                 ExperimentalCameraView(
-                    gridTargetFrameInGlobal: firstGridItemFrameInGlobal == .zero ? nil : firstGridItemFrameInGlobal,
-                    timelineID: cameraTimelineID
+                    gridTargetFrameInGlobal: captureLandingFrame,
+                    timelineID: cameraTimelineID,
+                    onSaveStarted: prepareGridForCapture,
+                    onPhotoSaved: { objectID in
+                        captureGridTransition?.photoObjectID = objectID
+                    },
+                    onGridRevealed: { captureGridTransition?.isGridRevealed = true },
+                    onSaveFailed: resetCaptureGridTransition,
+                    onCaptureCompleted: resetCaptureGridTransition
                 )
+                .presentationBackground(.clear)
             }
             .sheet(item: $settingsDestination, onDismiss: {
                 isSettingsSheetPresented = false
@@ -553,7 +563,7 @@ struct PhotoGridView: View {
         visibleScrollDate = nil
         isScrollDateVisible = false
         isScrollGestureActive = false
-        firstGridItemFrameInGlobal = .zero
+        resetCaptureGridTransition()
         isMapModeActive = false
         isMapClusterOverlayPresented = false
         hasInitializedMapCameraInAppLifecycle = false
@@ -915,6 +925,25 @@ struct PhotoGridView: View {
         }
         cameraTimelineID = timelineSelection.selectedID
         showingCamera = true
+    }
+
+    private func prepareGridForCapture() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            captureLandingFrame = nil
+            gridFilter = .all
+            dataController.setFilter(.all)
+            isMapModeActive = false
+            isScrollDateVisible = false
+            gridCenteringRequest = nil
+            captureGridTransition = PhotoGridCaptureTransition(token: UUID())
+        }
+    }
+
+    private func resetCaptureGridTransition() {
+        captureGridTransition = nil
+        captureLandingFrame = nil
     }
 
     @MainActor

@@ -356,6 +356,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let dataController: PhotoGridDataController
     let changeToken: Int
     let centeringRequest: PhotoGridCenteringRequest?
+    let captureTransition: PhotoGridCaptureTransition?
     let hiddenPhotoObjectID: NSManagedObjectID?
     let showsUploadStatus: Bool
     @Binding var isSelectionMode: Bool
@@ -363,6 +364,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let onOpenPhoto: (NSManagedObjectID, Int, PhotoDetailOpeningSource) -> Void
     let onPhotoFrameChanged: (NSManagedObjectID, CGRect) -> Void
     let onPhotoCentered: (NSManagedObjectID, CGRect) -> Void
+    let onCaptureTargetReady: (UUID, CGRect) -> Void
     let onFirstItemFrameChanged: (CGRect) -> Void
     let onTopVisibleDateChanged: (Date?) -> Void
     let onScrollActivityChanged: (Bool) -> Void
@@ -384,6 +386,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             items: dataController.itemsSnapshot,
             changeToken: changeToken,
             centeringRequest: centeringRequest,
+            captureTransition: captureTransition,
             showsUploadStatus: showsUploadStatus,
             isSelectionMode: isSelectionMode,
             selectedPhotoIDs: selectedPhotoIDs,
@@ -408,6 +411,10 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
 
         func photoGridController(_ controller: PhotoGridCollectionViewController, didCenterPhotoWith objectID: NSManagedObjectID, frame: CGRect) {
             parent.onPhotoCentered(objectID, frame)
+        }
+
+        func photoGridController(_ controller: PhotoGridCollectionViewController, didPrepareCaptureTargetFor token: UUID, frame: CGRect) {
+            parent.onCaptureTargetReady(token, frame)
         }
 
         func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>) {
@@ -448,6 +455,7 @@ protocol PhotoGridCollectionViewControllerDelegate: AnyObject {
     func photoGridController(_ controller: PhotoGridCollectionViewController, didOpenPhotoWith objectID: NSManagedObjectID, at index: Int, source: PhotoDetailOpeningSource)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdatePhotoFrameFor objectID: NSManagedObjectID, frame: CGRect)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didCenterPhotoWith objectID: NSManagedObjectID, frame: CGRect)
+    func photoGridController(_ controller: PhotoGridCollectionViewController, didPrepareCaptureTargetFor token: UUID, frame: CGRect)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateSelection selectedPhotoIDs: Set<NSManagedObjectID>)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateTopVisibleDate date: Date?)
     func photoGridController(_ controller: PhotoGridCollectionViewController, didUpdateFirstItemFrame frame: CGRect)
@@ -485,6 +493,9 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var itemIndexByID: [NSManagedObjectID: Int] = [:]
     private var currentChangeToken: Int?
     private var handledCenteringRequestToken: UUID?
+    private var captureTransition: PhotoGridCaptureTransition?
+    private var reportedCaptureTargetToken: UUID?
+    private var scheduledCaptureTargetToken: UUID?
     private var lastReportedTopVisibleMonth: DateComponents?
     private var isScrollMotionActive = false
     private var lastContentOffsetY: CGFloat = 0
@@ -685,6 +696,8 @@ final class PhotoGridCollectionViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateLayoutItemSize()
+        keepCaptureGridAtTop()
+        scheduleCaptureTargetReportIfNeeded()
         reportFirstItemFrameIfAvailable()
     }
 
@@ -692,12 +705,15 @@ final class PhotoGridCollectionViewController: UIViewController {
         items: [UIKitPhotoGridItem],
         changeToken: Int,
         centeringRequest: PhotoGridCenteringRequest?,
+        captureTransition: PhotoGridCaptureTransition? = nil,
         showsUploadStatus: Bool,
         isSelectionMode: Bool,
         selectedPhotoIDs: Set<NSManagedObjectID>,
         hiddenPhotoObjectID: NSManagedObjectID? = nil
     ) {
-        let didChangeItems = currentChangeToken != changeToken
+        let isPreparingCapture = captureTransition != nil && self.captureTransition?.token != captureTransition?.token
+        let isHoldingCaptureSnapshot = captureTransition != nil && captureTransition?.isGridRevealed == false && !isPreparingCapture
+        let didChangeItems = !isHoldingCaptureSnapshot && (currentChangeToken != changeToken || isPreparingCapture)
         let didChangeSelectionMode = self.isSelectionMode != isSelectionMode
         let didChangeUploadStatusVisibility = self.showsUploadStatus != showsUploadStatus
         let didChangeHiddenPhoto = self.hiddenPhotoObjectID != hiddenPhotoObjectID
@@ -706,6 +722,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         self.isSelectionMode = isSelectionMode
         self.selectedPhotoIDs = selectedPhotoIDs
         self.hiddenPhotoObjectID = hiddenPhotoObjectID
+        self.captureTransition = captureTransition
+        if isPreparingCapture || captureTransition == nil {
+            reportedCaptureTargetToken = nil
+            scheduledCaptureTargetToken = nil
+        }
         if didChangeSelectionMode, !isSelectionMode {
             stopSelectionPan()
         }
@@ -722,15 +743,24 @@ final class PhotoGridCollectionViewController: UIViewController {
             if nextItemIDs != previousItemIDs {
                 currentItemIDs = nextItemIDs
                 lastAppliedSelectedPhotoIDs = []
-                applySnapshot(animatingDifferences: previousItemIDs.isEmpty == false && collectionView.window != nil)
+                let shouldAnimate = !isPreparingCapture && !UIAccessibility.isReduceMotionEnabled
+                    && previousItemIDs.isEmpty == false && collectionView.window != nil
+                applySnapshot(animatingDifferences: shouldAnimate) { [weak self] in
+                    self?.keepCaptureGridAtTop()
+                    self?.scheduleCaptureTargetReportIfNeeded()
+                }
             }
         }
 
+        keepCaptureGridAtTop()
         synchronizeSelection(animated: false)
         if didChangeItems || didChangeSelectionMode || didChangeUploadStatusVisibility || didChangeHiddenPhoto {
             refreshVisibleCells()
         }
-        handleCenteringRequestIfNeeded(centeringRequest)
+        if captureTransition == nil {
+            handleCenteringRequestIfNeeded(centeringRequest)
+        }
+        scheduleCaptureTargetReportIfNeeded()
         reportTopVisibleDate()
         reportFirstItemFrameIfAvailable()
     }
@@ -755,11 +785,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         }
     }
 
-    private func applySnapshot(animatingDifferences: Bool = false) {
+    private func applySnapshot(animatingDifferences: Bool = false, completion: (() -> Void)? = nil) {
         var snapshot = NSDiffableDataSourceSnapshot<UIKitPhotoGridSection, NSManagedObjectID>()
         snapshot.appendSections([UIKitPhotoGridSection.main])
         snapshot.appendItems(items.map(\.objectID), toSection: UIKitPhotoGridSection.main)
-        dataSource.apply(snapshot, animatingDifferences: animatingDifferences)
+        dataSource.apply(snapshot, animatingDifferences: animatingDifferences, completion: completion)
     }
 
     private func synchronizeSelection(animated: Bool) {
@@ -1202,6 +1232,49 @@ final class PhotoGridCollectionViewController: UIViewController {
         let frameInView = collectionView.convert(frameInCollection, to: view.window)
         guard frameInView != .zero else { return }
         delegate?.photoGridController(self, didUpdateFirstItemFrame: frameInView)
+    }
+
+    private func keepCaptureGridAtTop() {
+        guard captureTransition != nil else { return }
+        let topOffset = -collectionView.adjustedContentInset.top
+        guard abs(collectionView.contentOffset.y - topOffset) > 0.5 else { return }
+        UIView.performWithoutAnimation {
+            collectionView.setContentOffset(
+                CGPoint(x: collectionView.contentOffset.x, y: topOffset),
+                animated: false
+            )
+        }
+    }
+
+    private func scheduleCaptureTargetReportIfNeeded() {
+        guard let captureTransition, captureTransition.isGridRevealed,
+              captureTransition.photoObjectID != nil,
+              reportedCaptureTargetToken != captureTransition.token,
+              scheduledCaptureTargetToken != captureTransition.token else { return }
+
+        let token = captureTransition.token
+        scheduledCaptureTargetToken = token
+        // Diffable updates and navigation-bar inset changes must settle before
+        // measuring the destination. Layout attributes describe the final frame
+        // while existing cells are still animating out of the new photo's way.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.scheduledCaptureTargetToken == token else { return }
+            self.scheduledCaptureTargetToken = nil
+            guard let transition = self.captureTransition, transition.token == token,
+                  transition.isGridRevealed,
+                  self.reportedCaptureTargetToken != token,
+                  let objectID = transition.photoObjectID,
+                  self.view.window != nil,
+                  let indexPath = self.dataSource.indexPath(for: objectID) else { return }
+
+            self.collectionView.layoutIfNeeded()
+            self.keepCaptureGridAtTop()
+            guard let attributes = self.collectionView.collectionViewLayout.layoutAttributesForItem(at: indexPath) else { return }
+            let frame = self.collectionView.convert(attributes.frame, to: self.view.window)
+            guard !frame.isEmpty else { return }
+            self.reportedCaptureTargetToken = token
+            self.delegate?.photoGridController(self, didPrepareCaptureTargetFor: token, frame: frame)
+        }
     }
 
     private func handleCenteringRequestIfNeeded(_ request: PhotoGridCenteringRequest?) {

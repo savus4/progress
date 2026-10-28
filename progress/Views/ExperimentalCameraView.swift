@@ -62,10 +62,28 @@ struct ExperimentalCameraView: View {
 
     let gridTargetFrameInGlobal: CGRect?
     let timelineID: UUID
+    let onSaveStarted: () -> Void
+    let onPhotoSaved: (NSManagedObjectID) -> Void
+    let onGridRevealed: () -> Void
+    let onSaveFailed: () -> Void
+    let onCaptureCompleted: () -> Void
 
-    init(gridTargetFrameInGlobal: CGRect? = nil, timelineID: UUID = TimelineIdentity.defaultID) {
+    init(
+        gridTargetFrameInGlobal: CGRect? = nil,
+        timelineID: UUID = TimelineIdentity.defaultID,
+        onSaveStarted: @escaping () -> Void = {},
+        onPhotoSaved: @escaping (NSManagedObjectID) -> Void = { _ in },
+        onGridRevealed: @escaping () -> Void = {},
+        onSaveFailed: @escaping () -> Void = {},
+        onCaptureCompleted: @escaping () -> Void = {}
+    ) {
         self.gridTargetFrameInGlobal = gridTargetFrameInGlobal
         self.timelineID = timelineID
+        self.onSaveStarted = onSaveStarted
+        self.onPhotoSaved = onPhotoSaved
+        self.onGridRevealed = onGridRevealed
+        self.onSaveFailed = onSaveFailed
+        self.onCaptureCompleted = onCaptureCompleted
         _alignmentGuideStore = StateObject(wrappedValue: AlignmentGuideStore(timelineID: timelineID))
     }
 
@@ -169,6 +187,8 @@ struct ExperimentalCameraView: View {
                     experimentalControlBar(height: bottomBarHeight)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .opacity(isAnimatingPreviewToGrid ? 0 : 1)
+                .animation(ExperimentalCapturePreviewOverlay.gridRevealAnimation, value: isAnimatingPreviewToGrid)
 
                 if showingCapturePreview, let pendingCaptureImage {
                     ExperimentalCapturePreviewOverlay(
@@ -186,6 +206,7 @@ struct ExperimentalCameraView: View {
                         onDismiss: dismissCapturePreview,
                         onDragChanged: updatePreviewDrag,
                         onDragCancelled: cancelPreviewDrag,
+                        onGridRevealed: onGridRevealed,
                         onFlightStarted: saveHaptics.beginFlight,
                         onLanding: saveHaptics.land,
                         onFlightCompleted: finishSavedCapture
@@ -197,7 +218,12 @@ struct ExperimentalCameraView: View {
                     .zIndex(2)
                 }
             }
-            .background(Color.black.ignoresSafeArea())
+            .background {
+                Color.black
+                    .opacity(isAnimatingPreviewToGrid ? 0 : 1)
+                    .ignoresSafeArea()
+                    .animation(ExperimentalCapturePreviewOverlay.gridRevealAnimation, value: isAnimatingPreviewToGrid)
+            }
             .gesture(
                 DragGesture(minimumDistance: 20)
                     .onEnded { value in
@@ -812,10 +838,11 @@ struct ExperimentalCameraView: View {
         let videoURL = pendingLivePhotoVideoURL
         isSaving = true
         saveHaptics.beginSaving()
+        onSaveStarted()
 
         Task {
             do {
-                try await savePhoto(
+                let objectID = try await savePhoto(
                     image: image,
                     imageData: imageData,
                     livePhotoImageData: livePhotoImageData,
@@ -828,10 +855,12 @@ struct ExperimentalCameraView: View {
                     return
                 }
                 saveHaptics.didSave()
+                onPhotoSaved(objectID)
                 isAnimatingPreviewToGrid = true
             } catch {
                 saveHaptics.cancel()
                 isSaving = false
+                onSaveFailed()
                 guard isCameraVisible else { clearPendingCapture(); return }
                 saveErrorMessage = error.localizedDescription
                 showingSaveError = true
@@ -841,13 +870,15 @@ struct ExperimentalCameraView: View {
 
     private func finishSavedCapture() {
         guard isCameraVisible, isAnimatingPreviewToGrid else { return }
-        clearPendingCapture()
-        isAnimatingPreviewToGrid = false
-        isSaving = false
-        dismiss()
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            onCaptureCompleted()
+            dismiss()
+        }
     }
 
-    private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async throws {
+    private func savePhoto(image: UIImage, imageData: Data?, livePhotoImageData: Data?, videoURL: URL?) async throws -> NSManagedObjectID {
         let location: (latitude: Double, longitude: Double)?
         if let currentLocation = locationService.currentLocation {
             location = (currentLocation.coordinate.latitude, currentLocation.coordinate.longitude)
@@ -866,7 +897,7 @@ struct ExperimentalCameraView: View {
                 throw CocoaError(.fileWriteOutOfSpace)
             }
             #endif
-            _ = try await PhotoStorageService.shared.savePhoto(
+            let objectID = try await PhotoStorageService.shared.savePhoto(
                 image: image,
                 imageData: imageData,
                 livePhotoImageData: livePhotoImageData,
@@ -876,6 +907,7 @@ struct ExperimentalCameraView: View {
                 timelineID: timelineID
             )
             try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
+            return objectID
         } catch {
             try? await enforceMinimumSaveDelay(startedAt: saveStartedAt, clock: clock)
             throw error
@@ -917,243 +949,6 @@ struct ExperimentalCameraView: View {
         }
 
         return UTType(type as String)?.preferredFilenameExtension ?? "heic"
-    }
-}
-
-struct ExperimentalCapturePreviewOverlay: View {
-    let image: UIImage
-    let livePhotoImageURL: URL?
-    let livePhotoVideoURL: URL?
-    let isMirrored: Bool
-    let isSaving: Bool
-    let savingDetail: String
-    let isAnimatingToGrid: Bool
-    let dismissOffset: CGFloat
-    let targetFrameInGlobal: CGRect?
-    let onRetake: () -> Void
-    let onDone: () -> Void
-    let onDismiss: () -> Void
-    let onDragChanged: (CGFloat) -> Void
-    let onDragCancelled: () -> Void
-    let onFlightStarted: () -> Void
-    let onLanding: () -> Void
-    let onFlightCompleted: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var previewImageFrameInOverlay: CGRect = .zero
-    @State private var animatedFrameInOverlay: CGRect = .zero
-    @State private var landingScale: CGFloat = 1
-    @State private var flightOpacity: Double = 0
-
-    private var previewTitle: String {
-        livePhotoImageURL != nil && livePhotoVideoURL != nil
-            ? "Live Photo Preview"
-            : "Photo Preview"
-    }
-
-    var body: some View {
-        GeometryReader { geometry in
-            let fallbackTargetSize = min(150, max(100, (geometry.size.width - 4) / 3))
-            let containerFrameInGlobal = geometry.frame(in: .global)
-            let localTargetFrame: CGRect = {
-                guard let targetFrameInGlobal,
-                      targetFrameInGlobal != .zero else {
-                    return CGRect(
-                        x: 1,
-                        y: 1,
-                        width: fallbackTargetSize,
-                        height: fallbackTargetSize
-                    )
-                }
-
-                return CGRect(
-                    x: targetFrameInGlobal.minX - containerFrameInGlobal.minX,
-                    y: targetFrameInGlobal.minY - containerFrameInGlobal.minY,
-                    width: targetFrameInGlobal.width,
-                    height: targetFrameInGlobal.height
-                )
-            }()
-            let fallbackStartFrame = CGRect(
-                x: 20,
-                y: 64,
-                width: geometry.size.width - 40,
-                height: max(geometry.size.width - 40, 1) * 1.25
-            )
-            let startFrame = previewImageFrameInOverlay == .zero ? fallbackStartFrame : previewImageFrameInOverlay
-            let flightFrame = animatedFrameInOverlay == .zero
-                ? (reduceMotion ? localTargetFrame : startFrame) : animatedFrameInOverlay
-
-            ZStack(alignment: .topLeading) {
-                Color.black
-                    .ignoresSafeArea()
-
-                if !isAnimatingToGrid {
-                    VStack(spacing: 18) {
-                        Capsule()
-                            .fill(Color.white.opacity(0.25))
-                            .frame(width: 46, height: 5)
-                            .padding(.top, 14)
-
-                        Text(previewTitle)
-                            .font(.headline)
-                            .foregroundStyle(.white.opacity(0.92))
-
-                        SnapBackZoomContainer {
-                            Group {
-                                if let livePhotoImageURL, let livePhotoVideoURL {
-                                    LivePhotoContainerView(
-                                        imageURL: livePhotoImageURL,
-                                        videoURL: livePhotoVideoURL,
-                                        fallbackImage: image
-                                    )
-                                } else {
-                                    Image(uiImage: image)
-                                        .resizable()
-                                        .scaledToFit()
-                                }
-                            }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
-                        }
-                        .aspectRatio(image.size, contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
-                        .padding(.horizontal, 20)
-                        .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
-                        .background {
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .preference(
-                                        key: PreviewImageFramePreferenceKey.self,
-                                        value: proxy.frame(in: .named("capturePreviewOverlay"))
-                                    )
-                            }
-                        }
-
-                        HStack(spacing: 14) {
-                        Button(action: onRetake) {
-                            Text("Retake")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 15)
-                                .background(Color.white.opacity(0.1), in: Capsule())
-                        }
-                        .accessibilityIdentifier("capturePreviewRetakeButton")
-                        .disabled(isSaving)
-
-                        Button(action: onDone) {
-                            if isSaving {
-                                HStack(spacing: 10) {
-                                    ProgressView()
-                                    Text("Saving…")
-                                        .font(.headline)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 15)
-                                .accessibilityIdentifier("capturePreviewSavingIndicator")
-                            } else {
-                                Text("Done")
-                                    .font(.headline)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 15)
-                            }
-                        }
-                        .accessibilityIdentifier("capturePreviewDoneButton")
-                        .foregroundStyle(.black)
-                        .background(Color.white, in: Capsule())
-                        .disabled(isSaving)
-                    }
-                    .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 28)
-
-                    if isSaving {
-                        Text(savingDetail)
-                            .font(.footnote)
-                            .foregroundStyle(.white.opacity(0.78))
-                            .padding(.horizontal, 24)
-                            .padding(.bottom, 8)
-                            .transition(.opacity)
-                    }
-                    }
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                } else {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(
-                            width: flightFrame.width,
-                            height: flightFrame.height
-                        )
-                        .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
-                        .scaleEffect(landingScale)
-                        .opacity(reduceMotion ? flightOpacity : 1)
-                        .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
-                        .position(
-                            x: flightFrame.midX,
-                            y: flightFrame.midY
-                        )
-                        .onAppear {
-                            onFlightStarted()
-                            withAnimation(.easeInOut(duration: reduceMotion ? 0.15 : 0.34), completionCriteria: .logicallyComplete) {
-                                animatedFrameInOverlay = localTargetFrame
-                                flightOpacity = 1
-                            } completion: {
-                                onLanding()
-                                guard !reduceMotion else { onFlightCompleted(); return }
-                                withAnimation(.easeOut(duration: 0.06)) {
-                                    landingScale = 0.96
-                                } completion: {
-                                    withAnimation(.easeOut(duration: 0.08)) {
-                                        landingScale = 1
-                                    } completion: {
-                                        onFlightCompleted()
-                                    }
-                                }
-                            }
-                        }
-                }
-            }
-            .coordinateSpace(name: "capturePreviewOverlay")
-            .onPreferenceChange(PreviewImageFramePreferenceKey.self) { frame in
-                if frame != .zero {
-                    previewImageFrameInOverlay = frame
-                }
-            }
-        }
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("capturePreviewOverlay")
-        .accessibilityValue(isMirrored ? "Mirrored" : "Original")
-        .offset(y: dismissOffset)
-        .gesture(
-            DragGesture(minimumDistance: 20)
-                .onChanged { value in
-                    guard !isSaving, !isAnimatingToGrid else { return }
-                    onDragChanged(value.translation.height)
-                }
-                .onEnded { value in
-                    guard !isSaving, !isAnimatingToGrid else { return }
-                    if value.translation.height > 100 {
-                        onDismiss()
-                    } else {
-                        onDragCancelled()
-                    }
-                }
-        )
-    }
-}
-
-private struct PreviewImageFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        let next = nextValue()
-        if next != .zero {
-            value = next
-        }
     }
 }
 

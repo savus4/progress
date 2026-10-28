@@ -5,7 +5,7 @@ import Observation
 /// Names live in the mirrored library; the current selection belongs to this device.
 @MainActor
 @Observable
-final class TimelineSelectionStore: NSObject, NSFetchedResultsControllerDelegate {
+final class TimelineSelectionStore: NSObject {
     static let shared = TimelineSelectionStore()
     static let selectedTimelineKey = "selectedTimelineID"
 
@@ -19,7 +19,8 @@ final class TimelineSelectionStore: NSObject, NSFetchedResultsControllerDelegate
     private(set) var isDeleting = false
 
     @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored private var resultsController: NSFetchedResultsController<Timeline>?
+    @ObservationIgnored private var observedContext: NSManagedObjectContext?
+    @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var refreshContext: NSManagedObjectContext?
     @ObservationIgnored private var needsRefresh = false
@@ -42,24 +43,72 @@ final class TimelineSelectionStore: NSObject, NSFetchedResultsControllerDelegate
         super.init()
     }
 
+    isolated deinit {
+        refreshTask?.cancel()
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    }
+
     func start(in context: NSManagedObjectContext) async {
-        // Re-fetch even for the same context: a storage-mode switch reopens its store.
-        if resultsController?.managedObjectContext !== context {
-            resultsController?.delegate = nil
-            let request = Timeline.fetchRequest()
-            request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
-            let controller = NSFetchedResultsController(
-                fetchRequest: request, managedObjectContext: context,
-                sectionNameKeyPath: nil, cacheName: nil
-            )
-            controller.delegate = self
-            resultsController = controller
+        observeChanges(in: context)
+        await refresh(in: context)
+    }
+
+    private func observeChanges(in context: NSManagedObjectContext) {
+        guard observedContext !== context else { return }
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        observedContext = context
+        // Only value snapshots survive a store switch. An FRC can retain results
+        // from the removed store and throw inside the next save's change processing.
+        observers = [NotificationCenter.default.addObserver(
+            forName: .NSManagedObjectContextObjectsDidChange, object: context, queue: nil
+        ) { [weak self, weak context] notification in
+            guard Self.affectsTimelines(notification) else { return }
+            Task { @MainActor [weak self, weak context] in
+                guard let self, let context, self.observedContext === context else { return }
+                await self.refresh(in: context)
+            }
+        }]
+        if let coordinator = context.persistentStoreCoordinator {
+            observers.append(NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextDidSaveObjectIDs, object: nil, queue: nil
+            ) { [weak self, weak context] notification in
+                // The view context may hold no registered Timeline objects, so
+                // its objects-did-change notification can omit background edits.
+                guard let savedContext = notification.object as? NSManagedObjectContext,
+                      savedContext.persistentStoreCoordinator === coordinator,
+                      Self.affectsTimelineIDs(notification) else { return }
+                Task { @MainActor [weak self, weak context] in
+                    guard let self, let context, self.observedContext === context else { return }
+                    await self.refresh(in: context)
+                }
+            })
+            for name in [Notification.Name.NSPersistentStoreCoordinatorStoresDidChange, .NSPersistentStoreRemoteChange] {
+                observers.append(NotificationCenter.default.addObserver(
+                    forName: name, object: coordinator, queue: nil
+                ) { [weak self, weak context] _ in
+                    // Store notifications may arrive on Core Data's internal thread.
+                    Task { @MainActor [weak self, weak context] in
+                        guard let self, let context, self.observedContext === context else { return }
+                        await self.refresh(in: context)
+                    }
+                })
+            }
         }
-        do {
-            try resultsController?.performFetch()
-            await refresh(in: context)
-        } catch {
-            errorMessage = error.localizedDescription
+    }
+
+    nonisolated private static func affectsTimelineIDs(_ notification: Notification) -> Bool {
+        [NSInsertedObjectIDsKey, NSUpdatedObjectIDsKey, NSDeletedObjectIDsKey].contains { key in
+            let ids = notification.userInfo?[key] as? Set<NSManagedObjectID> ?? []
+            return ids.contains { $0.entity.name == "Timeline" }
+        }
+    }
+
+    nonisolated private static func affectsTimelines(_ notification: Notification) -> Bool {
+        if notification.userInfo?[NSInvalidatedAllObjectsKey] != nil { return true }
+        return [NSInsertedObjectsKey, NSUpdatedObjectsKey, NSDeletedObjectsKey,
+                NSRefreshedObjectsKey, NSInvalidatedObjectsKey].contains { key in
+            let objects = notification.userInfo?[key] as? Set<NSManagedObject> ?? []
+            return objects.contains { $0.entity.name == "Timeline" }
         }
     }
 
@@ -76,13 +125,23 @@ final class TimelineSelectionStore: NSObject, NSFetchedResultsControllerDelegate
             repeat {
                 needsRefresh = false
                 guard let currentContext = refreshContext else { return }
+                let stores = Set((currentContext.persistentStoreCoordinator?.persistentStores ?? []).map(ObjectIdentifier.init))
+                guard !stores.isEmpty else {
+                    isLoaded = false
+                    continue
+                }
                 do {
                     try await TimelineStore.ensureAvailableTimeline(in: currentContext)
                     try await TimelineStore.resolveNameConflicts(in: currentContext)
                     let state = try await TimelineStore.state(in: currentContext)
                     guard refreshContext === currentContext else { continue }
+                    guard stores == Set((currentContext.persistentStoreCoordinator?.persistentStores ?? []).map(ObjectIdentifier.init)) else {
+                        needsRefresh = true
+                        continue
+                    }
                     apply(state)
                 } catch {
+                    guard refreshContext === currentContext else { continue }
                     errorMessage = error.localizedDescription
                 }
             } while needsRefresh
@@ -148,10 +207,5 @@ final class TimelineSelectionStore: NSObject, NSFetchedResultsControllerDelegate
         defer { isDeleting = false }
         try await service.delete(id: id, in: context)
         await refresh(in: context)
-    }
-
-    func controllerDidChangeContent(_ controller: NSFetchedResultsController<any NSFetchRequestResult>) {
-        guard controller === resultsController, let context = resultsController?.managedObjectContext else { return }
-        Task { [weak self] in await self?.refresh(in: context) }
     }
 }

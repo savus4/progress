@@ -1456,7 +1456,9 @@ private final class ToolbarConfigViewController: UIViewController {
 
         let confirmation = UIAlertController(
             title: "Delete photo?",
-            message: PhotoDeletionMessage.scope(isLocalOnly: PhotoStorageCoordinator.shared.isLocalOnly),
+            message: PhotoStorageCoordinator.shared.isLocalOnly
+                ? "Deletes photo from this device."
+                : "Deletes photo from this device and other synced devices.",
             preferredStyle: .actionSheet
         )
         confirmation.addAction(UIAlertAction(title: "Delete Photo", style: .destructive) { [weak self] _ in

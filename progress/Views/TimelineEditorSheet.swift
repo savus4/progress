@@ -223,12 +223,6 @@ struct TimelineEditorSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier(isDuplicateName ? "duplicateTimelineNameError" : "timelineNameValidationError")
             }
-
-            if !mode.isCreating {
-                Text("Name changes are saved when you close.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
         }
         .padding(20)
         .background(.background, in: RoundedRectangle(cornerRadius: 20))
