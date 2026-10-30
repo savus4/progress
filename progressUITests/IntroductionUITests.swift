@@ -2,6 +2,32 @@ import XCTest
 
 final class IntroductionUITests: XCTestCase {
     @MainActor
+    func testCompletionAfterBackgroundingIntroduction() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["UI_TEST_IN_MEMORY_STORE"] = "1"
+        app.launchArguments = ["-hasCompletedIntroduction", "NO"]
+        app.launch()
+
+        let continueButton = app.buttons["introductionContinueButton"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+        continueButton.tap()
+        XCTAssertEqual(continueButton.label, "Get Started")
+
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+        continueButton.tap()
+
+        let settings = app.buttons["Settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+        XCTAssertTrue(app.staticTexts["settingsTitle"].waitForExistence(timeout: 5))
+        app.buttons["Close"].tap()
+        XCTAssertTrue(app.buttons["emptyStateCaptureButton"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testCompletionAndHiddenReplayAcrossLaunches() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

@@ -17,8 +17,6 @@ struct progressApp: App {
 
     @StateObject private var persistenceController = PersistenceController.shared
     @State private var tipStore = TipStore()
-    // Snapshot at launch so scheduling a replay in Settings never interrupts this session.
-    @State private var showsIntroduction = !UserDefaults.standard.bool(forKey: IntroductionPreferences.completedKey)
 
     init() {
         loadRocketSimConnect()
@@ -35,28 +33,15 @@ struct progressApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            ZStack {
-                if showsIntroduction {
-                    IntroductionView(onFinish: completeIntroduction)
-                        .transition(.opacity)
-                        .zIndex(1)
-                } else {
-                    PersistenceRootView(persistenceController: persistenceController)
-                        .transition(.opacity)
-                }
-            }
-            .statusBarHidden(showsIntroduction)
-            .environment(tipStore)
-            .task {
-                guard !StorageTestConfiguration.isIsolatedHost else { return }
-                await tipStore.observeTransactions()
-            }
-            .animation(.easeOut(duration: 0.2), value: showsIntroduction)
-            .task(id: persistenceController.loadState) {
-                guard persistenceController.isLoaded else { return }
-                appDelegate.startPersistenceServices()
-            }
+        // WindowGroup's deferred builder can run on SwiftUI.AsyncRenderer.
+        // Construct actor-isolated content here, before handing it to SwiftUI.
+        let rootView = AppRootView(
+            persistenceController: persistenceController,
+            tipStore: tipStore,
+            onPersistenceLoaded: appDelegate.startPersistenceServices
+        )
+        return WindowGroup { @Sendable in
+            rootView
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -68,11 +53,6 @@ struct progressApp: App {
                 break
             }
         }
-    }
-
-    private func completeIntroduction() {
-        UserDefaults.standard.set(true, forKey: IntroductionPreferences.completedKey)
-        showsIntroduction = false
     }
 
     private func loadRocketSimConnect() {
@@ -88,7 +68,7 @@ struct progressApp: App {
     }
 }
 
-private struct PersistenceRootView: View {
+struct PersistenceRootView: View {
     @ObservedObject var persistenceController: PersistenceController
 
     var body: some View {

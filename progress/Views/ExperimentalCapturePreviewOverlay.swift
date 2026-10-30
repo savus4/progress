@@ -27,6 +27,7 @@ struct ExperimentalCapturePreviewOverlay: View {
     @State private var previewImageFrame: CGRect = .zero
     @State private var flightFrame: CGRect?
     @State private var hasRevealedGrid = false
+    @State private var hasFinishedGridReveal = false
     @State private var isReadyToFly = false
     @State private var hasStartedFlight = false
     @State private var flightCornerRadius: CGFloat = 24
@@ -104,19 +105,19 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .disabled(isSaving)
 
                         Button(action: onDone) {
-                            Group {
+                            HStack(spacing: 8) {
                                 if isSaving {
-                                    HStack(spacing: 10) {
-                                        ProgressView()
-                                        Text("Saving…")
-                                    }
-                                    .accessibilityIdentifier("capturePreviewSavingIndicator")
-                                } else {
-                                    Text("Done")
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(.black)
+                                        .fixedSize()
+                                        .accessibilityIdentifier("capturePreviewSavingIndicator")
                                 }
+                                Text(isSaving ? "Saving…" : "Done")
                             }
                             .font(.headline)
-                            .frame(maxWidth: .infinity)
+                            .fixedSize(horizontal: true, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.vertical, 15)
                         }
                         .accessibilityIdentifier("capturePreviewDoneButton")
@@ -167,6 +168,9 @@ struct ExperimentalCapturePreviewOverlay: View {
             .onChange(of: targetFrameInGlobal) { _, _ in
                 flyToGrid(in: geometry.frame(in: .global))
             }
+            .task(id: hasFinishedGridReveal && isAnimatingToGrid) {
+                await pauseBeforeFlight(in: geometry.frame(in: .global))
+            }
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
@@ -200,10 +204,21 @@ struct ExperimentalCapturePreviewOverlay: View {
         withAnimation(Self.gridRevealAnimation, completionCriteria: .logicallyComplete) {
             hasRevealedGrid = true
         } completion: {
-            isReadyToFly = true
-            onGridRevealed()
-            flyToGrid(in: geometry.frame(in: .global))
+            hasFinishedGridReveal = true
         }
+    }
+
+    private func pauseBeforeFlight(in viewport: CGRect) async {
+        guard hasFinishedGridReveal, isAnimatingToGrid else { return }
+        do {
+            try await Task.sleep(for: .milliseconds(250))
+        } catch {
+            return
+        }
+        guard !Task.isCancelled, isAnimatingToGrid else { return }
+        isReadyToFly = true
+        onGridRevealed()
+        flyToGrid(in: viewport)
     }
 
     private func flyToGrid(in viewport: CGRect) {
