@@ -45,6 +45,7 @@ struct ExperimentalCameraView: View {
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var timelines = TimelineSelectionStore.shared
     @State private var isUpdatingLivePhotoPreference = false
     @State private var livePhotoPreferenceError: String?
@@ -147,6 +148,7 @@ struct ExperimentalCameraView: View {
                         ExperimentalCameraPreviewView(session: cameraService.session, position: cameraService.cameraPosition)
                             .frame(width: previewWidth, height: actualPreviewHeight)
                             .background(Color.black)
+                            .accessibilityHidden(true)
 
                         if areGuidesVisible {
                             ExperimentalGuidesOverlay(
@@ -188,6 +190,7 @@ struct ExperimentalCameraView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .opacity(isAnimatingPreviewToGrid ? 0 : 1)
+                .accessibilityHidden(showingCapturePreview || isAnimatingPreviewToGrid)
                 .animation(ExperimentalCapturePreviewOverlay.gridRevealAnimation, value: isAnimatingPreviewToGrid)
 
                 if showingCapturePreview, let pendingCaptureImage {
@@ -212,8 +215,8 @@ struct ExperimentalCameraView: View {
                         onFlightCompleted: finishSavedCapture
                     )
                     .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .move(edge: .bottom)
+                        insertion: reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity),
+                        removal: reduceMotion ? .opacity : .move(edge: .bottom)
                     ))
                     .zIndex(2)
                 }
@@ -288,6 +291,16 @@ struct ExperimentalCameraView: View {
             if isShowing { saveHaptics.prepare() }
         }
         .interactiveDismissDisabled(isSaving || isCapturing)
+        .accessibilityAction(.escape) {
+            guard !isSaving, !isCapturing, captureFeedbackStage == nil else { return }
+            if showingCapturePreview {
+                dismissCapturePreview()
+            } else if isEditingGuides {
+                cancelGuideEditing()
+            } else {
+                dismiss()
+            }
+        }
         .onChange(of: cameraService.captureCompleted) { _, _ in
             livePhotoPreferenceAtCapture = nil
             cameraPositionAtCapture = nil
@@ -300,7 +313,7 @@ struct ExperimentalCameraView: View {
                 pendingLivePhotoImageURL = makeTemporaryPreviewImageURL(from: capture.imageData)
                 pendingLivePhotoVideoURL = capture.videoURL
                 isAnimatingPreviewToGrid = false
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.32, dampingFraction: 0.88)) {
                     showingCapturePreview = true
                 }
                 cameraService.stopSession()
@@ -311,7 +324,7 @@ struct ExperimentalCameraView: View {
                 pendingLivePhotoImageURL = nil
                 pendingLivePhotoVideoURL = nil
                 isAnimatingPreviewToGrid = false
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.32, dampingFraction: 0.88)) {
                     showingCapturePreview = true
                 }
                 cameraService.stopSession()
@@ -412,7 +425,7 @@ struct ExperimentalCameraView: View {
                             Spacer(minLength: 0)
                         }
                         .frame(maxWidth: .infinity)
-                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
 
                         Button(action: capturePhoto) {
                             ZStack {
@@ -425,10 +438,11 @@ struct ExperimentalCameraView: View {
                                     .frame(width: 88, height: 88)
                             }
                         }
+                        .accessibilityLabel("Take Photo")
                         .accessibilityIdentifier("experimentalCameraShutter")
                         .disabled(controlsDisabled)
                         .frame(width: 120)
-                        .transition(.scale(scale: 0.88).combined(with: .opacity))
+                        .transition(reduceMotion ? .opacity : .scale(scale: 0.88).combined(with: .opacity))
                     }
 
                     HStack {
@@ -484,6 +498,7 @@ struct ExperimentalCameraView: View {
                                         .fill(Color.white.opacity(0.08))
                                 )
                             }
+                            .accessibilityLabel("Edit Alignment Guides")
                             .disabled(guideInteractionDisabled)
                         }
                     }
@@ -731,7 +746,7 @@ struct ExperimentalCameraView: View {
         isCapturing = false
         captureFeedbackStage = nil
         isAnimatingPreviewToGrid = false
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+        withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.32, dampingFraction: 0.88)) {
             showingCapturePreview = true
         }
     }
@@ -780,7 +795,7 @@ struct ExperimentalCameraView: View {
     }
 
     private func cancelPreviewDrag() {
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86)) {
             previewDismissOffset = 0
         }
         if !usesMockCapture {
@@ -971,6 +986,7 @@ struct ExperimentalGuidesOverlay: View {
             ZStack {
                 guideLine(color: .white.opacity(0.28), width: 1.5)
                     .frame(height: geometry.size.height)
+                    .accessibilityHidden(true)
 
                 faceLine(
                     y: eyeY,
@@ -986,6 +1002,18 @@ struct ExperimentalGuidesOverlay: View {
                                 updateGuides(fromEyeLine: normalized)
                             }
                     )
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Eye Alignment Guide")
+                    .accessibilityValue(eyeLinePosition.formatted(.percent.precision(.fractionLength(0))))
+                    .accessibilityHint("Position from the top. Adjusting moves both guides symmetrically.")
+                    .accessibilityAdjustableAction { direction in
+                        guard isEditingGuides, !isInteractionDisabled else { return }
+                        switch direction {
+                        case .increment: updateGuides(fromEyeLine: eyeLinePosition + 0.01)
+                        case .decrement: updateGuides(fromEyeLine: eyeLinePosition - 0.01)
+                        @unknown default: break
+                        }
+                    }
 
                 faceLine(
                     y: mouthY,
@@ -1001,10 +1029,23 @@ struct ExperimentalGuidesOverlay: View {
                                 updateGuides(fromMouthLine: normalized)
                             }
                     )
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Mouth Alignment Guide")
+                    .accessibilityValue(mouthLinePosition.formatted(.percent.precision(.fractionLength(0))))
+                    .accessibilityHint("Position from the top. Adjusting moves both guides symmetrically.")
+                    .accessibilityAdjustableAction { direction in
+                        guard isEditingGuides, !isInteractionDisabled else { return }
+                        switch direction {
+                        case .increment: updateGuides(fromMouthLine: mouthLinePosition + 0.01)
+                        case .decrement: updateGuides(fromMouthLine: mouthLinePosition - 0.01)
+                        @unknown default: break
+                        }
+                    }
 
             }
             .padding(.horizontal, 18)
         }
+        .accessibilityHidden(!isEditingGuides)
     }
 
     private func guideLine(color: Color, width: CGFloat) -> some View {
@@ -1054,7 +1095,8 @@ struct ExperimentalGuidesOverlay: View {
                 .offset(y: -22)
             }
         }
-        .frame(width: width, alignment: .leading)
+        .frame(width: width, height: 44, alignment: .leading)
+        .contentShape(.rect)
         .position(x: width / 2, y: y)
     }
 

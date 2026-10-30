@@ -790,7 +790,7 @@ struct PhotoGridView: View {
     private var filterButtonLabel: some View {
         if #available(iOS 26.0, *) {
             filterButtonSymbol
-                .frame(width: 42, height: 42)
+                .frame(width: 44, height: 44)
                 .background(
                     Circle()
                         .fill(.clear)
@@ -806,7 +806,7 @@ struct PhotoGridView: View {
 
                 filterButtonSymbol
             }
-            .frame(width: 42, height: 42)
+            .frame(width: 44, height: 44)
             .shadow(color: .black.opacity(0.12), radius: 12, y: 7)
         }
     }
@@ -828,7 +828,7 @@ struct PhotoGridView: View {
     private var mapButtonLabel: some View {
         if #available(iOS 26.0, *) {
             mapButtonSymbol
-                .frame(width: 42, height: 42)
+                .frame(width: 44, height: 44)
                 .background(
                     Circle()
                         .fill(.clear)
@@ -844,7 +844,7 @@ struct PhotoGridView: View {
 
                 mapButtonSymbol
             }
-            .frame(width: 42, height: 42)
+            .frame(width: 44, height: 44)
             .shadow(color: .black.opacity(0.12), radius: 12, y: 7)
         }
     }

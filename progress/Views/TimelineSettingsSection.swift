@@ -105,10 +105,11 @@ struct TimelineSettingsSection: View {
                                     .accessibilityHidden(true)
                             }
                             Text(timeline.name)
-                                .lineLimit(1)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         .font(.subheadline.weight(isSelected ? .semibold : .medium))
                         .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
                         .frame(minHeight: 44)
                         .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
                         .background(isSelected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.07), in: Capsule())

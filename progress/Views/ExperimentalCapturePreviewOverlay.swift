@@ -52,9 +52,11 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .frame(width: 46, height: 5)
                         .padding(.top, 14)
                         .opacity(hasRevealedGrid ? 0 : 1)
+                        .accessibilityHidden(true)
 
                     Text(previewTitle)
                         .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
                         .foregroundStyle(.white.opacity(0.92))
                         .opacity(hasRevealedGrid ? 0 : 1)
 
@@ -90,6 +92,9 @@ struct ExperimentalCapturePreviewOverlay: View {
                         }
                     }
                     .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(previewTitle)
+                    .accessibilityAddTraits(.isImage)
                     .padding(.horizontal, 20)
                     .opacity(isAnimatingToGrid ? 0 : 1)
 
@@ -116,7 +121,8 @@ struct ExperimentalCapturePreviewOverlay: View {
                                 Text(isSaving ? "Saving…" : "Done")
                             }
                             .font(.headline)
-                            .fixedSize(horizontal: true, vertical: true)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.center)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.vertical, 15)
                         }

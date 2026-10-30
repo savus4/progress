@@ -1562,7 +1562,11 @@ private struct PhotoDetailPageView: View {
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Photo")
+            .accessibilityLabel(PhotoAccessibilityLabel.make(
+                captureDate: item.captureDate,
+                locationName: item.locationName,
+                isLivePhoto: hasLivePhoto
+            ))
             .accessibilityAddTraits(.isImage)
             .accessibilityIdentifier("photoDetailImage")
 

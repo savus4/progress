@@ -48,6 +48,7 @@ struct PhotoRouteMapView: View {
     let onOpenPhoto: (NSManagedObjectID) -> Void
     let onOpenSettings: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Namespace private var mapScope
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var visibleRegion: MKCoordinateRegion?
@@ -85,6 +86,7 @@ struct PhotoRouteMapView: View {
                 if didBuildMapItems, mapItems.isEmpty || didSetInitialCamera {
                     mapContent(size: mapSize)
                         .ignoresSafeArea(.container, edges: [.top, .bottom])
+                        .accessibilityHidden(clusterPresentation != nil)
                 }
 
                 if didBuildMapItems, mapItems.isEmpty {
@@ -97,14 +99,14 @@ struct PhotoRouteMapView: View {
                         presentation: clusterPresentation,
                         onOpenPhoto: onOpenPhoto,
                         onDismiss: {
-                            withAnimation(.easeInOut(duration: 0.18)) {
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                                 self.clusterPresentation = nil
                                 isClusterOverlayPresented = false
                             }
                         }
                     )
                     .padding(.horizontal, 14)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
                 }
 
                 mapControlsOverlay
@@ -154,7 +156,7 @@ struct PhotoRouteMapView: View {
                         animationToken: annotationAnimationToken,
                         isVisible: renderedAnnotation.isVisible
                     )
-                    .transition(.scale(scale: 0.72).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.72).combined(with: .opacity))
                     .contentShape(Rectangle())
                     .allowsHitTesting(renderedAnnotation.isVisible)
                     .highPriorityGesture(
@@ -162,7 +164,14 @@ struct PhotoRouteMapView: View {
                             handleAnnotationTap(annotation)
                         }
                     )
+                    .accessibilityElement(children: .ignore)
                     .accessibilityLabel(annotationAccessibilityLabel(for: annotation))
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint(annotation.items.count > 1 ? "Shows photos at this location" : "Opens this photo")
+                    .accessibilityAction {
+                        handleAnnotationTap(annotation)
+                    }
+                    .accessibilityHidden(!renderedAnnotation.isVisible)
                 }
             }
         }
@@ -212,7 +221,7 @@ struct PhotoRouteMapView: View {
             .buttonBorderShape(.circle)
             .accessibilityIdentifier("mapSettingsButton")
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: shouldShowCompass)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.8), value: shouldShowCompass)
         .padding(.top, 12)
         .padding(.horizontal, 16)
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { mapControlsHeight = $0 }
@@ -427,7 +436,7 @@ struct PhotoRouteMapView: View {
             isShowingInitialOverview = false
             let region = zoomRegion(for: annotation)
             let nextCamera = camera(for: region, heading: mapHeading)
-            withAnimation(.easeInOut(duration: 0.28)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) {
                 cameraPosition = .camera(nextCamera)
             }
             visibleRegion = region
@@ -468,7 +477,7 @@ struct PhotoRouteMapView: View {
                 )
             }
 
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
             clusterPresentation = PhotoMapClusterPresentation(items: items)
             isClusterOverlayPresented = true
         }
@@ -540,7 +549,7 @@ struct PhotoRouteMapView: View {
         }
 
         if animated {
-            withAnimation(.easeInOut(duration: 0.28)) {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) {
                 applyFocus()
             }
         } else {
@@ -556,8 +565,10 @@ struct PhotoRouteMapView: View {
         if annotation.items.count > 1 {
             return "\(annotation.items.count) photos"
         }
-        guard let date = annotation.primaryItem.captureDate else { return "Photo location" }
-        return "Photo from \(Self.accessibilityDateFormatter.string(from: date))"
+        return PhotoAccessibilityLabel.make(
+            captureDate: annotation.primaryItem.captureDate,
+            locationName: annotation.primaryItem.locationName
+        )
     }
 
     private func region(
@@ -719,7 +730,7 @@ struct PhotoRouteMapView: View {
             heading: mapHeading,
             pitch: 0
         )
-        withAnimation(.easeInOut(duration: 0.24)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
             let resetCamera = MapCamera(
                 centerCoordinate: camera.centerCoordinate,
                 distance: camera.distance,
@@ -839,7 +850,7 @@ struct PhotoRouteMapView: View {
         }
 
         if animated {
-            withAnimation(.spring(response: 0.36, dampingFraction: 0.78)) {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.78)) {
                 applyUpdate()
             }
 
@@ -860,13 +871,6 @@ struct PhotoRouteMapView: View {
         guard !coordinates.isEmpty else { return nil }
         return region(containing: coordinates)
     }
-
-    private static let accessibilityDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
 
     private static let twoDigitYearFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -1115,7 +1119,7 @@ private struct PhotoMapClusterGridOverlay: View {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
                         .font(.system(size: 13, weight: .bold))
-                        .frame(width: 32, height: 32)
+                        .frame(width: 44, height: 44)
                         .background(.thinMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
@@ -1125,11 +1129,18 @@ private struct PhotoMapClusterGridOverlay: View {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(presentation.items) { gridItem in
-                        PhotoMapClusterGridCell(gridItem: gridItem)
-                            .onTapGesture {
-                                onDismiss()
-                                onOpenPhoto(gridItem.item.objectID)
-                            }
+                        Button {
+                            onDismiss()
+                            onOpenPhoto(gridItem.item.objectID)
+                        } label: {
+                            PhotoMapClusterGridCell(gridItem: gridItem)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(PhotoAccessibilityLabel.make(
+                            captureDate: gridItem.item.captureDate,
+                            locationName: gridItem.item.locationName
+                        ))
+                        .accessibilityHint("Opens this photo")
                     }
                 }
                 .padding(.horizontal, 10)
@@ -1150,6 +1161,9 @@ private struct PhotoMapClusterGridOverlay: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(.horizontal, 14)
         .padding(.bottom, 14)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityAction(.escape, onDismiss)
     }
 }
 
@@ -1255,6 +1269,7 @@ private struct PhotoMapHeadingCompass: View {
 }
 
 private struct PhotoMapAnnotationView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: PhotoRouteMapItem
     let color: Color
     let aggregatePalette: PhotoMapAggregatePalette
@@ -1279,10 +1294,10 @@ private struct PhotoMapAnnotationView: View {
                 aggregateView
             }
         }
-        .scaleEffect(hasAppeared && isVisible ? 1 : 0.72)
+        .scaleEffect(reduceMotion || (hasAppeared && isVisible) ? 1 : 0.72)
         .opacity(hasAppeared && isVisible ? 1 : 0)
-        .animation(.spring(response: 0.34, dampingFraction: 0.72), value: hasAppeared)
-        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isVisible)
+        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.34, dampingFraction: 0.72), value: hasAppeared)
+        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.32, dampingFraction: 0.78), value: isVisible)
         .onAppear {
             hasAppeared = false
             Task { @MainActor in

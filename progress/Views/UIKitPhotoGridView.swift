@@ -1779,6 +1779,12 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         heartBadgeImageView.isHidden = true
         livePhotoFavoriteBadgeImageView.isHidden = true
         hiddenFromVideoBadgeImageView.isHidden = true
+        isAccessibilityElement = false
+        accessibilityElementsHidden = false
+        accessibilityLabel = nil
+        accessibilityValue = nil
+        accessibilityHint = nil
+        accessibilityTraits = []
     }
 
     func configure(
@@ -1790,8 +1796,21 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     ) {
         contentView.alpha = isHiddenForTransition ? 0 : 1
         isAccessibilityElement = !isHiddenForTransition
+        accessibilityElementsHidden = isHiddenForTransition
         accessibilityIdentifier = "photoGridItem"
-        accessibilityValue = accessibilityValue(for: item)
+        accessibilityLabel = PhotoAccessibilityLabel.make(
+            captureDate: item.captureDate,
+            locationName: item.locationName,
+            isLivePhoto: item.livePhotoImageAssetName != nil && item.livePhotoVideoAssetName != nil
+        )
+        accessibilityTraits = [.button, .image]
+        if isSelectionMode && isSelected {
+            accessibilityTraits.insert(.selected)
+        }
+        accessibilityHint = isSelectionMode
+            ? (isSelected ? "Deselects this photo" : "Selects this photo")
+            : "Opens this photo"
+        accessibilityValue = accessibilityValue(for: item, showsUploadStatus: showsUploadStatus)
 
         selectionBadgeImageView.isHidden = !isSelectionMode
         if isSelectionMode {
@@ -1886,6 +1905,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         contentView.addSubview(hiddenFromVideoBadgeImageView)
 
         statusLabel.font = .preferredFont(forTextStyle: .caption2).bold()
+        statusLabel.adjustsFontForContentSizeCategory = true
         statusLabel.accessibilityIdentifier = "photoGridUploadBadge"
         statusLabel.layer.cornerRadius = 12
         statusLabel.layer.masksToBounds = true
@@ -1927,7 +1947,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         ])
     }
 
-    private func accessibilityValue(for item: UIKitPhotoGridItem) -> String? {
+    private func accessibilityValue(for item: UIKitPhotoGridItem, showsUploadStatus: Bool) -> String? {
         var values: [String] = []
         if item.isHearted {
             values.append("Favorite")
@@ -1937,6 +1957,18 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         }
         if item.isHiddenFromVideo {
             values.append("Hidden from video")
+        }
+        if showsUploadStatus {
+            switch item.uploadState {
+            case .pending, .uploading:
+                values.append("Uploading")
+            case .failed:
+                values.append("Retrying later")
+            case .paused:
+                values.append("Upload paused")
+            case .uploaded:
+                break
+            }
         }
         return values.isEmpty ? nil : values.joined(separator: ", ")
     }
