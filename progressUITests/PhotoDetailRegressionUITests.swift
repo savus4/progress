@@ -17,6 +17,7 @@ final class PhotoDetailRegressionUITests: XCTestCase {
         XCTAssertTrue(secondPhoto.waitForExistence(timeout: 5))
         let initialFirstFrame = firstPhoto.frame
         let initialSecondFrame = secondPhoto.frame
+        let expectedPhotoLabel = secondPhoto.label
         let backButton = app.buttons["Back"]
         let detailImage = app.descendants(matching: .any)["photoDetailImage"].firstMatch
 
@@ -26,7 +27,7 @@ final class PhotoDetailRegressionUITests: XCTestCase {
             XCTAssertTrue(detailImage.waitForExistence(timeout: 5))
             XCTAssertTrue(backButton.isHittable)
             XCTAssertTrue(detailImage.isHittable)
-            XCTAssertEqual(detailImage.label, "Photo")
+            XCTAssertEqual(detailImage.label, expectedPhotoLabel)
             XCTAssertGreaterThan(detailImage.frame.width, 0)
             XCTAssertGreaterThan(detailImage.frame.height, 0)
 

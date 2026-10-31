@@ -1,4 +1,5 @@
 import CoreData
+import CloudKit
 import Foundation
 import Testing
 @testable import progress
@@ -153,6 +154,173 @@ struct CloudSyncMonitorTests {
         #expect(fixture.monitor.statusTitle == "iCloud sync is ready")
     }
 
+    @Test("Metadata failures stay visible through retries and unrelated successful imports", arguments: [
+        CKError.Code.networkFailure, .networkUnavailable, .serviceUnavailable, .requestRateLimited, .zoneBusy
+    ])
+    func metadataRetryRemainsVisible(code: CKError.Code) throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        fixture.finish(.export, error: CKError(code))
+        let detail = fixture.monitor.statusDetail
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+        #expect(fixture.monitor.showsStatusDetail)
+        #expect(fixture.monitor.isFailing == false)
+
+        let retryID = fixture.start(.export)
+        fixture.finish(.import)
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+        #expect(fixture.monitor.statusDetail == detail)
+        #expect(fixture.monitor.showsStatusDetail)
+
+        fixture.finish(.export, identifier: retryID)
+        #expect(fixture.monitor.syncState == .idle)
+        #expect(fixture.monitor.statusTitle == "iCloud sync is ready")
+        #expect(fixture.monitor.showsStatusDetail == false)
+    }
+
+    @Test("A wrapped iCloud network failure explains the automatic retry")
+    func wrappedMetadataNetworkFailure() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let networkError = CKError(.networkFailure, userInfo: [
+            NSUnderlyingErrorKey: URLError(.cannotParseResponse)
+        ])
+        let error = NSError(domain: NSCocoaErrorDomain, code: 134409, userInfo: [NSUnderlyingErrorKey: networkError])
+        fixture.finish(.export, error: error)
+
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+        #expect(fixture.monitor.statusDetail.contains("network request failed"))
+        #expect(fixture.monitor.statusDetail.contains("retry automatically"))
+    }
+
+    @Test("Nontransient metadata failures keep their warning until the matching operation succeeds")
+    func metadataFailureRequiresMatchingSuccess() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let error = NSError(domain: "CloudSyncMonitorTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid photo metadata"])
+        fixture.finish(.export, error: error)
+        let retryID = fixture.start(.export)
+        fixture.finish(.setup)
+        fixture.finish(.import)
+
+        #expect(fixture.monitor.statusTitle == "iCloud sync needs attention")
+        #expect(fixture.monitor.statusDetail == "Invalid photo metadata")
+        #expect(fixture.monitor.statusSymbolName == "exclamationmark.icloud")
+        #expect(fixture.monitor.isFailing)
+
+        fixture.finish(.export, identifier: retryID)
+        #expect(fixture.monitor.syncState == .idle)
+        #expect(fixture.monitor.isFailing == false)
+    }
+
+    @Test("An overlapping import completing does not end an active export")
+    func overlappingMetadataOperations() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let exportID = fixture.start(.export)
+        let importID = fixture.start(.import)
+        #expect(fixture.monitor.isMetadataImportActive)
+
+        fixture.finish(.import, identifier: importID)
+        #expect(fixture.monitor.isMetadataImportActive == false)
+        #expect(fixture.monitor.syncState == .syncing(.export))
+
+        fixture.finish(.export, identifier: exportID)
+        #expect(fixture.monitor.syncState == .idle)
+    }
+
+    @Test("Finishing one import leaves another import active")
+    func overlappingMetadataImports() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let firstID = fixture.start(.import)
+        let secondID = fixture.start(.import)
+
+        fixture.finish(.import, identifier: firstID)
+        #expect(fixture.monitor.isMetadataImportActive)
+        #expect(fixture.monitor.syncState == .syncing(.import))
+
+        fixture.finish(.import, identifier: secondID)
+        #expect(fixture.monitor.isMetadataImportActive == false)
+        #expect(fixture.monitor.syncState == .idle)
+    }
+
+    @Test("System deferral cannot clear a previous export failure")
+    func metadataDeferralPreservesFailure() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        fixture.finish(.export, error: CKError(.networkFailure))
+        let retryID = fixture.start(.export)
+        fixture.finish(.export, identifier: retryID, error: NSError(domain: NSCocoaErrorDomain, code: 134419))
+
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+        #expect(fixture.monitor.showsStatusDetail)
+    }
+
+    @Test("Recovering an export does not erase a separate import failure")
+    func metadataFailuresRecoverIndependently() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        fixture.finish(.export, error: CKError(.networkFailure))
+        fixture.finish(.import, error: CKError(.serviceUnavailable))
+        fixture.finish(.export)
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+
+        fixture.finish(.import)
+        #expect(fixture.monitor.syncState == .idle)
+    }
+
+    @Test("Another library's events cannot change this library's sync status")
+    func ignoresOtherLibraryEvents() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        fixture.finish(.export, error: CKError(.networkFailure))
+        fixture.monitor.handleCloudKitEvent(identifier: UUID(), storeIdentifier: "another-library",
+                                           type: .export, endDate: Date(), error: nil)
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+
+        fixture.finish(.export)
+        fixture.monitor.handleCloudKitEvent(identifier: UUID(), storeIdentifier: "another-library",
+                                           type: .export, endDate: nil, error: nil)
+        #expect(fixture.monitor.syncState == .idle)
+    }
+
+    @Test("Replacing the active library clears its old failure and unfinished operations")
+    func replacingLibraryResetsMetadataStatus() throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        fixture.finish(.export, error: CKError(.networkFailure))
+        fixture.start(.export)
+        let coordinator = fixture.persistence.container.persistentStoreCoordinator
+        for store in coordinator.persistentStores { try coordinator.remove(store) }
+        let replacement = try coordinator.addPersistentStore(ofType: NSInMemoryStoreType,
+                                                             configurationName: nil, at: nil)
+        fixture.monitor.handleCloudKitEvent(identifier: UUID(), storeIdentifier: try #require(replacement.identifier),
+                                           type: .import, endDate: Date(), error: nil)
+
+        #expect(fixture.monitor.syncState == .idle)
+        #expect(fixture.monitor.statusTitle == "iCloud sync is ready")
+    }
+
+    @Test("Account recovery restores unresolved failures without retaining interrupted operations")
+    func accountRecoveryPreservesUnresolvedFailure() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        fixture.finish(.export, error: CKError(.networkFailure))
+        fixture.start(.import)
+        fixture.availability.isUnavailable = true
+        await fixture.monitor.refreshUploadStatus()
+        #expect(fixture.monitor.statusTitle == "iCloud sync is unavailable")
+        #expect(fixture.monitor.isMetadataImportActive == false)
+
+        fixture.availability.isUnavailable = false
+        await fixture.monitor.refreshUploadStatus()
+        #expect(fixture.monitor.statusTitle == "iCloud sync will retry automatically")
+
+        fixture.finish(.export)
+        #expect(fixture.monitor.syncState == .idle)
+    }
+
     private final class Fixture {
         final class Availability {
             var isUnavailable: Bool
@@ -170,6 +338,7 @@ struct CloudSyncMonitorTests {
         let monitor: CloudSyncMonitor
         let modeStore: PhotoStorageModeStore
         let availability: Availability
+        let storeIdentifier: String
         var context: NSManagedObjectContext { persistence.container.viewContext }
 
         init(mode: PhotoStorageMode = .iCloud, isUnavailable: Bool = false, reason: String? = nil,
@@ -180,6 +349,7 @@ struct CloudSyncMonitorTests {
             try modeStore.set(mode)
             let availability = Availability(isUnavailable: isUnavailable, reason: reason)
             self.availability = availability
+            storeIdentifier = try #require(persistence.container.persistentStoreCoordinator.persistentStores.first?.identifier)
             monitor = CloudSyncMonitor(
                 context: persistence.container.viewContext,
                 uploadStore: uploadStore,
@@ -209,6 +379,19 @@ struct CloudSyncMonitorTests {
                 state: state
             ))
             return photo
+        }
+
+        @discardableResult
+        func start(_ type: NSPersistentCloudKitContainer.EventType) -> UUID {
+            let identifier = UUID()
+            monitor.handleCloudKitEvent(identifier: identifier, storeIdentifier: storeIdentifier,
+                                       type: type, endDate: nil, error: nil)
+            return identifier
+        }
+
+        func finish(_ type: NSPersistentCloudKitContainer.EventType, identifier: UUID = UUID(), error: (any Error)? = nil) {
+            monitor.handleCloudKitEvent(identifier: identifier, storeIdentifier: storeIdentifier,
+                                       type: type, endDate: Date(), error: error)
         }
 
         func removeFiles() {

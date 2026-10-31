@@ -1,4 +1,5 @@
 @preconcurrency import CoreData
+import CloudKit
 import Combine
 import Foundation
 import OSLog
@@ -17,6 +18,7 @@ final class CloudSyncMonitor: ObservableObject {
     enum SyncState: Equatable {
         case idle
         case syncing(NSPersistentCloudKitContainer.EventType)
+        case retrying(String)
         case failed(String)
     }
 
@@ -29,6 +31,11 @@ final class CloudSyncMonitor: ObservableObject {
     private struct ExportWaiter {
         let registeredAt: Date
         let continuation: CheckedContinuation<ExportWaitResult, Never>
+    }
+
+    private struct MetadataFailure {
+        let message: String
+        let retriesAutomatically: Bool
     }
 
     @Published private(set) var syncState: SyncState = .idle
@@ -59,6 +66,9 @@ final class CloudSyncMonitor: ObservableObject {
     private var remoteStoreChangeObserver: NSObjectProtocol?
     private var assetTransferObserver: NSObjectProtocol?
     private var activeDownloadAssetNames: Set<String> = []
+    private var activeMetadataEvents: [UUID: NSPersistentCloudKitContainer.EventType] = [:]
+    private var metadataFailures: [NSPersistentCloudKitContainer.EventType: MetadataFailure] = [:]
+    private var metadataStoreIdentifiers: Set<String> = []
     private var exportWaiters: [UUID: ExportWaiter] = [:]
     private var uploadStatusRefreshTask: Task<Void, Never>?
     private var metadataImportQuietTask: Task<Void, Never>?
@@ -229,7 +239,7 @@ final class CloudSyncMonitor: ObservableObject {
         }
         if isICloudUnavailable { return "icloud.slash" }
 
-        if pausedUploadCount > 0 || uploadStatusError != nil {
+        if isFailing {
             return "exclamationmark.icloud"
         }
         if uploadingAssetCount > 0 || pendingUploadCount > 0 || failedUploadCount > 0 {
@@ -245,7 +255,7 @@ final class CloudSyncMonitor: ObservableObject {
         switch syncState {
         case .idle:
             return isRunningMigration ? "arrow.triangle.2.circlepath" : "checkmark.icloud"
-        case .syncing:
+        case .syncing, .retrying:
             return "arrow.triangle.2.circlepath.icloud"
         case .failed:
             return "exclamationmark.icloud"
@@ -256,7 +266,7 @@ final class CloudSyncMonitor: ObservableObject {
         if usesSimulatorExampleLibrary || storageModeStore.mode.keepsAllOriginals { return false }
         if isICloudUnavailable { return true }
 
-        if pausedUploadCount > 0 || uploadStatusError != nil {
+        if pausedUploadCount > 0 || isICloudStorageFull || uploadStatusError != nil {
             return true
         }
         if case .failed = syncState {
@@ -266,7 +276,8 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     var showsStatusDetail: Bool {
-        usesSimulatorExampleLibrary || storageModeStore.mode.keepsAllOriginals || isFailing
+        if case .retrying = syncState { return true }
+        return usesSimulatorExampleLibrary || storageModeStore.mode.keepsAllOriginals || isFailing
     }
 
     var retryableUploadCount: Int {
@@ -314,6 +325,9 @@ final class CloudSyncMonitor: ObservableObject {
             return "Some photo uploads are paused"
         }
 
+        if case .retrying = syncState { return "iCloud sync will retry automatically" }
+        if case .failed = syncState { return "iCloud sync needs attention" }
+
         if let uploadTitle {
             return uploadTitle
         }
@@ -340,6 +354,8 @@ final class CloudSyncMonitor: ObservableObject {
             @unknown default:
                 return "Syncing with iCloud"
             }
+        case .retrying:
+            return "iCloud sync will retry automatically"
         case .failed:
             return "iCloud sync needs attention"
         }
@@ -376,6 +392,11 @@ final class CloudSyncMonitor: ObservableObject {
             return "\(pausedUploadCount) photo\(pausedUploadCount == 1 ? "" : "s") couldn’t finish uploading. Missing-file errors are checked again automatically; other issues may need attention before retrying."
         }
 
+        switch syncState {
+        case .retrying(let message), .failed(let message): return message
+        case .idle, .syncing: break
+        }
+
         if let uploadDetail {
             return uploadDetail + metadataImportSuffix
         }
@@ -409,7 +430,7 @@ final class CloudSyncMonitor: ObservableObject {
                 return "Last completed sync \(lastSyncDate.formatted(.relative(presentation: .named)))."
             }
             return "Changes usually sync automatically after saves and app launches."
-        case .failed(let message):
+        case .retrying(let message), .failed(let message):
             return message
         }
     }
@@ -574,10 +595,44 @@ final class CloudSyncMonitor: ObservableObject {
     }
 
     private func handle(event: NSPersistentCloudKitContainer.Event) {
-        updateMetadataImportStatus(for: event)
+        handleCloudKitEvent(identifier: event.identifier, storeIdentifier: event.storeIdentifier,
+                           type: event.type, endDate: event.endDate, error: event.error)
+    }
 
-        if event.type == .export, let endDate = event.endDate {
-            if let error = event.error {
+    func handleCloudKitEvent(
+        identifier: UUID,
+        storeIdentifier: String,
+        type: NSPersistentCloudKitContainer.EventType,
+        endDate: Date?,
+        error: (any Error)?
+    ) {
+        let coordinator = uploadContext?.persistentStoreCoordinator
+            ?? PersistenceController.shared.container.persistentStoreCoordinator
+        let storeIdentifiers = Set(coordinator.persistentStores.compactMap(\.identifier))
+        // Temporary containers must not change this library's status or satisfy
+        // its export waiters. Replacing the library also discards its old status.
+        guard storeIdentifiers.contains(storeIdentifier) else { return }
+        if metadataStoreIdentifiers != storeIdentifiers {
+            metadataStoreIdentifiers = storeIdentifiers
+            activeMetadataEvents.removeAll()
+            metadataFailures.removeAll()
+            metadataImportQuietTask?.cancel()
+            isMetadataImportActive = false
+            hasMetadataQuotaError = false
+            lastSyncDate = nil
+        }
+        if endDate == nil {
+            activeMetadataEvents[identifier] = type
+        } else {
+            activeMetadataEvents.removeValue(forKey: identifier)
+        }
+        if type == .import {
+            metadataImportQuietTask?.cancel()
+            isMetadataImportActive = activeMetadataEvents.values.contains(.import)
+        }
+
+        if type == .export, let endDate {
+            if let error {
                 if ICloudAvailabilityMonitor.isUnavailableCloudKitError(error) {
                     ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
                     resolveExportWaiters(completedAt: endDate, result: .timedOut)
@@ -589,39 +644,78 @@ final class CloudSyncMonitor: ObservableObject {
             }
         }
 
-        if let endDate = event.endDate {
-            if let error = event.error {
-                logCloudKitEventError(error, eventType: event.type)
+        if let endDate {
+            if let error {
+                logCloudKitEventError(error, eventType: type)
                 if PhotoUploadFailureReason.classify(error) == .iCloudStorageFull { hasMetadataQuotaError = true }
                 if ICloudAvailabilityMonitor.isUnavailableCloudKitError(error) {
                     ICloudAvailabilityMonitor.shared.recordCloudKitError(error)
-                    syncState = .idle
                     isMetadataImportActive = false
-                } else if isSystemDeferredCloudKitError(error) {
-                    syncState = .idle
-                } else {
-                    syncState = .failed(error.localizedDescription)
+                } else if !isSystemDeferredCloudKitError(error) {
+                    metadataFailures[type] = metadataFailure(for: error)
                 }
             } else {
-                if event.type == .export { hasMetadataQuotaError = false }
-                syncState = .idle
+                // A retry starting, a deferred request, or a successful import
+                // cannot confirm that a failed export has recovered.
+                metadataFailures.removeValue(forKey: type)
+                if type == .export { hasMetadataQuotaError = false }
                 lastSyncDate = endDate
             }
+        }
+        updateMetadataSyncState()
+    }
+
+    private func updateMetadataSyncState() {
+        guard !isICloudUnavailable else {
+            syncState = .idle
+            return
+        }
+        let failures = metadataFailures.sorted { $0.key.rawValue > $1.key.rawValue }.map(\.value)
+        let eventTypes: [NSPersistentCloudKitContainer.EventType] = [.import, .export, .setup]
+        if let failure = failures.first(where: { !$0.retriesAutomatically }) ?? failures.first {
+            syncState = failure.retriesAutomatically ? .retrying(failure.message) : .failed(failure.message)
+        } else if let type = eventTypes.first(where: { activeMetadataEvents.values.contains($0) })
+            ?? activeMetadataEvents.values.first {
+            syncState = .syncing(type)
         } else {
-            syncState = .syncing(event.type)
+            syncState = .idle
         }
     }
 
+    private func metadataFailure(for error: any Error) -> MetadataFailure {
+        let nsError = error as NSError
+        if nsError.domain == CKError.errorDomain, let code = CKError.Code(rawValue: nsError.code) {
+            switch code {
+            case .networkFailure, .networkUnavailable:
+                return MetadataFailure(
+                    message: "Photo metadata and thumbnails haven’t finished syncing because an iCloud network request failed. iCloud will retry automatically. Photos already downloaded remain available.",
+                    retriesAutomatically: true
+                )
+            case .serviceUnavailable, .requestRateLimited, .zoneBusy:
+                return MetadataFailure(
+                    message: "iCloud is temporarily delaying photo metadata and thumbnail sync. Sync will retry automatically.",
+                    retriesAutomatically: true
+                )
+            default: break
+            }
+        }
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? any Error {
+            return metadataFailure(for: underlyingError)
+        }
+        return MetadataFailure(message: error.localizedDescription, retriesAutomatically: false)
+    }
+
     private func updateICloudAvailability() {
+        let wasUnavailable = isICloudUnavailable
         isICloudUnavailable = iCloudUnavailableProvider()
         if isICloudUnavailable {
-            if case .failed = syncState {
-                syncState = .idle
-            }
+            activeMetadataEvents.removeAll()
+            syncState = .idle
             isMetadataImportActive = false
             downloadingAssetCount = 0
             activeDownloadAssetNames.removeAll()
         }
+        if wasUnavailable && !isICloudUnavailable { updateMetadataSyncState() }
     }
 
     private var isImportingMetadata: Bool {
@@ -630,24 +724,6 @@ final class CloudSyncMonitor: ObservableObject {
         }
         if case .syncing(.import) = syncState { return true }
         return false
-    }
-
-    private func updateMetadataImportStatus(for event: NSPersistentCloudKitContainer.Event) {
-        guard event.type == .import else { return }
-
-        guard event.endDate != nil else {
-            markMetadataImportActive()
-            return
-        }
-
-        guard event.error == nil else {
-            metadataImportQuietTask?.cancel()
-            isMetadataImportActive = false
-            return
-        }
-
-        metadataImportQuietTask?.cancel()
-        isMetadataImportActive = false
     }
 
     private func handleRemoteStoreChange() {
@@ -666,7 +742,7 @@ final class CloudSyncMonitor: ObservableObject {
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             guard let self else { return }
-            if case .syncing(.import) = self.syncState {
+            if self.activeMetadataEvents.values.contains(.import) {
                 return
             }
             self.isMetadataImportActive = false

@@ -4,6 +4,11 @@ final class PhotoImportUITests: XCTestCase {
     @MainActor
     func testPrivateImportDoesNotConsumeTheFirstLibraryPermissionRequest() {
         let app = launchImportWithNoPhotosPermission()
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        defer {
+            settings.terminate()
+            app.terminate()
+        }
         app.buttons["Import Photos Privately"].tap()
         let cancel = pickerCancelButton(in: app)
         XCTAssertTrue(cancel.waitForExistence(timeout: 10), app.debugDescription)
@@ -27,11 +32,16 @@ final class PhotoImportUITests: XCTestCase {
         app.buttons["Import Photos"].tap()
         XCTAssertTrue(guidance.waitForExistence(timeout: 5), app.debugDescription)
         guidance.buttons["Open Settings"].tap()
-        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
         let photosSetting = settings.staticTexts["Photos"]
         // Some simulator runtimes open Settings at its root instead of the app page.
         if !photosSetting.waitForExistence(timeout: 3) {
             let apps = settings.buttons["Apps"]
+            // Settings can restore a nested page, such as Apple Account.
+            for _ in 0..<4 where !apps.exists {
+                let back = settings.navigationBars.buttons["BackButton"]
+                guard back.exists else { break }
+                back.tap()
+            }
             for _ in 0..<6 where !apps.isHittable { settings.swipeUp() }
             XCTAssertTrue(apps.waitForExistence(timeout: 5), settings.debugDescription)
             apps.tap()

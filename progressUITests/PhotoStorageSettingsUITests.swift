@@ -29,6 +29,11 @@ final class PhotoStorageSettingsUITests: XCTestCase {
         app.launchEnvironment["SIMULATOR_EXAMPLE_PHOTOS"] = "0"
         app.launch()
 
+        let restoredClose = app.buttons["Close"]
+        if restoredClose.exists && restoredClose.isHittable {
+            restoredClose.tap()
+            XCTAssertTrue(restoredClose.waitForNonExistence(timeout: 5))
+        }
         let explanation = app.buttons["emptyStatePhotoStorageLink"]
         XCTAssertTrue(explanation.waitForExistence(timeout: 10))
         XCTAssertTrue(explanation.label.contains("iCloud"))

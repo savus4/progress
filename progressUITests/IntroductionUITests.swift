@@ -44,10 +44,13 @@ final class IntroductionUITests: XCTestCase {
         for title in [
             "Years of photos. Still fast.",
             "Life in every Live Photo",
+            "Your story, in motion",
             "Remember where",
             "Your memories stay yours"
         ] {
-            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch.exists)
+            let feature = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+            XCTAssertTrue(feature.waitForExistence(timeout: 5), "Missing introduction feature: \(title)")
         }
         XCTAssertEqual(continueButton.label, "Get Started")
         attachScreenshot(app, name: "Introduction – Features")
