@@ -70,9 +70,11 @@ struct PortraitVideoExportSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
+            AdaptiveSheetForm {
                 videoSection
+            } secondary: {
                 dateRangeSection
+                qualitySection
             }
             .listSectionSpacing(10)
             .scrollContentBackground(.hidden)
@@ -170,6 +172,7 @@ struct PortraitVideoExportSheet: View {
                 pausedSession = PortraitVideoExportService.shared.pausedSession()
             }
         }
+        .presentationSizing(.page)
     }
 
     private var floatingSummaryStats: some View {
@@ -275,20 +278,22 @@ struct PortraitVideoExportSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+        .disabled(exportTask != nil)
+    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("Quality", selection: selectedQualityBinding) {
-                    ForEach(PortraitVideoExportQuality.allCases) { quality in
-                        Text(quality.title).tag(quality)
-                    }
+    private var qualitySection: some View {
+        Section("Quality") {
+            Picker("Quality", selection: selectedQualityBinding) {
+                ForEach(PortraitVideoExportQuality.allCases) { quality in
+                    Text(quality.title).tag(quality)
                 }
-                .pickerStyle(.segmented)
-
-                Text(selectedQuality.detail)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 4)
+            .pickerStyle(.segmented)
+
+            Text(selectedQuality.detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
         .disabled(exportTask != nil)
     }
@@ -486,7 +491,7 @@ struct PortraitVideoExportSheet: View {
                     Label("Cancel Export", systemImage: "xmark.circle.fill")
                         .font(.headline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 52)
+                        .frame(minHeight: 52)
                 }
                 .buttonStyle(floatingOverlayButtonStyle)
                 .foregroundStyle(.red)
@@ -512,8 +517,7 @@ struct PortraitVideoExportSheet: View {
                     Label("Create Video", systemImage: "film.stack.fill")
                         .font(.headline.weight(.semibold))
                         .padding(.horizontal, 24)
-                        .frame(minWidth: 220)
-                        .frame(height: 56)
+                        .frame(minWidth: 220, maxWidth: .infinity, minHeight: 56)
                 }
                 .buttonStyle(floatingOverlayButtonStyle)
                 .disabled(exportTask != nil || matchingPhotos.isEmpty)
@@ -526,7 +530,7 @@ struct PortraitVideoExportSheet: View {
                     Label("Preview Video", systemImage: "play.rectangle.fill")
                         .font(.headline.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 52)
+                        .frame(minHeight: 52)
                 }
                 .buttonStyle(floatingOverlayButtonStyle)
                 .disabled(exportedVideoURL == nil)
@@ -535,7 +539,7 @@ struct PortraitVideoExportSheet: View {
                     Button(action: saveToPhotos) {
                         saveToPhotosLabel
                             .frame(maxWidth: .infinity)
-                            .frame(height: 52)
+                            .frame(minHeight: 52)
                     }
                     .buttonStyle(floatingOverlayButtonStyle)
                     .disabled(isSavingToPhotos)
@@ -545,7 +549,7 @@ struct PortraitVideoExportSheet: View {
                     } label: {
                         centeredActionLabel(title: "Save to Files", systemImage: "folder.fill")
                             .frame(maxWidth: .infinity)
-                            .frame(height: 52)
+                            .frame(minHeight: 52)
                     }
                     .buttonStyle(floatingOverlayButtonStyle)
 
@@ -577,7 +581,7 @@ struct PortraitVideoExportSheet: View {
         }
         .padding(.horizontal, 18)
         .padding(.bottom, 10)
-        .frame(maxWidth: 440)
+        .frame(maxWidth: 720)
         .frame(maxWidth: .infinity)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: exportTask != nil)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: exportedVideoURL != nil)
@@ -1448,4 +1452,20 @@ private enum FavoriteLivePhotoToggleSymbol {
         }
         return image.withRenderingMode(.alwaysTemplate)
     }
+}
+
+#Preview("Video Creator · wide sheet", traits: .fixedLayout(width: 704, height: 900)) {
+    PortraitVideoExportSheet(photos: [])
+        .environment(\.horizontalSizeClass, .regular)
+}
+
+#Preview("Video Creator · narrow window", traits: .fixedLayout(width: 390, height: 800)) {
+    PortraitVideoExportSheet(photos: [])
+        .environment(\.horizontalSizeClass, .regular)
+}
+
+#Preview("Video Creator · large text", traits: .fixedLayout(width: 704, height: 900)) {
+    PortraitVideoExportSheet(photos: [])
+        .environment(\.horizontalSizeClass, .regular)
+        .environment(\.dynamicTypeSize, .accessibility1)
 }

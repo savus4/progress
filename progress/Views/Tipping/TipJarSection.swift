@@ -5,7 +5,8 @@ struct TipJarSection: View {
     @Environment(TipStore.self) private var store
     @Environment(\.purchase) private var purchase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var showsTipSheet = false
+
+    let showTipSheet: () -> Void
 
     var body: some View {
         Section {
@@ -36,9 +37,7 @@ struct TipJarSection: View {
                         tipButton(.fries)
                     }
 
-                    Button {
-                        showsTipSheet = true
-                    } label: {
+                    Button(action: showTipSheet) {
                         HStack(spacing: 12) {
                             Image(systemName: "heart.circle")
                                 .font(.title2)
@@ -105,14 +104,6 @@ struct TipJarSection: View {
         }
         .task {
             await store.loadProducts()
-            if store.receipt != nil { showsTipSheet = true }
-        }
-        .onChange(of: store.receipt?.id) { _, id in
-            if id != nil { showsTipSheet = true }
-        }
-        .sheet(isPresented: $showsTipSheet, onDismiss: { store.receipt = nil }) {
-            TipSheetView()
-                .environment(store)
         }
     }
 

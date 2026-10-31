@@ -1,13 +1,16 @@
+import CoreData
 import SwiftUI
 
 struct NotificationSettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(TipStore.self) private var tipStore
     @StateObject private var cloudSyncMonitor = CloudSyncMonitor.shared
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
     @State private var storage = PhotoStorageCoordinator.shared
     @State private var navigationPath: NavigationPath
     @State private var timelines = TimelineSelectionStore.shared
     @State private var timelineEditor: TimelineEditorSheet.Mode?
+    @State private var showsTipSheet = false
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
     @AppStorage(IntroductionPreferences.completedKey) private var hasCompletedIntroduction = false
 
@@ -25,7 +28,7 @@ struct NotificationSettingsView: View {
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
-            Form {
+            AdaptiveSheetForm {
                 TimelineSettingsSection(editor: $timelineEditor)
 
                 Section("Storage") {
@@ -69,7 +72,7 @@ struct NotificationSettingsView: View {
                     }
                     .accessibilityIdentifier("photoStorageSettingsLink")
                 }
-
+            } secondary: {
                 Section("Camera") {
                     Toggle("Hirs-Mode", isOn: $isHirsModeEnabled)
                         .accessibilityIdentifier("hirsModeToggle")
@@ -79,7 +82,7 @@ struct NotificationSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                TipJarSection()
+                TipJarSection { showsTipSheet = true }
             }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let bottomEdge = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom
@@ -140,6 +143,7 @@ struct NotificationSettingsView: View {
                 }
             }
             .task {
+                if tipStore.receipt != nil { showsTipSheet = true }
                 await cloudSyncMonitor.refreshUploadStatus()
             }
             .alert("Introduction Scheduled", isPresented: $showsIntroductionScheduledAlert) {
@@ -148,8 +152,16 @@ struct NotificationSettingsView: View {
                 Text("The introduction will appear the next time you launch Work in Progress.")
             }
         }
+        .presentationSizing(.page)
         .sheet(item: $timelineEditor) { mode in
             TimelineEditorSheet(mode: mode)
+        }
+        .sheet(isPresented: $showsTipSheet, onDismiss: { tipStore.receipt = nil }) {
+            TipSheetView()
+                .environment(tipStore)
+        }
+        .onChange(of: tipStore.receipt?.id) { _, id in
+            if id != nil { showsTipSheet = true }
         }
         .onChange(of: timelines.selectedID) { _, _ in
             // Destinations capture an owner; do not leave an editor for a remotely
@@ -230,4 +242,11 @@ struct NotificationSettingsView: View {
         }
     }
 
+}
+
+#Preview("Settings · wide sheet", traits: .fixedLayout(width: 704, height: 900)) {
+    NotificationSettingsView()
+        .environment(\.horizontalSizeClass, .regular)
+        .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+        .environment(TipStore())
 }
