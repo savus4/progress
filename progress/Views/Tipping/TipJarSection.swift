@@ -61,6 +61,8 @@ struct TipJarSection: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(store.product(for: .custom) == nil)
+                    .accessibilityLabel("Choose your own amount")
+                    .accessibilityValue(store.displayPrice(for: .custom).map { "From \($0)" } ?? "Unavailable")
                     .accessibilityIdentifier("tip-custom")
                 }
 

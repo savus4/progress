@@ -1470,7 +1470,7 @@ private final class ToolbarConfigViewController: UIViewController {
 
         configuredViewController.present(confirmation, animated: true)
     }
-
+    
     @objc private func heartTapped() {
         configuration?.onHeart()
     }

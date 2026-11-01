@@ -556,7 +556,8 @@ struct PortraitVideoExportSheet: View {
                     Button(role: .destructive) {
                         isShowingDiscardExportConfirmation = true
                     } label: {
-                        Image(systemName: "trash.fill")
+                        Label("Discard Video", systemImage: "trash.fill")
+                            .labelStyle(.iconOnly)
                             .font(.headline.weight(.semibold))
                             .frame(width: 52, height: 52)
                     }
@@ -618,7 +619,8 @@ struct PortraitVideoExportSheet: View {
                 .buttonStyle(floatingOverlayButtonStyle)
 
                 Button(role: .destructive, action: discardPausedExport) {
-                    Image(systemName: "trash.fill")
+                    Label("Discard Paused Export", systemImage: "trash.fill")
+                        .labelStyle(.iconOnly)
                         .font(.headline.weight(.semibold))
                         .frame(width: 52, height: 48)
                 }

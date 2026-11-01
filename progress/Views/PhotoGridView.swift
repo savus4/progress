@@ -372,7 +372,8 @@ struct PhotoGridView: View {
                     } else {
                         if !isMapModeActive {
                             Button(action: openPortraitVideoExporter) {
-                                Image(systemName: "film.stack")
+                                Label("Create Video", systemImage: "film.stack")
+                                    .labelStyle(.iconOnly)
                                     .font(.title3)
                             }
                             .disabled(!dataController.hasAnyPhotos || photoImporter.isImporting)

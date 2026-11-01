@@ -465,6 +465,7 @@ struct ExperimentalCameraView: View {
                                             .fill(Color.white.opacity(0.08))
                                     )
                                 }
+                                .accessibilityLabel("Cancel Guide Changes")
 
                                 Button(action: commitGuideEditing) {
                                     VStack(spacing: 4) {
@@ -481,6 +482,7 @@ struct ExperimentalCameraView: View {
                                             .fill(Color.white.opacity(0.18))
                                     )
                                 }
+                                .accessibilityLabel("Done Editing Guides")
                             }
                         } else {
                             Button(action: beginGuideEditing) {

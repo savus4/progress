@@ -57,6 +57,7 @@ struct DailyReminderSettingsView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Remove reminder")
+                        .accessibilityValue(reminder.dateValue.formatted(date: .omitted, time: .shortened))
                     }
                 }
 

@@ -61,7 +61,7 @@ struct CustomTipView: View {
                     } label: {
                         HStack(spacing: 10) {
                             if store.isPurchasing { ProgressView().tint(.white) }
-                            Text(store.isPurchasing ? "Confirming your tip…" : "Tip \(store.displayPrice(for: .custom, quantity: quantity) ?? "")")
+                            Text(store.isPurchasing ? "Confirming your tip…" : "Tip \(store.displayPrice(for: .custom, quantity: quantity) ?? "unavailable")")
                                 .font(.headline)
                         }
                         .frame(maxWidth: .infinity, minHeight: 40)
