@@ -33,7 +33,6 @@ struct PortraitVideoExportSheet: View {
     @State private var exportStartedAt: Date?
     @State private var smoothedRemainingSeconds: TimeInterval?
     @State private var isShowingDiscardUnsavedExportAlert = false
-    @State private var isShowingDiscardExportConfirmation = false
     @State private var isShowingCancelExportConfirmation = false
     @State private var pausedSession: PortraitVideoExportPausedSession?
     @State private var isPauseRequested = false
@@ -553,30 +552,9 @@ struct PortraitVideoExportSheet: View {
                     }
                     .buttonStyle(floatingOverlayButtonStyle)
 
-                    Button(role: .destructive) {
-                        isShowingDiscardExportConfirmation = true
-                    } label: {
-                        Label("Discard Video", systemImage: "trash.fill")
-                            .labelStyle(.iconOnly)
-                            .font(.headline.weight(.semibold))
-                            .frame(width: 52, height: 52)
-                    }
-                    .buttonStyle(floatingOverlayButtonStyle)
-                    .foregroundStyle(.red)
+                    VideoDiscardButton(onDiscard: discardExportedVideo)
+                    .frame(width: 52, height: 52)
                     .disabled(isSavingToPhotos)
-                    .confirmationDialog(
-                        "Discard video?",
-                        isPresented: $isShowingDiscardExportConfirmation,
-                        titleVisibility: .visible
-                    ) {
-                        Button("Discard Video", role: .destructive) {
-                            discardExportedVideo()
-                        }
-
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("This action cannot be undone.")
-                    }
                 }
             }
         }

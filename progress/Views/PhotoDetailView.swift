@@ -646,6 +646,7 @@ struct PhotoDetailView: View {
     }
 
     private func closeCurrentPhoto() {
+        guard deleteTransition == nil else { return }
         requestClose(currentItem?.objectID)
     }
 
@@ -861,25 +862,10 @@ struct PhotoDetailView: View {
         let deletedIndex = selectedIndex
 
         isPerformingAction = true
-        Task { @MainActor in
-            do {
-                try await PhotoStorageService.shared.deletePhoto(objectID, context: viewContext)
-                beginDeleteTransition(objectID: objectID, deletedIndex: deletedIndex)
-            } catch {
-                isPerformingAction = false
-                actionError = PhotoDetailActionError(message: "Unable to delete this photo.")
-            }
-        }
+        beginDeleteTransition(objectID: objectID, deletedIndex: deletedIndex)
     }
 
     private func beginDeleteTransition(objectID: NSManagedObjectID, deletedIndex: Int) {
-        let remainingItemCount = detailItems.count - 1
-        guard remainingItemCount > 0 else {
-            isPerformingAction = false
-            requestClose(nil)
-            return
-        }
-
         let targetIndexBeforeRemoval: Int
         let resultIndexAfterRemoval: Int
 
@@ -902,20 +888,48 @@ struct PhotoDetailView: View {
     private func completeDeleteTransition(_ transition: PhotoDetailDeleteTransition) {
         guard deleteTransition?.id == transition.id else { return }
 
-        detailItems.removeAll { $0.objectID == transition.deletedObjectID }
-        deleteTransition = nil
-        isPerformingAction = false
+        selectedIndex = transition.targetIndexBeforeRemoval
+        librarySaveState.selectPhoto(currentItem?.objectID)
+
+        // Start storage work only after the fade and paging animation have finished.
+        // Keep the original items until saving succeeds so a failure can restore the page.
+        Task { @MainActor in
+            do {
+                try await PhotoStorageService.shared.deletePhoto(transition.deletedObjectID, context: viewContext)
+                commitDeleteTransition(transition)
+            } catch {
+                viewContext.rollback()
+                selectedIndex = transition.deletedIndex
+                librarySaveState.selectPhoto(currentItem?.objectID)
+                deleteTransition = nil
+                isPerformingAction = false
+                actionError = PhotoDetailActionError(message: "Unable to delete this photo.")
+            }
+        }
+    }
+
+    private func commitDeleteTransition(_ transition: PhotoDetailDeleteTransition) {
+        guard deleteTransition?.id == transition.id else { return }
+
+        let remainingItems = detailItems.filter { $0.objectID != transition.deletedObjectID }
+        let nextIndex = min(transition.resultIndexAfterRemoval, max(remainingItems.count - 1, 0))
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            // The neighbor is already visible. Rebase its index together with the
+            // items so committing storage does not animate another page change.
+            detailItems = remainingItems
+            selectedIndex = nextIndex
+            librarySaveState.selectPhoto(currentItem?.objectID)
+            deleteTransition = nil
+            isPerformingAction = false
+        }
 
         guard !detailItems.isEmpty else {
             requestClose(nil)
             return
         }
 
-        let nextIndex = min(transition.resultIndexAfterRemoval, detailItems.count - 1)
-        withAnimation(.easeInOut(duration: 0.18)) {
-            selectedIndex = nextIndex
-            librarySaveState.selectPhoto(detailItems[nextIndex].objectID)
-        }
         onCurrentItemChanged(detailItems[nextIndex].objectID)
     }
 
@@ -1465,8 +1479,7 @@ private final class ToolbarConfigViewController: UIViewController {
             self?.configuration?.onDelete()
         })
         confirmation.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        confirmation.popoverPresentationController?.sourceView = sender
-        confirmation.popoverPresentationController?.sourceRect = sender.bounds
+        confirmation.popoverPresentationController?.sourceItem = deleteItem
 
         configuredViewController.present(confirmation, animated: true)
     }
@@ -1759,7 +1772,7 @@ private struct LivePhotoStatusIndicator: View {
     }
 }
 
-private struct PhotoDetailDeleteTransition: Equatable, Identifiable {
+struct PhotoDetailDeleteTransition: Equatable, Identifiable {
     let id = UUID()
     let deletedObjectID: NSManagedObjectID
     let deletedIndex: Int
@@ -1809,13 +1822,14 @@ private struct PhotoDetailPagingView: UIViewControllerRepresentable {
                 currentIndex: currentIndex
             )
         } else {
+            controller.resetDeleteTransitionIfNeeded()
             controller.updateItems(items, currentIndex: currentIndex)
         }
     }
 }
 
 @MainActor
-private final class PhotoDetailPagingViewController: UIViewController {
+final class PhotoDetailPagingViewController: UIViewController {
     var onIndexChanged: (Int) -> Void
     var onDeleteTransitionCompleted: (PhotoDetailDeleteTransition) -> Void = { _ in }
     var onImageChanged: (NSManagedObjectID, UIImage?) -> Void = { _, _ in }
@@ -1832,6 +1846,7 @@ private final class PhotoDetailPagingViewController: UIViewController {
     private var didSetInitialOffset = false
     private var activeDeleteTransition: PhotoDetailDeleteTransition?
     private var completedDeleteTransitionID: UUID?
+    private weak var deletionFadingCell: PhotoDetailPagingCell?
     private var prefetchTasks: [Int: Task<Void, Never>] = [:]
 
     init(
@@ -1925,22 +1940,29 @@ private final class PhotoDetailPagingViewController: UIViewController {
             return
         }
 
-        if hasSameObjectIDs(as: nextItems) {
-            items = nextItems
-            currentIndex = resolvedIndex
-            schedulePrefetch(around: currentIndex)
-            refreshVisibleCells()
-            return
-        }
-
+        let didChangeObjectIDs = !hasSameObjectIDs(as: nextItems)
+        let didChangeIndex = currentIndex != resolvedIndex
         items = nextItems
         currentIndex = resolvedIndex
-        collectionView.reloadData()
-        if didSetInitialOffset, !isUserInteractingWithPager {
-            scrollToIndex(currentIndex, animated: false)
+        UIView.performWithoutAnimation {
+            if didChangeObjectIDs {
+                collectionView.reloadData()
+            }
+            if didSetInitialOffset, !isUserInteractingWithPager,
+               didChangeObjectIDs || didChangeIndex {
+                scrollToIndex(currentIndex, animated: false)
+            }
         }
         schedulePrefetch(around: currentIndex)
         refreshVisibleCells()
+    }
+
+    func resetDeleteTransitionIfNeeded() {
+        guard completedDeleteTransitionID != nil else { return }
+        completedDeleteTransitionID = nil
+        collectionView.isUserInteractionEnabled = true
+        deletionFadingCell?.resetDeletionFade()
+        deletionFadingCell = nil
     }
 
     func performDeleteTransitionIfNeeded(
@@ -1985,6 +2007,7 @@ private final class PhotoDetailPagingViewController: UIViewController {
         }
 
         if let cell = collectionView.cellForItem(at: IndexPath(item: transition.deletedIndex, section: 0)) as? PhotoDetailPagingCell {
+            deletionFadingCell = cell
             cell.animateDeletionFadeToBlack { [weak self] in
                 self?.startActiveDeleteTransitionScroll()
             }
@@ -2066,12 +2089,16 @@ private final class PhotoDetailPagingViewController: UIViewController {
 
         activeDeleteTransition = nil
         completedDeleteTransitionID = transition.id
-        collectionView.isUserInteractionEnabled = true
+        currentIndex = transition.targetIndexBeforeRemoval
         onDeleteTransitionCompleted(transition)
     }
 
     private func startActiveDeleteTransitionScroll() {
         guard let transition = activeDeleteTransition else { return }
+        guard transition.targetIndexBeforeRemoval != transition.deletedIndex else {
+            finishActiveDeleteTransition()
+            return
+        }
         scrollToIndex(transition.targetIndexBeforeRemoval, animated: true)
     }
 
@@ -2303,6 +2330,11 @@ private final class PhotoDetailPagingCell: UICollectionViewCell {
         } completion: { _ in
             completion()
         }
+    }
+
+    func resetDeletionFade() {
+        deletionFadeOverlay.layer.removeAllAnimations()
+        deletionFadeOverlay.alpha = 0
     }
 
     private func configureDeletionFadeOverlay() {

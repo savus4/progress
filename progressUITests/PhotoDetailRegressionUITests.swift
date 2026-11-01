@@ -58,6 +58,60 @@ final class PhotoDetailRegressionUITests: XCTestCase {
     }
 
     @MainActor
+    func testDeletingPhotosAdvancesToNeighborAndClosesAfterLastPhoto() throws {
+        let app = launchMockPhotoLibrary()
+        captureMockPhoto(app: app, initialCapture: true)
+        captureMockPhoto(app: app, initialCapture: false)
+        captureMockPhoto(app: app, initialCapture: false)
+
+        let gridItems = app.cells.matching(identifier: "photoGridItem")
+        let backButton = app.buttons["Back"]
+        let favoriteButton = app.buttons["Favorite"]
+        let removeFavoriteButton = app.buttons["Remove Favorite"]
+        let deleteButton = app.buttons["Delete"]
+
+        // Mark the middle photo so both deletion directions have a distinct destination.
+        gridItems.element(boundBy: 1).tap()
+        XCTAssertTrue(favoriteButton.waitForExistence(timeout: 5))
+        favoriteButton.tap()
+        XCTAssertTrue(removeFavoriteButton.waitForExistence(timeout: 5))
+        backButton.tap()
+        XCTAssertTrue(backButton.waitForNonExistence(timeout: 5))
+
+        gridItems.element(boundBy: 0).tap()
+        XCTAssertTrue(deleteButton.waitForExistence(timeout: 5))
+        deleteButton.tap()
+        let confirmation = app.buttons["Delete Photo"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.tap()
+        XCTAssertTrue(removeFavoriteButton.waitForExistence(timeout: 5), "Deleting the first photo should advance to the next photo.")
+        var deletionFinished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: deleteButton)
+        XCTAssertEqual(XCTWaiter.wait(for: [deletionFinished], timeout: 5), .completed)
+        attachScreenshot(app: app, name: "Next photo after deletion")
+        backButton.tap()
+        XCTAssertTrue(backButton.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(gridItems.count, 2)
+
+        gridItems.element(boundBy: 1).tap()
+        XCTAssertTrue(favoriteButton.waitForExistence(timeout: 5))
+        deleteButton.tap()
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.tap()
+        XCTAssertTrue(removeFavoriteButton.waitForExistence(timeout: 5), "Deleting the final page should return to the previous photo.")
+        deletionFinished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: deleteButton)
+        XCTAssertEqual(XCTWaiter.wait(for: [deletionFinished], timeout: 5), .completed)
+        attachScreenshot(app: app, name: "Previous photo after deletion")
+
+        deleteButton.tap()
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        confirmation.tap()
+        XCTAssertTrue(backButton.waitForNonExistence(timeout: 5), "Deleting the only remaining photo should close detail.")
+        XCTAssertTrue(app.buttons["emptyStateCaptureButton"].waitForExistence(timeout: 5))
+        XCTAssertEqual(gridItems.count, 0)
+        attachScreenshot(app: app, name: "Empty library after deleting last photo")
+    }
+
+    @MainActor
     func testPhotoDismissalCanCancelAndReturnDiagonallyToGrid() throws {
         let app = launchMockPhotoLibrary()
         captureMockPhoto(app: app, initialCapture: true)
