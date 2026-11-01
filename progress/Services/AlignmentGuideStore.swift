@@ -30,6 +30,12 @@ final class AlignmentGuideStore: ObservableObject {
         }
     }
 
+    @Published var showsReferencePhoto: Bool {
+        didSet {
+            persistGuideIfNeeded()
+        }
+    }
+
     private let localDefaults: UserDefaults
     private let ubiquitousStore: (any AlignmentGuideCloudStorage)?
     private let storageModeStore: PhotoStorageModeStore
@@ -61,6 +67,7 @@ final class AlignmentGuideStore: ObservableObject {
         eyeLinePosition = initialGuide.eyeLinePosition
         mouthLinePosition = initialGuide.mouthLinePosition
         isVisible = initialGuide.isVisible
+        showsReferencePhoto = initialGuide.showsReferencePhoto
 
         if let ubiquitousStore {
             ubiquitousChangeObserver = NotificationCenter.default.addObserver(
@@ -167,6 +174,7 @@ final class AlignmentGuideStore: ObservableObject {
         eyeLinePosition = guide.eyeLinePosition
         mouthLinePosition = guide.mouthLinePosition
         isVisible = guide.isVisible
+        showsReferencePhoto = guide.showsReferencePhoto
         isApplyingExternalChange = false
 
         persistGuide(publishesToCloud: false)
@@ -181,7 +189,8 @@ final class AlignmentGuideStore: ObservableObject {
         let guide = AlignmentGuide(
             eyeLinePosition: eyeLinePosition,
             mouthLinePosition: mouthLinePosition,
-            isVisible: isVisible
+            isVisible: isVisible,
+            showsReferencePhoto: showsReferencePhoto
         )
 
         guard let guideData = try? JSONEncoder().encode(guide) else { return }

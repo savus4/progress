@@ -46,6 +46,7 @@
 - `ExperimentalCameraView` uses a custom `AVCaptureSession` flow.
 - Capture supports still photos and Live Photos when the device supports them.
 - Eye and mouth guides can be edited directly in the camera UI.
+- Guide editing includes a Reference toggle for a transparent overlay of the timeline's latest photo. It remains visible with guides hidden and after Done, is unavailable for empty timelines, and syncs with the timeline's guide settings.
 - After capture, the app shows a preview step with retake/save before committing to storage.
 - Captured location is attached when permission is available.
 - Saving starts with a soft haptic, followed by gentle pulses for at most 1.5 seconds. Successful saves have a stronger takeoff cue and a heavy landing cue tied to the preview's animation, with a small settling bounce. Failure, leaving the camera, or backgrounding stops the pulses.

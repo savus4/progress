@@ -12,8 +12,8 @@ nonisolated private let runsCloudKitIntegrationTests = ProcessInfo.processInfo.e
 struct ProgressCoreFunctionalityTests {
     @Test("AlignmentGuide default values are stable")
     func alignmentGuideDefaultValues() {
-        #expect(AlignmentGuide.default.eyeLinePosition == 0.35)
-        #expect(AlignmentGuide.default.mouthLinePosition == 0.65)
+        #expect(AlignmentGuide.default.eyeLinePosition == 0.42)
+        #expect(AlignmentGuide.default.mouthLinePosition == 0.58)
     }
 
     @MainActor

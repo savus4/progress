@@ -42,6 +42,7 @@ struct ExperimentalCameraView: View {
     @StateObject private var cameraService = CameraService()
     @StateObject private var locationService = LocationService()
     @StateObject private var alignmentGuideStore: AlignmentGuideStore
+    @FetchRequest private var referencePhotos: FetchedResults<DailyPhoto>
     @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -86,6 +87,14 @@ struct ExperimentalCameraView: View {
         self.onSaveFailed = onSaveFailed
         self.onCaptureCompleted = onCaptureCompleted
         _alignmentGuideStore = StateObject(wrappedValue: AlignmentGuideStore(timelineID: timelineID))
+        let referenceRequest = DailyPhoto.fetchRequest()
+        referenceRequest.predicate = TimelineIdentity.photoPredicate(for: timelineID)
+        referenceRequest.sortDescriptors = [
+            NSSortDescriptor(keyPath: \DailyPhoto.captureDate, ascending: false),
+            NSSortDescriptor(keyPath: \DailyPhoto.createdAt, ascending: false)
+        ]
+        referenceRequest.fetchLimit = 1
+        _referencePhotos = FetchRequest(fetchRequest: referenceRequest, animation: nil)
     }
 
     @State private var isEditingGuides = false
@@ -110,6 +119,7 @@ struct ExperimentalCameraView: View {
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
     @State private var draftGuidesVisible: Bool?
+    @State private var draftShowsReferencePhoto: Bool?
     @State private var didPresentMockCapture = false
     #if DEBUG
     @State private var didInjectSaveFailure = false
@@ -149,6 +159,16 @@ struct ExperimentalCameraView: View {
                             .frame(width: previewWidth, height: actualPreviewHeight)
                             .background(Color.black)
                             .accessibilityHidden(true)
+
+                        if showsReferencePhoto, let referencePhoto = referencePhotos.first {
+                            CameraReferencePhotoOverlay(
+                                photo: referencePhoto,
+                                isMirrored: cameraService.cameraPosition == .front
+                            )
+                            .id(referencePhoto.objectID)
+                            .frame(width: previewWidth, height: actualPreviewHeight)
+                            .clipped()
+                        }
 
                         if areGuidesVisible {
                             ExperimentalGuidesOverlay(
@@ -404,8 +424,13 @@ struct ExperimentalCameraView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
                     if isEditingGuides {
-                        HStack {
+                        HStack(spacing: 10) {
                             guideVisibilityButton
+                            CameraReferencePhotoToggle(
+                                isOn: referencePhotoBinding,
+                                isAvailable: !referencePhotos.isEmpty,
+                                isInteractionDisabled: guideInteractionDisabled
+                            )
                             Spacer(minLength: 0)
                         }
                         .frame(maxWidth: .infinity)
@@ -519,6 +544,17 @@ struct ExperimentalCameraView: View {
 
     private var areGuidesVisible: Bool {
         draftGuidesVisible ?? alignmentGuideStore.isVisible
+    }
+
+    private var showsReferencePhoto: Bool {
+        draftShowsReferencePhoto ?? alignmentGuideStore.showsReferencePhoto
+    }
+
+    private var referencePhotoBinding: Binding<Bool> {
+        Binding(
+            get: { showsReferencePhoto },
+            set: { draftShowsReferencePhoto = $0 }
+        )
     }
 
     private var guideVisibilityButton: some View {
@@ -671,6 +707,7 @@ struct ExperimentalCameraView: View {
         draftEyeLinePosition = alignmentGuideStore.eyeLinePosition
         draftMouthLinePosition = alignmentGuideStore.mouthLinePosition
         draftGuidesVisible = alignmentGuideStore.isVisible
+        draftShowsReferencePhoto = alignmentGuideStore.showsReferencePhoto
         isEditingGuides = true
     }
 
@@ -678,6 +715,7 @@ struct ExperimentalCameraView: View {
         draftEyeLinePosition = nil
         draftMouthLinePosition = nil
         draftGuidesVisible = nil
+        draftShowsReferencePhoto = nil
         isEditingGuides = false
     }
 
@@ -691,9 +729,13 @@ struct ExperimentalCameraView: View {
         if let draftGuidesVisible {
             alignmentGuideStore.isVisible = draftGuidesVisible
         }
+        if let draftShowsReferencePhoto {
+            alignmentGuideStore.showsReferencePhoto = draftShowsReferencePhoto
+        }
         draftEyeLinePosition = nil
         draftMouthLinePosition = nil
         draftGuidesVisible = nil
+        draftShowsReferencePhoto = nil
         isEditingGuides = false
     }
 

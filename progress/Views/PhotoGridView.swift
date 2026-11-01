@@ -210,7 +210,7 @@ struct PhotoGridView: View {
 
                 }
                 .id(timelineSelection.selectedID)
-                .transition(reduceMotion ? .opacity : .push(from: timelineTransitionEdge))
+                .transition(timelineSwitchTransition)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -265,7 +265,7 @@ struct PhotoGridView: View {
                         .padding(.bottom, dataController.hasAnyPhotos ? 132 : 24)
                 }
             }
-            .navigationTitle(timelineSelection.timelines.count > 1 ? timelineSelection.selectedName : "Work in Progress")
+            .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(isMapModeActive ? .inline : .large)
             .toolbar {
                 if isSelectionMode {
@@ -273,6 +273,15 @@ struct PhotoGridView: View {
                         Text("")
                             .accessibilityHidden(true)
                     }
+                }
+
+                ToolbarItem(placement: .largeTitle) {
+                    TimelineNavigationTitle(
+                        title: isSelectionMode ? "" : navigationTitle,
+                        timelineID: timelineSelection.selectedID,
+                        transition: timelineSwitchTransition,
+                        animation: isTimelineTransitioning ? timelineSwitchAnimation : nil
+                    )
                 }
 
                 ToolbarItem(placement: .topBarLeading) {
@@ -500,6 +509,18 @@ struct PhotoGridView: View {
         }
     }
 
+    private var navigationTitle: String {
+        timelineSelection.timelines.count > 1 ? timelineSelection.selectedName : "Work in Progress"
+    }
+
+    private var timelineSwitchAnimation: Animation {
+        reduceMotion ? .easeOut(duration: 0.18) : .smooth(duration: 0.35)
+    }
+
+    private var timelineSwitchTransition: AnyTransition {
+        reduceMotion ? .opacity : .push(from: timelineTransitionEdge)
+    }
+
     private var canSwipeTimelines: Bool {
         timelineSelection.isLoaded && timelineSelection.timelines.count > 1
             && !timelineSelection.isDeleting && !isSelectionMode && !isMapModeActive
@@ -517,7 +538,7 @@ struct PhotoGridView: View {
         let entersFromTrailing = (direction == .left) == (layoutDirection == .leftToRight)
         timelineTransitionEdge = entersFromTrailing ? .trailing : .leading
         isTimelineTransitioning = true
-        withAnimation(reduceMotion ? .easeOut(duration: 0.18) : .smooth(duration: 0.35)) {
+        withAnimation(timelineSwitchAnimation) {
             if timelineSelection.select(destinationID) {
                 // Update the fetch in the same transaction as the incoming timeline's identity.
                 resetForSelectedTimeline()

@@ -70,30 +70,36 @@ struct progressApp: App {
 
 struct PersistenceRootView: View {
     @ObservedObject var persistenceController: PersistenceController
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        switch persistenceController.loadState {
-        case .loading:
-            LibraryLoadingView()
-        case .loaded:
-            if StorageTestConfiguration.isIsolatedHost {
-                Color.clear
-            } else {
-                ContentView()
-                    .environment(\.managedObjectContext, persistenceController.container.viewContext)
-            }
-        case .failed(let message):
-            ContentUnavailableView {
-                Label("Library Couldn’t Open", systemImage: "externaldrive.badge.exclamationmark")
-            } description: {
-                Text("Your photos remain stored. Nothing was deleted.\n\n\(message)")
-            } actions: {
-                Button("Try Again") {
-                    persistenceController.retryLoading()
+        ZStack {
+            switch persistenceController.loadState {
+            case .loading:
+                LibraryLoadingView()
+                    .transition(.opacity)
+            case .loaded:
+                if StorageTestConfiguration.isIsolatedHost {
+                    Color.clear
+                } else {
+                    ContentView()
+                        .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                        .transition(.opacity)
                 }
-                .buttonStyle(.borderedProminent)
+            case .failed(let message):
+                ContentUnavailableView {
+                    Label("Library Couldn’t Open", systemImage: "externaldrive.badge.exclamationmark")
+                } description: {
+                    Text("Your photos remain stored. Nothing was deleted.\n\n\(message)")
+                } actions: {
+                    Button("Try Again") {
+                        persistenceController.retryLoading()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
         }
+        .animation(.easeInOut(duration: reduceMotion ? 0.15 : 0.3), value: persistenceController.loadState)
     }
 }
 
@@ -120,6 +126,12 @@ private struct LibraryLoadingView: View {
             }
             .scrollDisabled(true)
             .navigationTitle("Work in Progress")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .largeTitle) {
+                    TimelineNavigationTitle(title: "Work in Progress")
+                }
+            }
             .background(Color(uiColor: .systemBackground))
             .overlay(alignment: .bottom) {
                 if showsDelayedIndicator {

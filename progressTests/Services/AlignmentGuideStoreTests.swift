@@ -30,9 +30,11 @@ struct AlignmentGuideStoreTests {
         #expect(guide.eyeLinePosition == Double(AlignmentGuide.default.eyeLinePosition))
         guide.eyeLinePosition = 0.45
         guide.isVisible = false
+        guide.showsReferencePhoto = true
         let reopened = AlignmentGuideStore(localDefaults: defaults, ubiquitousStore: cloud, storageModeStore: mode)
         #expect(reopened.eyeLinePosition == 0.45)
         #expect(reopened.isVisible == false)
+        #expect(reopened.showsReferencePhoto)
         reopened.synchronizeStorageMode()
         #expect(cloud.writes == 0)
         #expect(cloud.synchronizations == 0)
@@ -41,6 +43,7 @@ struct AlignmentGuideStoreTests {
         let synced = try JSONDecoder().decode(AlignmentGuide.self, from: #require(cloud.values[key]))
         #expect(synced.eyeLinePosition == 0.45)
         #expect(synced.isVisible == false)
+        #expect(synced.showsReferencePhoto)
         #expect(cloud.writes == 1)
         #expect(!defaults.bool(forKey: key + ".pendingSync"))
     }
@@ -88,12 +91,15 @@ struct AlignmentGuideStoreTests {
         #expect(additional.mouthLinePosition == Double(AlignmentGuide.default.mouthLinePosition))
         #expect(original.isVisible)
         #expect(additional.isVisible)
+        #expect(original.showsReferencePhoto == false)
+        #expect(additional.showsReferencePhoto == false)
         let migrated = try JSONDecoder().decode(
             AlignmentGuide.self, from: #require(defaults.data(forKey: "alignmentGuide"))
         )
         #expect(Double(migrated.eyeLinePosition) == original.eyeLinePosition)
         #expect(Double(migrated.mouthLinePosition) == original.mouthLinePosition)
         #expect(migrated.isVisible)
+        #expect(migrated.showsReferencePhoto == false)
     }
 
     @Test("Editing and reopening a person's guide leaves other timelines and legacy keys unchanged")
@@ -173,5 +179,48 @@ struct AlignmentGuideStoreTests {
         second.synchronizeStorageMode()
         #expect(second.isVisible)
         #expect(cloud.writes == 2)
+    }
+
+    @Test("The reference photo preference syncs and survives reopening only in its owning timeline",
+          arguments: [false, true])
+    func referencePhotoSyncsPerTimeline(usesDefaultTimeline: Bool) throws {
+        let domain = "ReferencePhotoSync-\(UUID())"
+        let firstDefaults = try #require(UserDefaults(suiteName: domain + ".first"))
+        let secondDefaults = try #require(UserDefaults(suiteName: domain + ".second"))
+        let modeURL = FileManager.default.temporaryDirectory.appendingPathComponent(domain + "/mode.json")
+        defer {
+            firstDefaults.removePersistentDomain(forName: domain + ".first")
+            secondDefaults.removePersistentDomain(forName: domain + ".second")
+            try? FileManager.default.removeItem(at: modeURL.deletingLastPathComponent())
+        }
+        let mode = PhotoStorageModeStore(storageURL: modeURL)
+        let cloud = Cloud()
+        let timelineID = usesDefaultTimeline ? TimelineIdentity.defaultID : UUID()
+        let otherTimelineID = usesDefaultTimeline ? UUID() : TimelineIdentity.defaultID
+        let first = AlignmentGuideStore(timelineID: timelineID, localDefaults: firstDefaults,
+                                       ubiquitousStore: cloud, storageModeStore: mode)
+        let second = AlignmentGuideStore(timelineID: timelineID, localDefaults: secondDefaults,
+                                        ubiquitousStore: cloud, storageModeStore: mode)
+        let other = AlignmentGuideStore(timelineID: otherTimelineID, localDefaults: secondDefaults,
+                                       ubiquitousStore: cloud, storageModeStore: mode)
+
+        first.isVisible = false
+        first.showsReferencePhoto = true
+        second.synchronizeStorageMode()
+        other.synchronizeStorageMode()
+        #expect(second.showsReferencePhoto)
+        #expect(second.isVisible == false)
+        #expect(other.showsReferencePhoto == false)
+        #expect(other.isVisible)
+
+        let reopened = AlignmentGuideStore(timelineID: timelineID, localDefaults: secondDefaults,
+                                          ubiquitousStore: cloud, storageModeStore: mode)
+        #expect(reopened.showsReferencePhoto)
+        #expect(reopened.isVisible == false)
+
+        first.showsReferencePhoto = false
+        second.synchronizeStorageMode()
+        #expect(second.showsReferencePhoto == false)
+        #expect(second.isVisible == false)
     }
 }
