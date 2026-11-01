@@ -624,6 +624,7 @@ struct PhotoGridView: View {
             .toolbarBackground(.visible, for: .navigationBar, .bottomBar)
             .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         }
+        .preferredColorScheme(.dark)
     }
 
     private func closePhotoDetail(_ objectID: NSManagedObjectID?) {
