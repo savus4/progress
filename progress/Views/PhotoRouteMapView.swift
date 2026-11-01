@@ -212,13 +212,14 @@ struct PhotoRouteMapView: View {
             }
             Spacer(minLength: 16)
             Button(action: onOpenSettings) {
-                Label("Settings", systemImage: "gearshape")
-                    .labelStyle(.iconOnly)
-                    .font(.title3)
+                Image(systemName: "gearshape")
+                    .font(.title2)
+                    .imageScale(.large)
                     .frame(width: 44, height: 44)
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
+            .accessibilityLabel("Settings")
             .accessibilityIdentifier("mapSettingsButton")
         }
         .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.8), value: shouldShowCompass)

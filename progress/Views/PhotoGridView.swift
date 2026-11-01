@@ -372,16 +372,19 @@ struct PhotoGridView: View {
                     } else {
                         if !isMapModeActive {
                             Button(action: openPortraitVideoExporter) {
-                                Label("Create Video", systemImage: "film.stack")
-                                    .labelStyle(.iconOnly)
-                                    .font(.title3)
+                                Image(systemName: "film.stack")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 26, height: 26)
                             }
+                            .accessibilityLabel("Create Video")
                             .disabled(!dataController.hasAnyPhotos || photoImporter.isImporting)
                         }
 
                         Button(action: { settingsDestination = .general }) {
                             Image(systemName: "gearshape")
                                 .font(.title3)
+                                .scaleEffect(0.9)
                         }
                         .accessibilityLabel("Settings")
                     }
@@ -818,10 +821,13 @@ struct PhotoGridView: View {
         if gridFilter == .favoriteLivePhotos {
             Image(uiImage: FavoriteLivePhotoFilterSymbol.image(isSelected: true))
                 .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 27, height: 27)
                 .foregroundStyle(filterButtonForegroundStyle)
         } else {
             Image(systemName: gridFilter.systemImage)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(filterButtonForegroundStyle)
         }
     }
@@ -853,7 +859,7 @@ struct PhotoGridView: View {
 
     private var mapButtonSymbol: some View {
         Image(systemName: isMapModeActive ? "square.grid.3x3.fill" : "map.fill")
-            .font(.system(size: 16, weight: .semibold))
+            .font(.system(size: 20, weight: .semibold))
             .foregroundStyle(.primary)
     }
 
@@ -883,7 +889,7 @@ struct PhotoGridView: View {
     private var captureButtonLabel: some View {
         if #available(iOS 26.0, *) {
             Image(systemName: "camera.fill")
-                .font(.system(size: 21, weight: .semibold))
+                .font(.system(size: 28, weight: .semibold))
                 .foregroundStyle(.primary)
                 .frame(width: 60, height: 60)
                 .background(
@@ -900,7 +906,7 @@ struct PhotoGridView: View {
                     .stroke(Color.white.opacity(0.5), lineWidth: 1)
 
                 Image(systemName: "camera.fill")
-                    .font(.system(size: 21, weight: .semibold))
+                    .font(.system(size: 28, weight: .semibold))
                     .foregroundStyle(.primary)
             }
             .frame(width: 60, height: 60)
