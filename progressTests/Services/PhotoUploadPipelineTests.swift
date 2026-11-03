@@ -285,6 +285,86 @@ struct PhotoUploadPipelineTests {
         #expect(fixture.cloud.uploadStateStore.entry(for: try #require(photo.id))?.state == .uploaded)
     }
 
+    @Test("Offline and unknown connectivity leave captures queued without consuming upload attempts", arguments: [
+        PhotoNetworkState.checking, .offline
+    ])
+    func waitsForConnectionBeforeClaiming(networkState: PhotoNetworkState) async throws {
+        let fixture = try Fixture(networkState: networkState)
+        defer { fixture.removeFiles() }
+        let photo = try await fixture.saveCapture(isLive: true)
+        let id = try #require(photo.id)
+        let original = try #require(fixture.cloud.uploadStateStore.entry(for: id))
+
+        for _ in 0..<3 {
+            await fixture.uploader.enqueuePendingUploads(expeditingRetries: true, forceRetryExpedite: true)
+            await fixture.uploader.processPendingUploadsDuringBackgroundTime()
+            #expect(try await fixture.uploader.uploadNextPendingPhotoForTesting(in: fixture.context) == false)
+        }
+
+        #expect(fixture.cloud.uploadStateStore.entry(for: id) == original)
+        #expect(fixture.recorder.roles.isEmpty)
+        #expect(fixture.cloud.storedPersistentAssetNames() == fixture.names(for: photo))
+    }
+
+    @Test("Reconnection automatically resumes offline retries, including a future backoff", .timeLimit(.minutes(1)), arguments: [-60.0, 3600.0])
+    func reconnectsWithoutWaitingForRetryTimer(retryDelay: TimeInterval) async throws {
+        let fixture = try Fixture(networkState: .offline)
+        defer { fixture.removeFiles() }
+        let photo = try await fixture.saveCapture()
+        let id = try #require(photo.id)
+        try fixture.cloud.uploadStateStore.update(photoID: id) {
+            $0.state = .failed
+            $0.attemptCount = 2
+            $0.retryAfter = Date().addingTimeInterval(retryDelay)
+            $0.errorMessage = "No internet connection"
+        }
+        let original = try #require(fixture.cloud.uploadStateStore.entry(for: id))
+        await fixture.uploader.start()
+
+        for _ in 0..<3 {
+            await fixture.uploader.enqueuePendingUploads(expeditingRetries: true, forceRetryExpedite: true)
+            await fixture.uploader.processPendingUploadsForTesting()
+        }
+        #expect(fixture.cloud.uploadStateStore.entry(for: id) == original)
+        #expect(fixture.recorder.roles.isEmpty)
+
+        let signals = AsyncStream<Void>.makeStream()
+        defer { signals.continuation.finish() }
+        fixture.recorder.onUpload = { _, _ in signals.continuation.finish() }
+        fixture.network.update(.connected)
+        for await _ in signals.stream {}
+        #expect(await fixture.uploader.waitUntilIdle())
+        #expect(fixture.cloud.uploadStateStore.entry(for: id)?.state == .uploaded)
+        #expect(fixture.cloud.uploadStateStore.entry(for: id)?.attemptCount == 3)
+        #expect(fixture.recorder.roles == [.still])
+    }
+
+    @Test("Losing connectivity during a Live upload stops remaining resources and other queued photos")
+    func stopsQueueWhenConnectionDrops() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let livePhoto = try await fixture.saveCapture(isLive: true)
+        let nextPhoto = try await fixture.saveCapture()
+        let liveID = try #require(livePhoto.id)
+        let nextID = try #require(nextPhoto.id)
+        fixture.recorder.onUpload = { _, _ in fixture.network.update(.offline) }
+
+        await fixture.uploader.processPendingUploadsForTesting()
+        let failed = try #require(fixture.cloud.uploadStateStore.entry(for: liveID))
+        #expect(failed.state == .failed)
+        #expect(failed.attemptCount == 1)
+        for _ in 0..<3 {
+            await fixture.uploader.enqueuePendingUploads(expeditingRetries: true, forceRetryExpedite: true)
+            await fixture.uploader.processPendingUploadsForTesting()
+        }
+
+        #expect(fixture.cloud.uploadStateStore.entry(for: liveID) == failed)
+        #expect(fixture.cloud.uploadStateStore.entry(for: nextID)?.state == .pending)
+        #expect(fixture.cloud.uploadStateStore.entry(for: nextID)?.attemptCount == 0)
+        #expect(fixture.recorder.roles == [.still])
+        #expect(fixture.cloud.storedPersistentAssetNames() == fixture.names(for: livePhoto).union(fixture.names(for: nextPhoto)))
+    }
+
     @Test("Deleting an in-flight capture preserves the CKAsset source until completion and stops remaining Live uploads")
     func deletionDrainsUploadBeforeRemoteCleanup() async throws {
         let fixture = try Fixture()
@@ -405,6 +485,7 @@ struct PhotoUploadPipelineTests {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("PhotoUploadPipelineTests-\(UUID())")
         let persistence = PersistenceController(inMemory: true)
         let recorder = Recorder()
+        let network: PhotoNetworkMonitor
         let image: UIImage
         let imageData: Data
         let videoData = Data("paired video original".utf8)
@@ -416,7 +497,8 @@ struct PhotoUploadPipelineTests {
         var context: NSManagedObjectContext { persistence.container.viewContext }
         var video: URL { root.appendingPathComponent("capture.mov") }
 
-        init() throws {
+        init(networkState: PhotoNetworkState = .connected) throws {
+            network = PhotoNetworkMonitor(initialState: networkState, monitorsNetwork: false)
             defaults = try #require(UserDefaults(suiteName: domain))
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
@@ -436,7 +518,8 @@ struct PhotoUploadPipelineTests {
                     try await recorder.onUpload?(name, role)
                 },
                 remoteAssetExistenceChecker: { _ in false },
-                offlineSettingsDefaults: defaults
+                offlineSettingsDefaults: defaults,
+                networkMonitor: network
             )
             storage = PhotoStorageService(cloudKitService: cloud)
             uploader = PhotoUploadService(cloudKitService: cloud, context: persistence.container.viewContext, cloudOperationsAvailable: { true })

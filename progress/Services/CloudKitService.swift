@@ -55,7 +55,7 @@ final class CloudKitService {
     private let assetUploader: (@MainActor @Sendable (String, UUID, PhotoAssetRole) async throws -> Void)?
     private let remoteAssetExistenceChecker: (@MainActor @Sendable (String) async throws -> Bool)?
     private let assetMetadataLoader: (@MainActor @Sendable (String) async throws -> PhotoAssetMetadata)?
-    private let network: PhotoNetworkMonitor?
+    let networkMonitor: PhotoNetworkMonitor?
     nonisolated let offlineStore: PhotoOfflineStore
     let offlineSettingsDefaults: UserDefaults
     let storageModeStore: PhotoStorageModeStore
@@ -100,7 +100,7 @@ final class CloudKitService {
         self.assetUploader = assetUploader
         self.remoteAssetExistenceChecker = remoteAssetExistenceChecker
         self.assetMetadataLoader = assetMetadataLoader
-        network = networkMonitor ?? (assetURLLoader == nil ? .shared : nil)
+        self.networkMonitor = networkMonitor ?? (assetURLLoader == nil ? .shared : nil)
         self.offlineSettingsDefaults = offlineSettingsDefaults
         self.storageModeStore = storageModeStore
         self.offlineStore = offlineStore ?? PhotoOfflineStore(directoryURL: stagingDirectoryURL.map {
@@ -229,7 +229,7 @@ final class CloudKitService {
         }
 
         if let assetURLLoader {
-            let sourceURL: URL = try await PhotoAssetDownload.run(network: network) { request in
+            let sourceURL: URL = try await PhotoAssetDownload.run(network: networkMonitor) { request in
                 let work = Task {
                     do { request.finish(.success(try await assetURLLoader(assetName))) }
                     catch { request.finish(.failure(error)) }
@@ -295,7 +295,7 @@ final class CloudKitService {
 
     func offlineAssetMetadata(named assetName: String, allowsCellularAccess: Bool) async throws -> PhotoAssetMetadata {
         if let assetMetadataLoader {
-            return try await PhotoAssetDownload.run(network: network) { request in
+            return try await PhotoAssetDownload.run(network: networkMonitor) { request in
                 let work = Task {
                     do { request.finish(.success(try await assetMetadataLoader(assetName))) }
                     catch { request.finish(.failure(error)) }
@@ -329,7 +329,7 @@ final class CloudKitService {
         operation.configuration.qualityOfService = .utility
         operation.configuration.timeoutIntervalForRequest = 15
         operation.configuration.timeoutIntervalForResource = 30
-        return try await PhotoAssetDownload.run(network: network) { request in
+        return try await PhotoAssetDownload.run(network: networkMonitor) { request in
             let completion = CloudKitAssetMetadataFetchOperation(request)
             operation.perRecordResultBlock = { id, result in completion.record(id.recordName, result: result) }
             operation.fetchRecordsResultBlock = { result in completion.finish(result) }
@@ -344,7 +344,7 @@ final class CloudKitService {
         operation.configuration.allowsCellularAccess = allowsCellularAccess
         operation.configuration.timeoutIntervalForRequest = 15
         operation.configuration.timeoutIntervalForResource = 30
-        return try await PhotoAssetDownload.run(network: network) { request in
+        return try await PhotoAssetDownload.run(network: networkMonitor) { request in
             operation.perRecordResultBlock = { _, result in request.finish(result) }
             operation.fetchRecordsResultBlock = { result in
                 if case .failure(let error) = result { request.finish(.failure(error)) }

@@ -5,6 +5,7 @@ import Observation
 @MainActor @Observable
 final class PhotoNetworkMonitor {
     static let shared = PhotoNetworkMonitor()
+    nonisolated static let stateDidChangeNotification = Notification.Name("PhotoNetworkMonitor.stateDidChange")
     private(set) var state: PhotoNetworkState
     @ObservationIgnored private let monitor: NWPathMonitor?
     @ObservationIgnored private var offlineHandlers: [UUID: @MainActor () -> Void] = [:]
@@ -13,7 +14,7 @@ final class PhotoNetworkMonitor {
         state = initialState
         monitor = monitorsNetwork ? NWPathMonitor() : nil
         monitor?.pathUpdateHandler = { [weak self] path in
-            let state: PhotoNetworkState = path.status == .unsatisfied ? .offline : .connected
+            let state: PhotoNetworkState = path.status == .satisfied ? .connected : .offline
             Task { @MainActor [weak self] in self?.update(state) }
         }
         monitor?.start(queue: DispatchQueue(label: "progress.photo-network"))
@@ -25,6 +26,7 @@ final class PhotoNetworkMonitor {
         if newState == .offline {
             for handler in Array(offlineHandlers.values) { handler() }
         }
+        NotificationCenter.default.post(name: Self.stateDidChangeNotification, object: self, userInfo: ["state": newState])
     }
 
     func requireConnection() async throws {

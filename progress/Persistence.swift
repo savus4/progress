@@ -197,6 +197,13 @@ final class PersistenceController: ObservableObject {
 
     private func prepareLoadedStore() {
         #if DEBUG && targetEnvironment(simulator)
+        do {
+            try PhotoMapUITestLibrary.seedIfRequested(in: container.viewContext)
+        } catch {
+            logger.error("map-ui-test-fixtures-failed error=\(error.localizedDescription, privacy: .public)")
+            loadState = .failed(error.localizedDescription)
+            return
+        }
         if container.persistentStoreDescriptions.first?.url?.lastPathComponent == "SimulatorExamples.sqlite",
            let resourceURL = SimulatorExampleLibrary.resourceURL {
             isLoadingStore = true

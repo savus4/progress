@@ -2393,8 +2393,6 @@ actor PhotoUploadService {
     private static let maxUploadAttemptCount: Int16 = .max
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "progress", category: "PhotoUpload")
-    private let pathMonitor = NWPathMonitor()
-    private let monitorQueue = DispatchQueue(label: "progress.photo-upload.monitor")
     private let injectedCloudKitService: CloudKitService?
     private let injectedContext: NSManagedObjectContext?
     private let cloudOperationsAvailable: @Sendable () async -> Bool
@@ -2405,6 +2403,7 @@ actor PhotoUploadService {
     private var activeUploadCount = 0
     private var idleWaiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
     private var availabilityObserver: NSObjectProtocol?
+    private var networkObserver: NSObjectProtocol?
     private var claimedPhotoIDs: Set<UUID> = []
     private var processingRequested = false
     private var retryTask: Task<Void, Never>?
@@ -2419,6 +2418,12 @@ actor PhotoUploadService {
         injectedCloudKitService = cloudKitService
         injectedContext = context
         self.cloudOperationsAvailable = cloudOperationsAvailable
+    }
+
+    isolated deinit {
+        retryTask?.cancel()
+        if let networkObserver { NotificationCenter.default.removeObserver(networkObserver) }
+        if let availabilityObserver { NotificationCenter.default.removeObserver(availabilityObserver) }
     }
 
     nonisolated static func registerBackgroundTask() {
@@ -2489,7 +2494,7 @@ actor PhotoUploadService {
         }
     }
 
-    func start() {
+    func start() async {
         guard !didStart else { return }
         didStart = true
 
@@ -2497,10 +2502,10 @@ actor PhotoUploadService {
             forName: ICloudAvailabilityMonitor.availabilityDidChangeNotification,
             object: nil,
             queue: nil
-        ) { _ in
+        ) { [weak self] _ in
             Task {
                 guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
-                await PhotoUploadService.shared.enqueuePendingUploads(
+                await self?.enqueuePendingUploads(
                     expeditingRetries: true,
                     forceRetryExpedite: true
                 )
@@ -2508,17 +2513,16 @@ actor PhotoUploadService {
             }
         }
 
-        pathMonitor.pathUpdateHandler = { path in
-            guard path.status == .satisfied else { return }
-            Task {
-                guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
-                await PhotoUploadService.shared.enqueuePendingUploads(
-                    expeditingRetries: true,
-                    forceRetryExpedite: false
-                )
+        if let network = await resolvedCloudKitService().networkMonitor {
+            networkObserver = NotificationCenter.default.addObserver(
+                forName: PhotoNetworkMonitor.stateDidChangeNotification,
+                object: network,
+                queue: nil
+            ) { [weak self] notification in
+                guard let state = notification.userInfo?["state"] as? PhotoNetworkState else { return }
+                Task { await self?.networkStateDidChange(state) }
             }
         }
-        pathMonitor.start(queue: monitorQueue)
 
         Task {
             guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
@@ -2537,15 +2541,34 @@ actor PhotoUploadService {
     func enqueuePendingUploads(expeditingRetries: Bool = false, forceRetryExpedite: Bool = false) async {
         guard await cloudOperationsAvailable() else { return }
         cancelProcessingRequested = false
+        Self.scheduleBackgroundProcessing()
+        guard await hasNetworkConnection() else {
+            retryTask?.cancel()
+            retryTask = nil
+            return
+        }
         if expeditingRetries {
             await expediteRetryableUploadsIfPossible(force: forceRetryExpedite)
         }
-        Self.scheduleBackgroundProcessing()
         _ = await processPendingUploads(maxCount: nil)
     }
 
+    private func hasNetworkConnection() async -> Bool {
+        let network = await resolvedCloudKitService().networkMonitor
+        return (await network?.state ?? .connected) == .connected
+    }
+
+    private func networkStateDidChange(_ state: PhotoNetworkState) async {
+        guard state == .connected else {
+            retryTask?.cancel()
+            retryTask = nil
+            return
+        }
+        await enqueuePendingUploads(expeditingRetries: true)
+    }
+
     func processPendingUploadsDuringBackgroundTime() async {
-        guard await ICloudAvailabilityMonitor.shared.isAvailableForCloudOperations else { return }
+        guard await cloudOperationsAvailable(), await hasNetworkConnection() else { return }
         cancelProcessingRequested = false
         await expediteRetryableUploadsIfPossible(force: false)
         _ = await processPendingUploads(maxCount: nil, schedulesRemainingWork: false)
@@ -2626,7 +2649,7 @@ actor PhotoUploadService {
                 }
             }
         }
-        guard await cloudOperationsAvailable() else { return await pendingUploadCount() }
+        guard await cloudOperationsAvailable(), await hasNetworkConnection() else { return await pendingUploadCount() }
         let uploadStore = await resolvedCloudKitService().uploadStateStore
         guard !uploadStore.allEntries().contains(where: { $0.state == .paused && $0.failureReason == .iCloudStorageFull }) else {
             return await pendingUploadCount()
@@ -2705,7 +2728,7 @@ actor PhotoUploadService {
            remaining > 0,
            !uploadStore.allEntries().contains(where: { $0.state == .paused && $0.failureReason == .iCloudStorageFull }),
            !cancelProcessingRequested, !Task.isCancelled,
-           await cloudOperationsAvailable() {
+           await cloudOperationsAvailable(), await hasNetworkConnection() {
             let retryDate = await nextRetryDate()
             Self.scheduleBackgroundProcessing(earliestBeginDate: retryDate)
             if let retryDate { scheduleRetry(at: retryDate) }
@@ -2771,6 +2794,7 @@ actor PhotoUploadService {
         role: PhotoAssetRole
     ) async throws {
         try Task.checkCancellation()
+        try await cloudKitService.networkMonitor?.requireConnection()
         guard !cancelProcessingRequested,
               let entry = cloudKitService.uploadStateStore.entry(for: photoID),
               entry.state == .uploading, entry.assetNames.contains(assetName) else { throw CancellationError() }
@@ -2837,6 +2861,7 @@ actor PhotoUploadService {
     ) async -> PendingPhotoUpload? {
         let cloud = await resolvedCloudKitService()
         let store = cloud.uploadStateStore
+        guard await hasNetworkConnection() else { return nil }
         guard !store.allEntries().contains(where: { $0.state == .paused && $0.failureReason == .iCloudStorageFull }) else { return nil }
         let stagedNames = await cloud.storedPersistentAssetNames()
         let ownedIDs = store.allEntries().filter { $0.state != .uploaded }.map { $0.photoID as NSUUID }
@@ -2862,6 +2887,7 @@ actor PhotoUploadService {
         }) ?? []
 
         for candidate in candidates {
+            guard await hasNetworkConnection(), !cancelProcessingRequested, !Task.isCancelled else { return nil }
             guard !attemptedPhotoIDs.contains(candidate.photoID), !claimedPhotoIDs.contains(candidate.photoID) else { continue }
             // Readable download caches are deliberately not proof of local ownership.
             let hasStagedOriginals = candidate.assetNames.isSubset(of: stagedNames)
@@ -3035,7 +3061,7 @@ actor PhotoUploadService {
     }
 
     private func expediteRetryableUploadsIfPossible(force: Bool) async {
-        if !force, pathMonitor.currentPath.status != .satisfied { return }
+        if !force, !(await hasNetworkConnection()) { return }
         let store = await resolvedCloudKitService().uploadStateStore
         for entry in await locallyOwnedUploads() where entry.state == .failed && entry.retryAfter != nil {
             try? store.update(photoID: entry.photoID) {

@@ -234,11 +234,14 @@ struct PhotoRouteMapView: View {
     }
 
     private var ageLegend: some View {
-        VStack(spacing: 6) {
-            Text("Year")
+        let legend = ageLegendContent
+
+        return VStack(spacing: 6) {
+            Text(legend.title)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("routeMapAgeLegendTitle")
 
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .fill(
@@ -251,12 +254,13 @@ struct PhotoRouteMapView: View {
                 .frame(width: 104, height: 8)
 
             HStack(spacing: 0) {
-                ForEach(Array(legendYearLabels.enumerated()), id: \.offset) { _, year in
-                    Text(year)
+                ForEach(Array(legend.labels.enumerated()), id: \.offset) { index, label in
+                    Text(label)
                         .font(.caption2.weight(.semibold))
                         .monospacedDigit()
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity)
+                        .accessibilityIdentifier("routeMapAgeLegendLabel\(index)")
                 }
             }
         }
@@ -269,6 +273,7 @@ struct PhotoRouteMapView: View {
         }
         .shadow(color: .black.opacity(0.16), radius: 12, y: 5)
         .frame(width: 126)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Photo age legend")
         .accessibilityIdentifier("routeMapAgeLegend")
     }
@@ -758,22 +763,27 @@ struct PhotoRouteMapView: View {
         return normalized
     }
 
-    private var legendYearLabels: [String] {
-        let datedItems = mapItems.filter { $0.captureDate != nil }
-        guard !datedItems.isEmpty else { return ["--", "--", "--"] }
+    private var ageLegendContent: (title: String, labels: [String]) {
+        let dates = mapItems.compactMap(\.captureDate)
+        guard let firstDate = dates.first, let lastDate = dates.last else {
+            return ("Year", ["--", "--", "--"])
+        }
+
+        let showsMonths = Calendar.current.isDate(firstDate, equalTo: lastDate, toGranularity: .year)
 
         let indices = [
             0,
-            max((datedItems.count - 1) / 2, 0),
-            max(datedItems.count - 1, 0)
+            (dates.count - 1) / 2,
+            dates.count - 1
         ]
-        return indices.map { index in
-            guard datedItems.indices.contains(index),
-                  let date = datedItems[index].captureDate else {
-                return "--"
+        let labels = indices.map { index in
+            let date = dates[index]
+            if showsMonths {
+                return date.formatted(.dateTime.month(.abbreviated))
             }
             return Self.twoDigitYearFormatter.string(from: date)
         }
+        return (showsMonths ? "Month" : "Year", labels)
     }
 
     private static let timelineAgeStops: [(label: String, color: UIColor)] = [

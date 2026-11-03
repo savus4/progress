@@ -211,7 +211,8 @@ struct LegacyOriginalAndUploadOwnershipTests {
             stagingDirectoryURL: fixture.root.appendingPathComponent("Staging", isDirectory: true),
             temporaryReadableAssetsDirectoryURL: fixture.root.appendingPathComponent("Readable", isDirectory: true),
             legacyAssetDirectoryURLs: [], uploadStateStore: reloaded,
-            assetUploader: { name, _, role in try recorder.upload(name: name, role: role) }
+            assetUploader: { name, _, role in try recorder.upload(name: name, role: role) },
+            networkMonitor: PhotoNetworkMonitor(initialState: .connected, monitorsNetwork: false)
         )
         let restartedUploader = PhotoUploadService(cloudKitService: restartedCloud)
 

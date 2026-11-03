@@ -47,7 +47,8 @@ struct PhotoUploadRecoveryTests {
             uploadStateStore: reloaded,
             assetUploader: { [recorder = fixture.recorder] name, _, _ in recorder.uploadedNames.append(name) },
             remoteAssetExistenceChecker: { _ in false },
-            offlineSettingsDefaults: fixture.defaults
+            offlineSettingsDefaults: fixture.defaults,
+            networkMonitor: PhotoNetworkMonitor(initialState: .connected, monitorsNetwork: false)
         )
         let restartedUploader = PhotoUploadService(cloudKitService: restartedCloud)
 

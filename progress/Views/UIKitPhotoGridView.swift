@@ -353,6 +353,7 @@ struct PhotoGridCenteringRequest: Equatable {
 }
 
 struct UIKitPhotoGridView: UIViewControllerRepresentable {
+    @State private var network = PhotoNetworkMonitor.shared
     let dataController: PhotoGridDataController
     let changeToken: Int
     let centeringRequest: PhotoGridCenteringRequest?
@@ -388,6 +389,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             centeringRequest: centeringRequest,
             captureTransition: captureTransition,
             showsUploadStatus: showsUploadStatus,
+            networkState: network.state,
             isSelectionMode: isSelectionMode,
             selectedPhotoIDs: selectedPhotoIDs,
             hiddenPhotoObjectID: hiddenPhotoObjectID
@@ -473,6 +475,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var items: [UIKitPhotoGridItem] = []
     private var itemsByID: [NSManagedObjectID: UIKitPhotoGridItem] = [:]
     private var showsUploadStatus = true
+    private var networkState: PhotoNetworkState = .connected
     private var isSelectionMode = false
     private var selectedPhotoIDs: Set<NSManagedObjectID> = []
     private var hiddenPhotoObjectID: NSManagedObjectID?
@@ -707,6 +710,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         centeringRequest: PhotoGridCenteringRequest?,
         captureTransition: PhotoGridCaptureTransition? = nil,
         showsUploadStatus: Bool,
+        networkState: PhotoNetworkState = .connected,
         isSelectionMode: Bool,
         selectedPhotoIDs: Set<NSManagedObjectID>,
         hiddenPhotoObjectID: NSManagedObjectID? = nil
@@ -716,9 +720,11 @@ final class PhotoGridCollectionViewController: UIViewController {
         let didChangeItems = !isHoldingCaptureSnapshot && (currentChangeToken != changeToken || isPreparingCapture)
         let didChangeSelectionMode = self.isSelectionMode != isSelectionMode
         let didChangeUploadStatusVisibility = self.showsUploadStatus != showsUploadStatus
+        let didChangeNetworkState = self.networkState != networkState
         let didChangeHiddenPhoto = self.hiddenPhotoObjectID != hiddenPhotoObjectID
 
         self.showsUploadStatus = showsUploadStatus
+        self.networkState = networkState
         self.isSelectionMode = isSelectionMode
         self.selectedPhotoIDs = selectedPhotoIDs
         self.hiddenPhotoObjectID = hiddenPhotoObjectID
@@ -754,7 +760,7 @@ final class PhotoGridCollectionViewController: UIViewController {
 
         keepCaptureGridAtTop()
         synchronizeSelection(animated: false)
-        if didChangeItems || didChangeSelectionMode || didChangeUploadStatusVisibility || didChangeHiddenPhoto {
+        if didChangeItems || didChangeSelectionMode || didChangeUploadStatusVisibility || didChangeNetworkState || didChangeHiddenPhoto {
             refreshVisibleCells()
         }
         if captureTransition == nil {
@@ -771,6 +777,7 @@ final class PhotoGridCollectionViewController: UIViewController {
             cell.configure(
                 with: item,
                 showsUploadStatus: self.showsUploadStatus,
+                networkState: self.networkState,
                 isSelectionMode: self.isSelectionMode,
                 isSelected: self.selectedPhotoIDs.contains(objectID),
                 isHiddenForTransition: self.hiddenPhotoObjectID == objectID
@@ -823,6 +830,7 @@ final class PhotoGridCollectionViewController: UIViewController {
         cell.configure(
             with: item,
             showsUploadStatus: showsUploadStatus,
+            networkState: networkState,
             isSelectionMode: isSelectionMode,
             isSelected: selectedPhotoIDs.contains(item.objectID),
             isHiddenForTransition: hiddenPhotoObjectID == item.objectID
@@ -1515,6 +1523,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                 cell.configure(
                     with: items[indexPath.item],
                     showsUploadStatus: showsUploadStatus,
+                    networkState: networkState,
                     isSelectionMode: true,
                     isSelected: true,
                     isHiddenForTransition: hiddenPhotoObjectID == objectID
@@ -1544,6 +1553,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             cell.configure(
                 with: items[indexPath.item],
                 showsUploadStatus: showsUploadStatus,
+                networkState: networkState,
                 isSelectionMode: true,
                 isSelected: false,
                 isHiddenForTransition: hiddenPhotoObjectID == objectID
@@ -1660,6 +1670,7 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
         gridCell.configure(
             with: item,
             showsUploadStatus: showsUploadStatus,
+            networkState: networkState,
             isSelectionMode: isSelectionMode,
             isSelected: selectedPhotoIDs.contains(item.objectID),
             isHiddenForTransition: hiddenPhotoObjectID == item.objectID
@@ -1790,6 +1801,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
     func configure(
         with item: UIKitPhotoGridItem,
         showsUploadStatus: Bool,
+        networkState: PhotoNetworkState = .connected,
         isSelectionMode: Bool,
         isSelected: Bool,
         isHiddenForTransition: Bool = false
@@ -1810,7 +1822,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         accessibilityHint = isSelectionMode
             ? (isSelected ? "Deselects this photo" : "Selects this photo")
             : "Opens this photo"
-        accessibilityValue = accessibilityValue(for: item, showsUploadStatus: showsUploadStatus)
+        accessibilityValue = accessibilityValue(for: item, showsUploadStatus: showsUploadStatus, networkState: networkState)
 
         selectionBadgeImageView.isHidden = !isSelectionMode
         if isSelectionMode {
@@ -1825,6 +1837,10 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         let badge: (text: String, systemName: String, backgroundColor: UIColor, foregroundColor: UIColor)?
         if showsUploadStatus {
             switch item.uploadState {
+            case .pending where networkState != .connected,
+                 .uploading where networkState != .connected,
+                 .failed where networkState != .connected:
+                badge = ("Waiting for connection", "wifi.slash", UIColor.black.withAlphaComponent(0.62), .white)
             case .pending, .uploading:
                 badge = ("Uploading", "icloud.and.arrow.up", UIColor.black.withAlphaComponent(0.62), .white)
             case .failed:
@@ -1947,7 +1963,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         ])
     }
 
-    private func accessibilityValue(for item: UIKitPhotoGridItem, showsUploadStatus: Bool) -> String? {
+    private func accessibilityValue(for item: UIKitPhotoGridItem, showsUploadStatus: Bool, networkState: PhotoNetworkState) -> String? {
         var values: [String] = []
         if item.isHearted {
             values.append("Favorite")
@@ -1960,6 +1976,10 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         }
         if showsUploadStatus {
             switch item.uploadState {
+            case .pending where networkState != .connected,
+                 .uploading where networkState != .connected,
+                 .failed where networkState != .connected:
+                values.append("Waiting for connection")
             case .pending, .uploading:
                 values.append("Uploading")
             case .failed:
