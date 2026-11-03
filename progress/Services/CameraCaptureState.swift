@@ -10,6 +10,7 @@ nonisolated struct CameraCaptureState: Sendable {
     let captureID: Int64
     let generation: UUID
     let requestedMovieURL: URL?
+    private(set) var phase: CameraCapturePhase?
     private var imageData: Data?
     private var videoURL: URL?
     private var errorMessage: String?
@@ -19,6 +20,17 @@ nonisolated struct CameraCaptureState: Sendable {
         self.captureID = captureID
         self.generation = generation
         self.requestedMovieURL = requestedMovieURL
+        phase = requestedMovieURL == nil ? .takingPhoto : .recordingLivePhoto
+    }
+
+    mutating func didCapturePhoto(captureID: Int64) {
+        guard self.captureID == captureID, !didFinish, phase == .takingPhoto else { return }
+        phase = .processingCapture
+    }
+
+    mutating func didFinishRecordingLivePhoto(captureID: Int64) {
+        guard self.captureID == captureID, !didFinish, phase == .recordingLivePhoto else { return }
+        phase = .processingCapture
     }
 
     mutating func recordPhoto(data: Data?, captureID: Int64, errorMessage: String?) {
@@ -36,6 +48,7 @@ nonisolated struct CameraCaptureState: Sendable {
     mutating func finish(captureID: Int64, errorMessage: String?) -> Completion? {
         guard self.captureID == captureID, !didFinish else { return nil }
         didFinish = true
+        phase = nil
         return Completion(
             imageData: imageData, videoURL: imageData == nil ? nil : videoURL,
             errorMessage: imageData == nil ? (self.errorMessage ?? errorMessage ?? "The camera didn’t return a photo.") : nil

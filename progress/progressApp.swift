@@ -29,6 +29,9 @@ struct progressApp: App {
         if ProcessInfo.processInfo.environment["UI_TEST_RESET_TIMELINES"] == "1" {
             UserDefaults.standard.removeObject(forKey: TimelineSelectionStore.selectedTimelineKey)
         }
+        if ProcessInfo.processInfo.environment["UI_TEST_RESET_CAMERA_GUIDE_INTRODUCTION"] == "1" {
+            UserDefaults.standard.removeObject(forKey: CameraPreferenceKey.hasSeenGuideIntroduction)
+        }
         #endif
     }
 

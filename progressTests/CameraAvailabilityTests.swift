@@ -67,6 +67,19 @@ struct CameraAvailabilityTests {
             #expect(camera.capturedImage == nil)
             #expect(camera.capturedImageData == nil)
             #expect(camera.livePhotoCapture == nil)
+            #expect(camera.capturePhase == nil)
         }
+    }
+
+    @Test("Discarding a capture releases the shutter and ignores the old completion", .timeLimit(.minutes(1)))
+    func discardedCaptureDoesNotBlockNextAttempt() async {
+        let camera = CameraService()
+        camera.capturePhoto(withLivePhoto: false)
+        camera.discardCapture()
+        camera.capturePhoto(withLivePhoto: false)
+        for await _ in camera.$captureFinished.first(where: { $0 > 0 }).values { break }
+        #expect(camera.captureFinished == 1)
+        #expect(camera.capturePhase == nil)
+        #expect(camera.captureErrorMessage != nil)
     }
 }

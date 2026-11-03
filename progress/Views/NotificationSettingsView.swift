@@ -11,7 +11,6 @@ struct NotificationSettingsView: View {
     @State private var timelines = TimelineSelectionStore.shared
     @State private var timelineEditor: TimelineEditorSheet.Mode?
     @State private var showsTipSheet = false
-    @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
     @AppStorage(IntroductionPreferences.completedKey) private var hasCompletedIntroduction = false
 
     @State private var isRetryingUploads = false
@@ -73,14 +72,7 @@ struct NotificationSettingsView: View {
                     .accessibilityIdentifier("photoStorageSettingsLink")
                 }
             } secondary: {
-                Section("Camera") {
-                    Toggle("Hirs-Mode", isOn: $isHirsModeEnabled)
-                        .accessibilityIdentifier("hirsModeToggle")
-
-                    Text("Shows the photo preview mirrored, matching the camera preview. Saved photos stay unchanged.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                CameraMirroringSettingsSection()
 
                 TipJarSection { showsTipSheet = true }
             }

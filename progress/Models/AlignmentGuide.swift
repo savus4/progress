@@ -1,4 +1,4 @@
-import Foundation
+    import Foundation
 
 struct AlignmentGuide: Codable {
     var eyeLinePosition: CGFloat // 0.0 to 1.0, from top

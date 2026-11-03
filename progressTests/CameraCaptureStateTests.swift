@@ -3,6 +3,41 @@ import Testing
 @testable import progress
 
 struct CameraCaptureStateTests {
+    @Test("Still exposure ends before processing, and completed captures cannot regain a phase")
+    func stillPhasesFollowCaptureCallbacks() throws {
+        var state = CameraCaptureState(captureID: 42)
+        #expect(state.phase == .takingPhoto)
+        state.didCapturePhoto(captureID: 41)
+        #expect(state.phase == .takingPhoto)
+        state.didCapturePhoto(captureID: 42)
+        #expect(state.phase == .processingCapture)
+        state.recordPhoto(data: Data("still".utf8), captureID: 42, errorMessage: nil)
+        try #require(state.finish(captureID: 42, errorMessage: nil) != nil)
+        state.didCapturePhoto(captureID: 42)
+        #expect(state.phase == nil)
+    }
+
+    @Test("Live recording ends before file processing, independently of still delivery",
+          arguments: [false, true])
+    func livePhasesFollowRecordingCallbacks(photoArrivesFirst: Bool) throws {
+        let movie = URL(fileURLWithPath: "/tmp/live-capture.mov")
+        var state = CameraCaptureState(captureID: 42, requestedMovieURL: movie)
+        #expect(state.phase == .recordingLivePhoto)
+        state.didCapturePhoto(captureID: 42)
+        if photoArrivesFirst { state.recordPhoto(data: Data("still".utf8), captureID: 42, errorMessage: nil) }
+        #expect(state.phase == .recordingLivePhoto)
+        state.didFinishRecordingLivePhoto(captureID: 41)
+        #expect(state.phase == .recordingLivePhoto)
+        state.didFinishRecordingLivePhoto(captureID: 42)
+        #expect(state.phase == .processingCapture)
+        if !photoArrivesFirst { state.recordPhoto(data: Data("still".utf8), captureID: 42, errorMessage: nil) }
+        state.recordVideo(at: movie, captureID: 42, errorMessage: nil)
+        #expect(state.phase == .processingCapture)
+        try #require(state.finish(captureID: 42, errorMessage: nil) != nil)
+        state.didFinishRecordingLivePhoto(captureID: 42)
+        #expect(state.phase == nil)
+    }
+
     @Test("Still and Live video callbacks can arrive in either order", arguments: [false, true])
     func pairsCallbacks(videoFirst: Bool) throws {
         var state = CameraCaptureState(captureID: 42)

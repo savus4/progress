@@ -6,38 +6,6 @@ import ImageIO
 import UniformTypeIdentifiers
 
 struct ExperimentalCameraView: View {
-    private enum CaptureFeedbackStage {
-        case recordingLivePhoto
-        case processingCapture
-
-        var title: String {
-            switch self {
-            case .recordingLivePhoto:
-                return "Recording Live Photo"
-            case .processingCapture:
-                return "Processing Capture"
-            }
-        }
-
-        var detail: String {
-            switch self {
-            case .recordingLivePhoto:
-                return "Hold steady for a moment."
-            case .processingCapture:
-                return "Preparing your preview."
-            }
-        }
-
-        var symbolName: String {
-            switch self {
-            case .recordingLivePhoto:
-                return "livephoto"
-            case .processingCapture:
-                return "hourglass"
-            }
-        }
-    }
-
     @State private var storage = PhotoStorageCoordinator.shared
     @StateObject private var cameraService = CameraService()
     @StateObject private var locationService = LocationService()
@@ -61,6 +29,8 @@ struct ExperimentalCameraView: View {
         TimelineCameraPreferences.livePhotosEnabled(for: timelineID, in: timelines)
     }
     @AppStorage(CameraPreferenceKey.hirsModeEnabled) private var isHirsModeEnabled = false
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var isHirsModeProEnabled = false
+    @AppStorage(CameraPreferenceKey.hasSeenGuideIntroduction) private var hasSeenGuideIntroduction = false
 
     let gridTargetFrameInGlobal: CGRect?
     let timelineID: UUID
@@ -98,6 +68,7 @@ struct ExperimentalCameraView: View {
     }
 
     @State private var isEditingGuides = false
+    @State private var showsGuideIntroduction = false
     @State private var isSaving = false
     @State private var saveHaptics = CaptureSaveHaptics()
     @State private var isCameraVisible = false
@@ -113,9 +84,9 @@ struct ExperimentalCameraView: View {
     @State private var isCapturing = false
     @State private var livePhotoPreferenceAtCapture: Bool?
     @State private var cameraPositionAtCapture: CameraPosition?
+    @State private var captureMirroring: CameraMirroring?
     @State private var isAnimatingPreviewToGrid = false
     @State private var previewDismissOffset: CGFloat = 0
-    @State private var captureFeedbackStage: CaptureFeedbackStage?
     @State private var draftEyeLinePosition: Double?
     @State private var draftMouthLinePosition: Double?
     @State private var draftGuidesVisible: Bool?
@@ -125,6 +96,8 @@ struct ExperimentalCameraView: View {
     @State private var didInjectSaveFailure = false
     #endif
     private let processInfo = ProcessInfo.processInfo
+
+    private var captureFeedbackStage: CameraCapturePhase? { cameraService.capturePhase }
 
     private var guideInteractionDisabled: Bool {
         isCapturing || isSaving || showingCapturePreview || captureFeedbackStage != nil
@@ -170,19 +143,16 @@ struct ExperimentalCameraView: View {
                             .clipped()
                         }
 
-                        if areGuidesVisible {
+                        if areGuidesVisible || showsGuideIntroduction {
                             ExperimentalGuidesOverlay(
                                 eyeLinePosition: eyeLinePositionBinding,
                                 mouthLinePosition: mouthLinePositionBinding,
                                 isEditingGuides: $isEditingGuides,
+                                showsIntroductionLabels: showsGuideIntroduction,
                                 isInteractionDisabled: guideInteractionDisabled
                             )
                             .frame(width: previewWidth, height: actualPreviewHeight)
                             .allowsHitTesting(isEditingGuides && !guideInteractionDisabled)
-                        }
-
-                        if let captureFeedbackStage, !showingCapturePreview {
-                            captureStatusOverlay(for: captureFeedbackStage)
                         }
 
                         if shouldShowLivePhotoToggle {
@@ -201,6 +171,17 @@ struct ExperimentalCameraView: View {
                             .transition(.opacity)
                         }
                     }
+                    .frame(width: previewWidth, height: actualPreviewHeight)
+                    .overlay(alignment: .bottom) {
+                        if let captureFeedbackStage, !showingCapturePreview {
+                            CameraCaptureStatusView(phase: captureFeedbackStage)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 16)
+                                .transition(.opacity)
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("experimentalCameraPreview")
                     .frame(maxWidth: .infinity)
                     .frame(height: previewHeight)
                     .background(Color.black)
@@ -218,7 +199,7 @@ struct ExperimentalCameraView: View {
                         image: pendingCaptureImage,
                         livePhotoImageURL: pendingLivePhotoImageURL,
                         livePhotoVideoURL: pendingLivePhotoVideoURL,
-                        isMirrored: isHirsModeEnabled,
+                        mirroring: captureMirroring ?? currentMirroring,
                         isSaving: isSaving,
                         savingDetail: storage.isLocalOnly ? "Saving photo on this device." : "Saving photo for iCloud sync.",
                         isAnimatingToGrid: isAnimatingPreviewToGrid,
@@ -268,7 +249,7 @@ struct ExperimentalCameraView: View {
             if usesMockCapture {
                 if !didPresentMockCapture {
                     didPresentMockCapture = true
-                    presentMockCapturePreview()
+                    if !CameraService.simulatesCaptureFeedback { presentMockCapturePreview() }
                 }
                 return
             }
@@ -294,6 +275,9 @@ struct ExperimentalCameraView: View {
             }
         }
         .onAppear { isCameraVisible = true }
+        .task(id: canShowGuideIntroduction) {
+            await showGuideIntroductionIfNeeded()
+        }
         .onDisappear {
             isCameraVisible = false
             saveHaptics.cancel()
@@ -325,7 +309,6 @@ struct ExperimentalCameraView: View {
             livePhotoPreferenceAtCapture = nil
             cameraPositionAtCapture = nil
             isCapturing = false
-            captureFeedbackStage = nil
             if let capture = cameraService.livePhotoCapture {
                 pendingCaptureImage = capture.image
                 pendingCaptureImageData = capture.imageData
@@ -352,16 +335,12 @@ struct ExperimentalCameraView: View {
         }
         .onChange(of: cameraService.captureFinished) { _, _ in
             isCapturing = false
-            if !showingCapturePreview, cameraService.captureErrorMessage == nil {
-                captureFeedbackStage = .processingCapture
-            }
         }
         .onChange(of: cameraService.captureErrorMessage) { _, message in
             guard message != nil else { return }
             livePhotoPreferenceAtCapture = nil
             cameraPositionAtCapture = nil
             isCapturing = false
-            captureFeedbackStage = nil
             showingCaptureError = true
         }
         .alert("Unable to Take Photo", isPresented: $showingCaptureError) {
@@ -510,22 +489,11 @@ struct ExperimentalCameraView: View {
                                 .accessibilityLabel("Done Editing Guides")
                             }
                         } else {
-                            Button(action: beginGuideEditing) {
-                                VStack(spacing: 4) {
-                                    Image(systemName: areGuidesVisible ? "eye" : "eye.slash")
-                                        .font(.title3)
-                                    Text("Guides")
-                                        .font(.caption2)
-                                        .fontWeight(.semibold)
-                                }
-                                .foregroundStyle(.white)
-                                .frame(width: 64, height: 64)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                        .fill(Color.white.opacity(0.08))
-                                )
-                            }
-                            .accessibilityLabel("Edit Alignment Guides")
+                            CameraGuidesButton(
+                                guidesVisible: areGuidesVisible || showsGuideIntroduction,
+                                showsIntroduction: showsGuideIntroduction,
+                                action: beginGuideEditing
+                            )
                             .disabled(guideInteractionDisabled)
                         }
                     }
@@ -544,6 +512,19 @@ struct ExperimentalCameraView: View {
 
     private var areGuidesVisible: Bool {
         draftGuidesVisible ?? alignmentGuideStore.isVisible
+    }
+
+    private var canShowGuideIntroduction: Bool {
+        isCameraVisible && scenePhase == .active && !isEditingGuides && !guideInteractionDisabled
+            && (usesMockCapture ? didPresentMockCapture : cameraService.isReadyForCapture)
+    }
+
+    private func showGuideIntroductionIfNeeded() async {
+        guard canShowGuideIntroduction, !hasSeenGuideIntroduction else { return }
+        hasSeenGuideIntroduction = true
+        showsGuideIntroduction = true
+        defer { showsGuideIntroduction = false }
+        try? await Task.sleep(for: .seconds(10))
     }
 
     private var showsReferencePhoto: Bool {
@@ -706,7 +687,7 @@ struct ExperimentalCameraView: View {
     private func beginGuideEditing() {
         draftEyeLinePosition = alignmentGuideStore.eyeLinePosition
         draftMouthLinePosition = alignmentGuideStore.mouthLinePosition
-        draftGuidesVisible = alignmentGuideStore.isVisible
+        draftGuidesVisible = alignmentGuideStore.isVisible || showsGuideIntroduction
         draftShowsReferencePhoto = alignmentGuideStore.showsReferencePhoto
         isEditingGuides = true
     }
@@ -742,7 +723,9 @@ struct ExperimentalCameraView: View {
     private func capturePhoto() {
         guard !controlsDisabled else { return }
 
-        if usesMockCapture {
+        let mirroring = currentMirroring
+        captureMirroring = mirroring
+        if usesMockCapture && !CameraService.simulatesCaptureFeedback {
             presentMockCapturePreview()
             return
         }
@@ -750,45 +733,31 @@ struct ExperimentalCameraView: View {
         livePhotoPreferenceAtCapture = isLivePhotoCaptureEnabled
         cameraPositionAtCapture = preferredCameraPosition
         isCapturing = true
-        #if targetEnvironment(simulator)
-        captureFeedbackStage = .processingCapture
-        #else
-        captureFeedbackStage = shouldCaptureLivePhoto ? .recordingLivePhoto : .processingCapture
-        #endif
         let captureLocation = locationService.currentLocation
         #if targetEnvironment(simulator)
-        cameraService.capturePhoto(withLivePhoto: false, location: captureLocation)
+        cameraService.capturePhoto(withLivePhoto: false, location: captureLocation, mirrored: mirroring.savesMirrored)
         #else
-        cameraService.capturePhoto(withLivePhoto: shouldCaptureLivePhoto, location: captureLocation)
+        cameraService.capturePhoto(withLivePhoto: shouldCaptureLivePhoto, location: captureLocation, mirrored: mirroring.savesMirrored)
         #endif
     }
 
-    private func presentMockCapturePreview() {
-        let size = CGSize(width: 1200, height: 1600)
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let image = renderer.image { context in
-            UIColor.systemYellow.setFill()
-            context.fill(CGRect(origin: .zero, size: size))
+    private var currentMirroring: CameraMirroring {
+        CameraMirroring(hirsModeEnabled: isHirsModeEnabled, hirsModeProEnabled: isHirsModeProEnabled)
+    }
 
-            let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.alignment = .center
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.boldSystemFont(ofSize: 96),
-                .foregroundColor: UIColor.black,
-                .paragraphStyle: paragraphStyle
-            ]
-            let text = "UI TEST"
-            let rect = CGRect(x: 0, y: size.height / 2 - 60, width: size.width, height: 120)
-            text.draw(in: rect, withAttributes: attributes)
+    private func presentMockCapturePreview() {
+        let mirroring = currentMirroring
+        captureMirroring = mirroring
+        guard let capture = CameraService.makeMockCapture(mirrored: mirroring.savesMirrored) else {
+            return
         }
 
-        pendingCaptureImage = image
-        pendingCaptureImageData = image.jpegData(compressionQuality: 0.95)
+        pendingCaptureImage = capture.image
+        pendingCaptureImageData = capture.imageData
         pendingLivePhotoImageData = nil
         pendingLivePhotoImageURL = nil
         pendingLivePhotoVideoURL = nil
         isCapturing = false
-        captureFeedbackStage = nil
         isAnimatingPreviewToGrid = false
         withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.32, dampingFraction: 0.88)) {
             showingCapturePreview = true
@@ -798,7 +767,6 @@ struct ExperimentalCameraView: View {
     private func retakeCapture() {
         guard showingCapturePreview, !isSaving else { return }
         isAnimatingPreviewToGrid = false
-        captureFeedbackStage = nil
         resumeCameraForPreviewDismissal()
         withAnimation(.easeOut(duration: 0.32)) {
             showingCapturePreview = false
@@ -811,6 +779,7 @@ struct ExperimentalCameraView: View {
     private func clearPendingCapture() {
         livePhotoPreferenceAtCapture = nil
         cameraPositionAtCapture = nil
+        captureMirroring = nil
         pendingCaptureImage = nil
         pendingCaptureImageData = nil
         pendingLivePhotoImageData = nil
@@ -849,43 +818,6 @@ struct ExperimentalCameraView: View {
 
     private func dismissCapturePreview() {
         retakeCapture()
-    }
-
-    @ViewBuilder
-    private func captureStatusOverlay(for stage: CaptureFeedbackStage) -> some View {
-        VStack {
-            Spacer()
-
-            HStack(spacing: 12) {
-                Image(systemName: stage.symbolName)
-                    .font(.title3)
-                    .symbolEffect(.pulse, options: .repeating)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(stage.title)
-                        .font(.subheadline.weight(.semibold))
-                    Text(stage.detail)
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.72))
-                }
-
-                Spacer()
-
-                ProgressView()
-                    .tint(.white)
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(.white.opacity(0.1), lineWidth: 1)
-            )
-            .padding(.horizontal, 20)
-            .padding(.bottom, 28)
-        }
-        .transition(.opacity)
     }
 
     private func confirmSave() {
@@ -1015,6 +947,7 @@ struct ExperimentalGuidesOverlay: View {
     @Binding var eyeLinePosition: Double
     @Binding var mouthLinePosition: Double
     @Binding var isEditingGuides: Bool
+    let showsIntroductionLabels: Bool
     let isInteractionDisabled: Bool
 
     private let minGap: Double = 0.05
@@ -1049,7 +982,9 @@ struct ExperimentalGuidesOverlay: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Eye Alignment Guide")
                     .accessibilityValue(eyeLinePosition.formatted(.percent.precision(.fractionLength(0))))
-                    .accessibilityHint("Position from the top. Adjusting moves both guides symmetrically.")
+                    .accessibilityHint(isEditingGuides
+                        ? "Position from the top. Adjusting moves both guides symmetrically."
+                        : "Align your eyes here. Use Guides to adjust alignment.")
                     .accessibilityAdjustableAction { direction in
                         guard isEditingGuides, !isInteractionDisabled else { return }
                         switch direction {
@@ -1076,7 +1011,9 @@ struct ExperimentalGuidesOverlay: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Mouth Alignment Guide")
                     .accessibilityValue(mouthLinePosition.formatted(.percent.precision(.fractionLength(0))))
-                    .accessibilityHint("Position from the top. Adjusting moves both guides symmetrically.")
+                    .accessibilityHint(isEditingGuides
+                        ? "Position from the top. Adjusting moves both guides symmetrically."
+                        : "Align your mouth here. Use Guides to adjust alignment.")
                     .accessibilityAdjustableAction { direction in
                         guard isEditingGuides, !isInteractionDisabled else { return }
                         switch direction {
@@ -1089,7 +1026,7 @@ struct ExperimentalGuidesOverlay: View {
             }
             .padding(.horizontal, 18)
         }
-        .accessibilityHidden(!isEditingGuides)
+        .accessibilityHidden(!isEditingGuides && !showsIntroductionLabels)
     }
 
     private func guideLine(color: Color, width: CGFloat) -> some View {
@@ -1116,16 +1053,18 @@ struct ExperimentalGuidesOverlay: View {
                 )
                 .frame(width: width, height: 1.5)
 
-            if isEditingGuides {
+            if isEditingGuides || showsIntroductionLabels {
                 HStack(spacing: 6) {
                     Image(systemName: label == "Eyes" ? "eye" : "mouth")
                         .font(.caption2)
                     Text(label)
                         .font(.caption2)
                         .fontWeight(.semibold)
-                    Image(systemName: "arrow.up.and.down")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.9))
+                    if isEditingGuides {
+                        Image(systemName: "arrow.up.and.down")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
                 }
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)

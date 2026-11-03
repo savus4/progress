@@ -4,6 +4,7 @@ import UIKit
 import Combine
 import CoreLocation
 import ImageIO
+import UniformTypeIdentifiers
 
 @MainActor
 final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
@@ -23,6 +24,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var canSwitchCamera = false
     @Published private(set) var isConfiguringCamera = false
     @Published private(set) var captureErrorMessage: String?
+    @Published private(set) var capturePhase: CameraCapturePhase?
     private var captureInFlight = false
     private var captureGeneration = UUID()
     
@@ -218,13 +220,18 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
+    func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil, mirrored: Bool = false) {
         guard !captureInFlight else { return }
         captureInFlight = true
         captureErrorMessage = nil
         captureGeneration = UUID()
+        #if targetEnvironment(simulator)
+        capturePhase = .takingPhoto
+        #else
+        capturePhase = withLivePhoto && isLivePhotoCaptureSupported ? .recordingLivePhoto : .takingPhoto
+        #endif
         if usesMockCapture {
-            simulateMockCapture(location: location)
+            simulateMockCapture(mirrored: mirrored)
             return
         }
 
@@ -240,6 +247,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             self?.capturePhotoOnSessionQueue(
                 withLivePhoto: withLivePhoto,
                 location: locationSnapshot,
+                mirrored: mirrored,
                 generation: generation
             )
         }
@@ -248,21 +256,29 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     nonisolated private func capturePhotoOnSessionQueue(
         withLivePhoto: Bool,
         location: CameraLocation?,
+        mirrored: Bool,
         generation: UUID
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
 
         // AVFoundation raises an Objective-C exception for a missing/inactive
         // connection; Swift error handling and capture delegates can't catch it.
-        guard canCapturePhotoOnSessionQueue else {
-            Task { @MainActor [weak self] in
-                guard let self, self.captureGeneration == generation else { return }
-                self.captureInFlight = false
-                self.isReadyForCapture = false
-                self.captureErrorMessage = Self.cameraUnavailableMessage
-                self.captureFinished += 1
-            }
+        guard canCapturePhotoOnSessionQueue,
+              let connection = photoOutput.connection(with: .video) else {
+            reportCaptureFailure(generation: generation, message: Self.cameraUnavailableMessage)
             return
+        }
+
+        guard !mirrored || connection.isVideoMirroringSupported else {
+            reportCaptureFailure(generation: generation,
+                                 message: "This camera doesn’t support mirrored capture. Turn off Hirs Mode Pro and try again.")
+            return
+        }
+        if connection.isVideoMirroringSupported {
+            // Photo output records the reflection in the still's EXIF orientation
+            // and the Live Photo movie, preserving original quality and pairing.
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = mirrored
         }
 
         let settings: AVCapturePhotoSettings
@@ -301,6 +317,17 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
+    nonisolated private func reportCaptureFailure(generation: UUID, message: String) {
+        Task { @MainActor [weak self] in
+            guard let self, self.captureGeneration == generation else { return }
+            self.captureInFlight = false
+            self.isReadyForCapture = false
+            self.captureErrorMessage = message
+            self.capturePhase = nil
+            self.captureFinished += 1
+        }
+    }
+
     nonisolated private var canCapturePhotoOnSessionQueue: Bool {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
         guard session.isRunning, !session.isInterrupted,
@@ -317,11 +344,53 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         #endif
     }
 
-    private func simulateMockCapture(location: CLLocation?) {
+    nonisolated static var simulatesCaptureFeedback: Bool {
+        #if DEBUG && targetEnvironment(simulator)
+        let mode = ProcessInfo.processInfo.environment["UI_TEST_CAPTURE_FEEDBACK"]
+        return mode == "still" || mode == "live"
+        #else
+        false
+        #endif
+    }
+
+    private func simulateMockCapture(mirrored: Bool) {
         capturedImage = nil
         capturedImageData = nil
         livePhotoCapture = nil
 
+        guard let capture = Self.makeMockCapture(mirrored: mirrored) else {
+            captureInFlight = false
+            captureErrorMessage = "The camera didn’t return a photo."
+            capturePhase = nil
+            captureFinished += 1
+            return
+        }
+        let generation = captureGeneration
+
+        Task { @MainActor in
+            if Self.simulatesCaptureFeedback {
+                // Simulator-only fixture: expose both phases long enough for UI
+                // geometry assertions. Real captures advance only on callbacks.
+                self.capturePhase = self.processInfo.environment["UI_TEST_CAPTURE_FEEDBACK"] == "live"
+                    ? .recordingLivePhoto : .takingPhoto
+                try? await Task.sleep(for: .seconds(2))
+                guard self.captureGeneration == generation else { return }
+                self.capturePhase = .processingCapture
+                try? await Task.sleep(for: .seconds(2))
+            } else {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard self.captureGeneration == generation else { return }
+            self.captureInFlight = false
+            self.capturedImage = capture.image
+            self.capturedImageData = capture.imageData
+            self.capturePhase = nil
+            self.captureFinished += 1
+            self.captureCompleted += 1
+        }
+    }
+
+    static func makeMockCapture(mirrored: Bool) -> (image: UIImage, imageData: Data)? {
         let size = CGSize(width: 1200, height: 1600)
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { context in
@@ -340,27 +409,24 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             text.draw(in: rect, withAttributes: attributes)
         }
 
-        guard let data = image.jpegData(compressionQuality: 0.95) else {
-            captureInFlight = false
-            captureErrorMessage = "The camera didn’t return a photo."
-            captureFinished += 1
-            return
+        guard let cgImage = image.cgImage else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
+            return nil
         }
-        let generation = captureGeneration
-
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(100))
-            guard self.captureGeneration == generation else { return }
-            self.captureInFlight = false
-            self.capturedImage = image
-            self.capturedImageData = data
-            self.captureFinished += 1
-            self.captureCompleted += 1
-        }
+        CGImageDestinationAddImage(destination, cgImage, [
+            kCGImageDestinationLossyCompressionQuality: 0.95,
+            kCGImagePropertyOrientation: mirrored
+                ? CGImagePropertyOrientation.upMirrored.rawValue : CGImagePropertyOrientation.up.rawValue
+        ] as CFDictionary)
+        guard CGImageDestinationFinalize(destination), let decodedImage = UIImage(data: data as Data) else { return nil }
+        return (decodedImage, data as Data)
     }
 
     func discardCapture() {
         captureGeneration = UUID()
+        captureInFlight = false
+        capturePhase = nil
         if let videoURL = livePhotoCapture?.videoURL { try? FileManager.default.removeItem(at: videoURL) }
         capturedImage = nil
         capturedImageData = nil
@@ -424,6 +490,36 @@ private struct CameraLocation: Sendable {
 
 // MARK: - AVCapturePhotoCaptureDelegate
 extension CameraService: AVCapturePhotoCaptureDelegate {
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.captureState?.captureID == resolvedSettings.uniqueID else { return }
+            self.captureState?.didCapturePhoto(captureID: resolvedSettings.uniqueID)
+            self.publishCapturePhase()
+        }
+    }
+
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishRecordingLivePhotoMovieForEventualFileAt outputFileURL: URL,
+                                resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.captureState?.captureID == resolvedSettings.uniqueID else { return }
+            self.captureState?.didFinishRecordingLivePhoto(captureID: resolvedSettings.uniqueID)
+            self.publishCapturePhase()
+        }
+    }
+
+    nonisolated private func publishCapturePhase() {
+        dispatchPrecondition(condition: .onQueue(sessionQueue))
+        guard let state = captureState, let phase = state.phase else { return }
+        let generation = state.generation
+        Task { @MainActor [weak self] in
+            guard let self, self.captureGeneration == generation, self.captureInFlight else { return }
+            // A late recording notification must not move an already-processing
+            // capture backwards, or resurrect an indicator after completion.
+            guard self.capturePhase != .processingCapture || phase == .processingCapture else { return }
+            self.capturePhase = phase
+        }
+    }
+
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         sessionQueue.async { [weak self] in
             self?.handleProcessedPhoto(photo, error: error)
@@ -470,11 +566,12 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         }
         let generation = state.generation
         Task { @MainActor [weak self] in
-            self?.captureInFlight = false
             guard let self, self.captureGeneration == generation else {
                 if let videoURL = completion.videoURL { try? FileManager.default.removeItem(at: videoURL) }
                 return
             }
+            self.captureInFlight = false
+            self.capturePhase = nil
             if let image, let data = completion.imageData {
                 self.capturedImage = image
                 self.capturedImageData = data

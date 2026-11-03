@@ -33,6 +33,7 @@ struct PhotoGridView: View {
     @StateObject private var photoImporter = PhotoImportCoordinator.shared
 
     @State private var showingCamera = false
+    @AppStorage(CameraPreferenceKey.hasSeenGuideIntroduction) private var hasSeenGuideIntroduction = false
     @State private var captureGridTransition: PhotoGridCaptureTransition?
     @State private var captureLandingFrame: CGRect?
     @State private var settingsDestination: PhotoSettingsDestination?
@@ -118,6 +119,10 @@ struct PhotoGridView: View {
                             }
                             .disabled(photoImporter.isImporting || storage.mode.isMigrating)
                             .accessibilityIdentifier("emptyStateCaptureButton")
+                            .simultaneousGesture(LongPressGesture(minimumDuration: 0.6).onEnded { _ in
+                                replayCameraGuideIntroduction()
+                            })
+                            .accessibilityAction(named: Text("Replay Camera Guide Introduction"), replayCameraGuideIntroduction)
                             .padding(.top)
 
                             Button {
@@ -904,6 +909,10 @@ struct PhotoGridView: View {
         .disabled(photoImporter.isImporting)
         .accessibilityLabel("Capture Photo")
         .accessibilityIdentifier("gridCaptureButton")
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.6).onEnded { _ in
+            replayCameraGuideIntroduction()
+        })
+        .accessibilityAction(named: Text("Replay Camera Guide Introduction"), replayCameraGuideIntroduction)
     }
 
     @ViewBuilder
@@ -944,6 +953,7 @@ struct PhotoGridView: View {
     }
 
     private func openCamera() {
+        guard !showingCamera else { return }
         guard !storage.mode.isMigrating else {
             exportAlertMessage = "Let the photo storage switch finish before capturing. Check Photo Storage in Settings."
             return
@@ -954,6 +964,12 @@ struct PhotoGridView: View {
         }
         cameraTimelineID = timelineSelection.selectedID
         showingCamera = true
+    }
+
+    private func replayCameraGuideIntroduction() {
+        guard !showingCamera, !storage.mode.isMigrating, !photoImporter.isImporting else { return }
+        hasSeenGuideIntroduction = false
+        openCamera()
     }
 
     private func prepareGridForCapture() {

@@ -7,7 +7,7 @@ struct ExperimentalCapturePreviewOverlay: View {
     let image: UIImage
     let livePhotoImageURL: URL?
     let livePhotoVideoURL: URL?
-    let isMirrored: Bool
+    let mirroring: CameraMirroring
     let isSaving: Bool
     let savingDetail: String
     let isAnimatingToGrid: Bool
@@ -32,6 +32,7 @@ struct ExperimentalCapturePreviewOverlay: View {
     @State private var hasStartedFlight = false
     @State private var flightCornerRadius: CGFloat = 24
     @State private var flightOpacity = 1.0
+    @State private var flightRotation = 0.0
 
     private var previewTitle: String {
         livePhotoImageURL != nil && livePhotoVideoURL != nil
@@ -75,7 +76,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
+                        .scaleEffect(x: mirroring.mirrorsPreviewOnly ? -1 : 1, y: 1)
                     }
                     .aspectRatio(image.size, contentMode: .fit)
                     .clipShape(.rect(cornerRadius: 24))
@@ -153,8 +154,15 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: flightFrame.width, height: flightFrame.height)
-                        .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
+                        .scaleEffect(x: mirroring.mirrorsPreviewOnly ? -1 : 1, y: 1)
                         .clipShape(.rect(cornerRadius: flightCornerRadius))
+                        .animation(.easeInOut(duration: 0.5)) { content in
+                            content.rotation3DEffect(
+                                .degrees(flightRotation),
+                                axis: (x: 0, y: 1, z: 0),
+                                perspective: 0.25
+                            )
+                        }
                         .shadow(color: .black.opacity(hasStartedFlight ? 0 : 0.3), radius: 20, y: 10)
                         .opacity(flightOpacity)
                         .position(x: flightFrame.midX, y: flightFrame.midY)
@@ -181,7 +189,7 @@ struct ExperimentalCapturePreviewOverlay: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("capturePreviewOverlay")
-        .accessibilityValue(isMirrored ? "Mirrored" : "Original")
+        .accessibilityValue(mirroring.showsMirroredPreview ? "Mirrored" : "Original")
         .offset(y: dismissOffset)
         .gesture(
             DragGesture(minimumDistance: 20)
@@ -236,6 +244,9 @@ struct ExperimentalCapturePreviewOverlay: View {
             if canFly {
                 flightFrame = targetFrameInGlobal.offsetBy(dx: -viewport.minX, dy: -viewport.minY)
                 flightCornerRadius = 0
+                if mirroring.mirrorsPreviewOnly {
+                    flightRotation = 180
+                }
             } else {
                 flightOpacity = 0
             }
