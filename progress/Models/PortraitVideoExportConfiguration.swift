@@ -11,6 +11,7 @@ nonisolated struct PortraitVideoExportConfiguration: Equatable, Codable, Sendabl
     let startDate: Date
     let endDate: Date
     let reversesPhotoOrder: Bool
+    let mirrorsPhotos: Bool
 
     init(
         picturesPerSecond: Int,
@@ -22,7 +23,8 @@ nonisolated struct PortraitVideoExportConfiguration: Equatable, Codable, Sendabl
         usesAllPhotos: Bool,
         startDate: Date,
         endDate: Date,
-        reversesPhotoOrder: Bool = false
+        reversesPhotoOrder: Bool = false,
+        mirrorsPhotos: Bool = false
     ) {
         self.picturesPerSecond = picturesPerSecond
         self.quality = quality
@@ -34,12 +36,13 @@ nonisolated struct PortraitVideoExportConfiguration: Equatable, Codable, Sendabl
         self.startDate = startDate
         self.endDate = endDate
         self.reversesPhotoOrder = reversesPhotoOrder
+        self.mirrorsPhotos = mirrorsPhotos
     }
 
     private enum CodingKeys: String, CodingKey {
         case picturesPerSecond, quality, includesDateBanner, includesLocationBanner
         case includesFavoriteLivePhotoVideo, holdsHeartedPhotos, usesAllPhotos
-        case startDate, endDate, reversesPhotoOrder
+        case startDate, endDate, reversesPhotoOrder, mirrorsPhotos
     }
 
     init(from decoder: any Decoder) throws {
@@ -55,5 +58,6 @@ nonisolated struct PortraitVideoExportConfiguration: Equatable, Codable, Sendabl
         endDate = try values.decode(Date.self, forKey: .endDate)
         // Exports paused before Reverse Mode was added keep chronological order.
         reversesPhotoOrder = try values.decodeIfPresent(Bool.self, forKey: .reversesPhotoOrder) ?? false
+        mirrorsPhotos = try values.decodeIfPresent(Bool.self, forKey: .mirrorsPhotos) ?? false
     }
 }

@@ -16,6 +16,7 @@ struct PortraitVideoExportSheet: View {
     @AppStorage("portraitVideoIncludesFavoriteLivePhotoVideos") private var includesFavoriteLivePhotoVideos = false
     @AppStorage("portraitVideoHoldsHeartedPhotos") private var holdsHeartedPhotos = false
     @AppStorage("portraitVideoReversesPhotoOrder") private var reversesPhotoOrder = false
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var mirrorsPhotos = false
     @AppStorage(PortraitVideoExportStorageKeys.usesAllPhotos) private var usesAllPhotos = true
     @State private var startDate: Date
     @State private var endDate: Date
@@ -434,7 +435,8 @@ struct PortraitVideoExportSheet: View {
             usesAllPhotos: usesAllPhotos,
             startDate: startDate,
             endDate: endDate,
-            reversesPhotoOrder: reversesPhotoOrder
+            reversesPhotoOrder: reversesPhotoOrder,
+            mirrorsPhotos: mirrorsPhotos
         )
     }
 

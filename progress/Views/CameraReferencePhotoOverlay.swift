@@ -6,7 +6,6 @@ struct CameraReferencePhotoOverlay: View {
     let isMirrored: Bool
 
     @State private var image: UIImage?
-    @State private var sourceIsMirrored = false
 
     var body: some View {
         ZStack {
@@ -14,7 +13,7 @@ struct CameraReferencePhotoOverlay: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
-                    .scaleEffect(x: isMirrored != sourceIsMirrored ? -1 : 1, y: 1)
+                    .scaleEffect(x: isMirrored ? -1 : 1, y: 1)
                     .opacity(0.3)
                     .accessibilityLabel("Previous photo reference")
                     .accessibilityIdentifier("experimentalCameraReferencePhotoOverlay")
@@ -32,7 +31,6 @@ struct CameraReferencePhotoOverlay: View {
             for: photo.objectID, data: photo.thumbnailData, resolution: .expanded
         )
         guard !Task.isCancelled else { return }
-        sourceIsMirrored = PhotoMirroring.sourceIsMirrored(in: photo.thumbnailData)
         image = thumbnail
 
         // Keep the local thumbnail as a reference if the original is unavailable offline.

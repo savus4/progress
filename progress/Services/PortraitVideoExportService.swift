@@ -601,6 +601,7 @@ final class PortraitVideoExportService {
                             named: livePhotoVideoAssetName,
                             prefetcher: assetPrefetcher,
                             bannerText: bannerText,
+                            mirrored: configuration.mirrorsPhotos,
                             atFrameIndex: writtenFrameCount,
                             outputFrameRate: outputFrameRate,
                             input: segmentWriter.input,
@@ -624,6 +625,7 @@ final class PortraitVideoExportService {
                             try await appendStillPhoto(
                                 image,
                                 bannerText: bannerText,
+                                mirrored: configuration.mirrorsPhotos,
                                 atFrameIndex: writtenFrameCount,
                                 frameCount: frameCount,
                                 outputFrameRate: outputFrameRate,
@@ -1150,6 +1152,7 @@ final class PortraitVideoExportService {
         named assetName: String,
         prefetcher: PortraitVideoExportAssetPrefetcher,
         bannerText: PortraitVideoBannerText?,
+        mirrored: Bool,
         atFrameIndex frameIndex: Int,
         outputFrameRate: Int,
         input: AVAssetWriterInput,
@@ -1165,6 +1168,7 @@ final class PortraitVideoExportService {
             return try await appendLivePhotoVideo(
                 from: videoURL,
                 bannerText: bannerText,
+                mirrored: mirrored,
                 atFrameIndex: frameIndex,
                 outputFrameRate: outputFrameRate,
                 input: input,
@@ -1199,6 +1203,7 @@ final class PortraitVideoExportService {
     nonisolated private func appendStillPhoto(
         _ image: CGImage,
         bannerText: PortraitVideoBannerText?,
+        mirrored: Bool,
         atFrameIndex frameIndex: Int,
         frameCount: Int,
         outputFrameRate: Int,
@@ -1210,6 +1215,7 @@ final class PortraitVideoExportService {
             try await appendFrame(
                 image,
                 bannerText: bannerText,
+                mirrored: mirrored,
                 atFrameIndex: frameIndex + frameOffset,
                 outputFrameRate: outputFrameRate,
                 input: input,
@@ -1221,6 +1227,7 @@ final class PortraitVideoExportService {
     nonisolated private func appendLivePhotoVideo(
         from videoURL: URL,
         bannerText: PortraitVideoBannerText?,
+        mirrored: Bool,
         atFrameIndex frameIndex: Int,
         outputFrameRate: Int,
         input: AVAssetWriterInput,
@@ -1274,6 +1281,7 @@ final class PortraitVideoExportService {
             try await appendFrame(
                 image,
                 bannerText: bannerText,
+                mirrored: mirrored,
                 atFrameIndex: frameIndex + frameOffset,
                 outputFrameRate: outputFrameRate,
                 input: input,
@@ -1288,6 +1296,7 @@ final class PortraitVideoExportService {
     nonisolated private func appendFrame(
         _ image: CGImage,
         bannerText: PortraitVideoBannerText?,
+        mirrored: Bool,
         atFrameIndex frameIndex: Int,
         outputFrameRate: Int,
         input: AVAssetWriterInput,
@@ -1308,7 +1317,7 @@ final class PortraitVideoExportService {
             throw PortraitVideoExportError.cannotCreatePixelBuffer
         }
 
-        try draw(image, bannerText: bannerText, into: pixelBuffer)
+        try draw(image, bannerText: bannerText, mirrored: mirrored, into: pixelBuffer)
 
         let presentationTime = CMTime(
             value: CMTimeValue(frameIndex),
@@ -1319,7 +1328,7 @@ final class PortraitVideoExportService {
         }
     }
 
-    nonisolated private func draw(_ image: CGImage, bannerText: PortraitVideoBannerText?, into pixelBuffer: CVPixelBuffer) throws {
+    nonisolated private func draw(_ image: CGImage, bannerText: PortraitVideoBannerText?, mirrored: Bool, into pixelBuffer: CVPixelBuffer) throws {
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         defer {
             CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
@@ -1352,7 +1361,13 @@ final class PortraitVideoExportService {
         context.setFillColor(CGColor(gray: 0, alpha: 1))
         context.fill(frame)
         context.interpolationQuality = .high
+        context.saveGState()
+        if mirrored {
+            context.translateBy(x: frame.width, y: 0)
+            context.scaleBy(x: -1, y: 1)
+        }
         context.draw(image, in: aspectFillRect(for: image, in: frame))
+        context.restoreGState()
 
         if let bannerText {
             drawBanner(bannerText, in: context, frame: frame)

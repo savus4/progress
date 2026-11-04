@@ -72,6 +72,7 @@ final class PhotoLibrarySaveService {
 
     @discardableResult
     func save(_ items: [PhotoLibrarySaveItem]) async throws -> Int {
+        let mirrored = PhotoPresentationPreferences.mirrorsPhotos
         guard !items.isEmpty else {
             throw PhotoLibrarySaveError.noPhotos
         }
@@ -82,17 +83,23 @@ final class PhotoLibrarySaveService {
         }
 
         var resolvedItems: [ResolvedPhotoLibrarySaveItem] = []
+        defer {
+            for item in resolvedItems {
+                if let directory = item.temporaryDirectory { try? FileManager.default.removeItem(at: directory) }
+            }
+        }
         resolvedItems.reserveCapacity(items.count)
 
         for item in items {
-            resolvedItems.append(try await resolvedSaveItem(for: item))
+            try Task.checkCancellation()
+            resolvedItems.append(try await resolvedSaveItem(for: item, mirrored: mirrored))
         }
 
         try await saveResolvedItems(resolvedItems)
         return resolvedItems.count
     }
 
-    private func resolvedSaveItem(for item: PhotoLibrarySaveItem) async throws -> ResolvedPhotoLibrarySaveItem {
+    private func resolvedSaveItem(for item: PhotoLibrarySaveItem, mirrored: Bool) async throws -> ResolvedPhotoLibrarySaveItem {
         let imageURL: URL
         let videoURL: URL?
 
@@ -106,14 +113,16 @@ final class PhotoLibrarySaveService {
             videoURL = resources.videoURL
         } else {
             imageURL = try await photoStorageService.prepareStillPhotoShareURL(
-                fullImageAssetName: item.fullImageAssetName ?? item.livePhotoImageAssetName
+                fullImageAssetName: item.fullImageAssetName ?? item.livePhotoImageAssetName, mirrored: false
             )
             videoURL = nil
         }
 
+        let export = try await PhotoExportMirroring.prepare(imageURL: imageURL, videoURL: videoURL, mirrored: mirrored)
         return ResolvedPhotoLibrarySaveItem(
-            imageURL: imageURL,
-            videoURL: videoURL,
+            imageURL: export.imageURL,
+            videoURL: export.videoURL,
+            temporaryDirectory: export.temporaryDirectory,
             captureDate: item.captureDate,
             location: location(for: item)
         )
@@ -155,6 +164,7 @@ final class PhotoLibrarySaveService {
 nonisolated private struct ResolvedPhotoLibrarySaveItem: Sendable {
     let imageURL: URL
     let videoURL: URL?
+    let temporaryDirectory: URL?
     let captureDate: Date?
     let location: CLLocation?
 }

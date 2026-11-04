@@ -1198,7 +1198,8 @@ final class PhotoStorageService {
     }
 
     @MainActor
-    func prepareExportFiles(for photos: [DailyPhoto]) async throws -> [URL] {
+    func prepareExportFiles(for photos: [DailyPhoto], mirrored: Bool? = nil) async throws -> [URL] {
+        let mirrored = mirrored ?? PhotoPresentationPreferences.mirrorsPhotos
         var snapshots: [PhotoSnapshot] = []
         for photo in photos {
             snapshots.append(try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext))
@@ -1208,7 +1209,7 @@ final class PhotoStorageService {
 
         for snapshot in snapshots {
             let photoDirectory = try createPhotoExportDirectory(for: snapshot, inside: exportRoot)
-            try await exportPhotoAssets(for: snapshot, to: photoDirectory)
+            try await exportPhotoAssets(for: snapshot, to: photoDirectory, mirrored: mirrored)
             exportedDirectories.append(photoDirectory)
         }
 
@@ -1231,18 +1232,22 @@ final class PhotoStorageService {
 
     @MainActor
     func prepareLivePhotoShareItemURLs(for photo: DailyPhoto) async throws -> [URL] {
+        let mirrored = PhotoPresentationPreferences.mirrorsPhotos
         let snapshot = try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext)
         let resources = try await loadLivePhotoResources(
             imageAssetName: snapshot.livePhotoImageAssetName,
             videoAssetName: snapshot.livePhotoVideoAssetName
         )
-        return [resources.imageURL, resources.videoURL]
+        let export = try await PhotoExportMirroring.prepare(imageURL: resources.imageURL, videoURL: resources.videoURL, mirrored: mirrored)
+        guard let videoURL = export.videoURL else { throw PhotoStorageError.noImageAsset }
+        return [export.imageURL, videoURL]
     }
 
     @MainActor
-    func prepareStillPhotoShareURL(for photo: DailyPhoto) async throws -> URL {
+    func prepareStillPhotoShareURL(for photo: DailyPhoto, mirrored: Bool? = nil) async throws -> URL {
+        let mirrored = mirrored ?? PhotoPresentationPreferences.mirrorsPhotos
         let snapshot = try await recoverLegacyOriginals(for: snapshot(for: photo), context: photo.managedObjectContext)
-        return try await prepareStillPhotoShareURL(fullImageAssetName: snapshot.fullImageAssetName)
+        return try await prepareStillPhotoShareURL(fullImageAssetName: snapshot.fullImageAssetName, mirrored: mirrored)
     }
 
     func loadFullImage(named fullImageAssetName: String?) async throws -> UIImage {
@@ -1325,12 +1330,14 @@ final class PhotoStorageService {
         }
     }
 
-    func prepareStillPhotoShareURL(fullImageAssetName: String?) async throws -> URL {
+    func prepareStillPhotoShareURL(fullImageAssetName: String?, mirrored: Bool? = nil) async throws -> URL {
+        let mirrored = mirrored ?? PhotoPresentationPreferences.mirrorsPhotos
         guard let fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
         try await recoverLegacyAssetIfNeeded(named: fullImageAssetName)
-        return try await cloudKitService.loadAssetURL(named: fullImageAssetName)
+        let source = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
+        return try await PhotoExportMirroring.prepare(imageURL: source, mirrored: mirrored).imageURL
     }
 
     private func stagePhotoOriginals(imageData: Data, videoURL: URL?, photoID: UUID) async throws -> (String, String?) {
@@ -1442,24 +1449,26 @@ final class PhotoStorageService {
         return directoryURL
     }
 
-    private func exportPhotoAssets(for snapshot: PhotoSnapshot, to directory: URL) async throws {
+    private func exportPhotoAssets(for snapshot: PhotoSnapshot, to directory: URL, mirrored: Bool) async throws {
         if let livePhotoImageAssetName = snapshot.livePhotoImageAssetName,
            let livePhotoVideoAssetName = snapshot.livePhotoVideoAssetName {
-            try await copyAsset(named: livePhotoImageAssetName, to: directory)
-            try await copyAsset(named: livePhotoVideoAssetName, to: directory)
+            let resources = try await loadLivePhotoResources(imageAssetName: livePhotoImageAssetName, videoAssetName: livePhotoVideoAssetName)
+            let export = try await PhotoExportMirroring.prepare(imageURL: resources.imageURL, videoURL: resources.videoURL, mirrored: mirrored)
+            defer { export.removeTemporaryFiles() }
+            try await PhotoAssetFileWorker.copyReplacingItem(from: export.imageURL, to: directory.appendingPathComponent(livePhotoImageAssetName))
+            if let videoURL = export.videoURL {
+                try await PhotoAssetFileWorker.copyReplacingItem(from: videoURL, to: directory.appendingPathComponent(livePhotoVideoAssetName))
+            }
             return
         }
 
         guard let fullImageAssetName = snapshot.fullImageAssetName else {
             throw PhotoStorageError.noImageAsset
         }
-        try await copyAsset(named: fullImageAssetName, to: directory)
-    }
-
-    private func copyAsset(named assetName: String, to directory: URL) async throws {
-        let sourceURL = try await cloudKitService.loadAssetURL(named: assetName)
-        let destinationURL = directory.appendingPathComponent(assetName)
-        try await PhotoAssetFileWorker.copyReplacingItem(from: sourceURL, to: destinationURL)
+        let source = try await cloudKitService.loadAssetURL(named: fullImageAssetName)
+        let export = try await PhotoExportMirroring.prepare(imageURL: source, mirrored: mirrored)
+        defer { export.removeTemporaryFiles() }
+        try await PhotoAssetFileWorker.copyReplacingItem(from: export.imageURL, to: directory.appendingPathComponent(fullImageAssetName))
     }
 
     @concurrent

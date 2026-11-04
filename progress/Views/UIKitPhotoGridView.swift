@@ -360,6 +360,7 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
     let captureTransition: PhotoGridCaptureTransition?
     let hiddenPhotoObjectID: NSManagedObjectID?
     let showsUploadStatus: Bool
+    var mirrorsPhotos = false
     @Binding var isSelectionMode: Bool
     @Binding var selectedPhotoIDs: Set<NSManagedObjectID>
     let onOpenPhoto: (NSManagedObjectID, Int, PhotoDetailOpeningSource) -> Void
@@ -392,7 +393,8 @@ struct UIKitPhotoGridView: UIViewControllerRepresentable {
             networkState: network.state,
             isSelectionMode: isSelectionMode,
             selectedPhotoIDs: selectedPhotoIDs,
-            hiddenPhotoObjectID: hiddenPhotoObjectID
+            hiddenPhotoObjectID: hiddenPhotoObjectID,
+            mirrorsPhotos: mirrorsPhotos
         )
     }
 
@@ -475,6 +477,7 @@ final class PhotoGridCollectionViewController: UIViewController {
     private var items: [UIKitPhotoGridItem] = []
     private var itemsByID: [NSManagedObjectID: UIKitPhotoGridItem] = [:]
     private var showsUploadStatus = true
+    private var mirrorsPhotos = false
     private var networkState: PhotoNetworkState = .connected
     private var isSelectionMode = false
     private var selectedPhotoIDs: Set<NSManagedObjectID> = []
@@ -713,7 +716,8 @@ final class PhotoGridCollectionViewController: UIViewController {
         networkState: PhotoNetworkState = .connected,
         isSelectionMode: Bool,
         selectedPhotoIDs: Set<NSManagedObjectID>,
-        hiddenPhotoObjectID: NSManagedObjectID? = nil
+        hiddenPhotoObjectID: NSManagedObjectID? = nil,
+        mirrorsPhotos: Bool = false
     ) {
         let isPreparingCapture = captureTransition != nil && self.captureTransition?.token != captureTransition?.token
         let isHoldingCaptureSnapshot = captureTransition != nil && captureTransition?.isGridRevealed == false && !isPreparingCapture
@@ -729,6 +733,14 @@ final class PhotoGridCollectionViewController: UIViewController {
         self.selectedPhotoIDs = selectedPhotoIDs
         self.hiddenPhotoObjectID = hiddenPhotoObjectID
         self.captureTransition = captureTransition
+        if self.mirrorsPhotos != mirrorsPhotos {
+            self.mirrorsPhotos = mirrorsPhotos
+            // Presentation changes never refetch records, rebuild snapshots, or
+            // invalidate thumbnail caches. Only mounted image views change.
+            for case let cell as PhotoGridCollectionViewCell in collectionView.visibleCells {
+                cell.setMirrored(mirrorsPhotos)
+            }
+        }
         if isPreparingCapture || captureTransition == nil {
             reportedCaptureTargetToken = nil
             scheduledCaptureTargetToken = nil
@@ -780,7 +792,8 @@ final class PhotoGridCollectionViewController: UIViewController {
                 networkState: self.networkState,
                 isSelectionMode: self.isSelectionMode,
                 isSelected: self.selectedPhotoIDs.contains(objectID),
-                isHiddenForTransition: self.hiddenPhotoObjectID == objectID
+                isHiddenForTransition: self.hiddenPhotoObjectID == objectID,
+                isMirrored: self.mirrorsPhotos
             )
             self.loadThumbnail(for: item, into: cell)
         }
@@ -833,7 +846,8 @@ final class PhotoGridCollectionViewController: UIViewController {
             networkState: networkState,
             isSelectionMode: isSelectionMode,
             isSelected: selectedPhotoIDs.contains(item.objectID),
-            isHiddenForTransition: hiddenPhotoObjectID == item.objectID
+            isHiddenForTransition: hiddenPhotoObjectID == item.objectID,
+            isMirrored: mirrorsPhotos
         )
     }
 
@@ -1526,7 +1540,8 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                     networkState: networkState,
                     isSelectionMode: true,
                     isSelected: true,
-                    isHiddenForTransition: hiddenPhotoObjectID == objectID
+                    isHiddenForTransition: hiddenPhotoObjectID == objectID,
+                    isMirrored: mirrorsPhotos
                 )
             }
         } else {
@@ -1537,7 +1552,8 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                 .openingSource(frameInGlobal: frame)
                 ?? PhotoDetailOpeningSource(
                     frameInGlobal: frame,
-                    image: DecodedThumbnailCache.shared.cachedImage(for: objectID)
+                    image: DecodedThumbnailCache.shared.cachedImage(for: objectID),
+                    isMirrored: mirrorsPhotos
                 )
             delegate?.photoGridController(self, didUpdatePhotoFrameFor: objectID, frame: frame)
             delegate?.photoGridController(self, didOpenPhotoWith: objectID, at: indexPath.item, source: source)
@@ -1556,7 +1572,8 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
                 networkState: networkState,
                 isSelectionMode: true,
                 isSelected: false,
-                isHiddenForTransition: hiddenPhotoObjectID == objectID
+                isHiddenForTransition: hiddenPhotoObjectID == objectID,
+                isMirrored: mirrorsPhotos
             )
         }
     }
@@ -1673,7 +1690,8 @@ extension PhotoGridCollectionViewController: UICollectionViewDelegate, UICollect
             networkState: networkState,
             isSelectionMode: isSelectionMode,
             isSelected: selectedPhotoIDs.contains(item.objectID),
-            isHiddenForTransition: hiddenPhotoObjectID == item.objectID
+            isHiddenForTransition: hiddenPhotoObjectID == item.objectID,
+            isMirrored: mirrorsPhotos
         )
         loadThumbnail(for: item, into: gridCell)
     }
@@ -1762,6 +1780,7 @@ extension PhotoGridCollectionViewController: UIGestureRecognizerDelegate {
 
 final class PhotoGridCollectionViewCell: UICollectionViewCell {
     var representedObjectID: NSManagedObjectID?
+    private var isMirrored = false
     private let imageView = UIImageView()
     private let placeholderView = UIView()
     private let selectionBadgeImageView = UIImageView()
@@ -1785,6 +1804,7 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         contentView.alpha = 1
         representedObjectID = nil
         imageView.image = nil
+        setMirrored(false)
         statusLabel.isHidden = true
         selectionBadgeImageView.isHidden = true
         heartBadgeImageView.isHidden = true
@@ -1804,8 +1824,10 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         networkState: PhotoNetworkState = .connected,
         isSelectionMode: Bool,
         isSelected: Bool,
-        isHiddenForTransition: Bool = false
+        isHiddenForTransition: Bool = false,
+        isMirrored: Bool = false
     ) {
+        setMirrored(isMirrored)
         contentView.alpha = isHiddenForTransition ? 0 : 1
         isAccessibilityElement = !isHiddenForTransition
         accessibilityElementsHidden = isHiddenForTransition
@@ -1873,8 +1895,13 @@ final class PhotoGridCollectionViewCell: UICollectionViewCell {
         imageView.image = image
     }
 
+    func setMirrored(_ mirrored: Bool) {
+        isMirrored = mirrored
+        imageView.transform = mirrored ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+    }
+
     func openingSource(frameInGlobal: CGRect) -> PhotoDetailOpeningSource {
-        PhotoDetailOpeningSource(frameInGlobal: frameInGlobal, image: imageView.image)
+        PhotoDetailOpeningSource(frameInGlobal: frameInGlobal, image: imageView.image, isMirrored: isMirrored)
     }
 
     private func configureViews() {

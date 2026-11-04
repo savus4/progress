@@ -43,7 +43,7 @@ nonisolated final class ThumbnailService: Sendable {
         guard let cgImage = thumbnail.cgImage else {
             return thumbnail.jpegData(compressionQuality: jpegCompressionQuality)
         }
-        return encodeThumbnail(cgImage: cgImage, sourceIsMirrored: PhotoMirroring.isMirrored(image.imageOrientation))
+        return encodeThumbnail(cgImage: cgImage)
     }
 
     /// Generate a thumbnail directly from encoded image bytes without decoding full resolution into UIKit first.
@@ -68,7 +68,7 @@ nonisolated final class ThumbnailService: Sendable {
             return nil
         }
 
-        return encodeThumbnail(cgImage: cgThumbnail, sourceIsMirrored: PhotoMirroring.sourceIsMirrored(in: source))
+        return encodeThumbnail(cgImage: cgThumbnail)
     }
 
     func optimizedThumbnailDataIfSmaller(_ data: Data) -> Data? {
@@ -77,7 +77,7 @@ nonisolated final class ThumbnailService: Sendable {
         ]
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary),
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, sourceOptions as CFDictionary),
-              let optimized = encodeThumbnail(cgImage: cgImage, sourceIsMirrored: PhotoMirroring.sourceIsMirrored(in: source)) else {
+              let optimized = encodeThumbnail(cgImage: cgImage) else {
             return nil
         }
 
@@ -103,32 +103,27 @@ nonisolated final class ThumbnailService: Sendable {
         }
     }
 
-    private func encodeThumbnail(cgImage: CGImage, sourceIsMirrored: Bool) -> Data? {
+    private func encodeThumbnail(cgImage: CGImage) -> Data? {
         if let heicData = encode(cgImage: cgImage, as: UTType.heic.identifier as CFString,
-                                 quality: heicCompressionQuality, sourceIsMirrored: sourceIsMirrored) {
+                                 quality: heicCompressionQuality) {
             return heicData
         }
         return encode(cgImage: cgImage, as: UTType.jpeg.identifier as CFString,
-                      quality: jpegCompressionQuality, sourceIsMirrored: sourceIsMirrored)
+                      quality: jpegCompressionQuality)
     }
 
-    private func encode(cgImage: CGImage, as uti: CFString, quality: CGFloat, sourceIsMirrored: Bool) -> Data? {
+    private func encode(cgImage: CGImage, as uti: CFString, quality: CGFloat) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, uti, 1, nil) else {
             return nil
         }
 
-        var properties: [CFString: Any] = [
+        let properties: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: quality,
             kCGImageDestinationEmbedThumbnail: false,
             kCGImageMetadataShouldExcludeGPS: true,
             kCGImageMetadataShouldExcludeXMP: true
         ]
-        if sourceIsMirrored {
-            properties[kCGImagePropertyExifDictionary] = [
-                kCGImagePropertyExifUserComment: PhotoMirroring.mirroredSourceComment
-            ]
-        }
         CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
 
         guard CGImageDestinationFinalize(destination) else {

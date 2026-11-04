@@ -14,12 +14,12 @@ struct CameraMirroringSettingsSection: View {
         } header: {
             Text("Camera")
         } footer: {
-            Text("Hirs Mode mirrors previews. Pro also saves mirrored photos.")
+            Text("Hirs Mode mirrors previews. Pro mirrors all photos and exports.")
                 .lineLimit(3)
                 .accessibilityIdentifier("hirsModeDescription")
         }
         .onAppear {
-            // Preserve Pro choices saved before the settings became dependent.
+            // Pro includes preview mirroring.
             if isHirsModeProEnabled { isHirsModeEnabled = true }
         }
         .onChange(of: isHirsModeProEnabled) { _, enabled in

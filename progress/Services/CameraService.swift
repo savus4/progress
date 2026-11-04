@@ -220,7 +220,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil, mirrored: Bool = false) {
+    func capturePhoto(withLivePhoto: Bool = true, location: CLLocation? = nil) {
         guard !captureInFlight else { return }
         captureInFlight = true
         captureErrorMessage = nil
@@ -231,7 +231,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         capturePhase = withLivePhoto && isLivePhotoCaptureSupported ? .recordingLivePhoto : .takingPhoto
         #endif
         if usesMockCapture {
-            simulateMockCapture(mirrored: mirrored)
+            simulateMockCapture()
             return
         }
 
@@ -247,7 +247,6 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             self?.capturePhotoOnSessionQueue(
                 withLivePhoto: withLivePhoto,
                 location: locationSnapshot,
-                mirrored: mirrored,
                 generation: generation
             )
         }
@@ -256,7 +255,6 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
     nonisolated private func capturePhotoOnSessionQueue(
         withLivePhoto: Bool,
         location: CameraLocation?,
-        mirrored: Bool,
         generation: UUID
     ) {
         dispatchPrecondition(condition: .onQueue(sessionQueue))
@@ -269,16 +267,11 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
 
-        guard !mirrored || connection.isVideoMirroringSupported else {
-            reportCaptureFailure(generation: generation,
-                                 message: "This camera doesn’t support mirrored capture. Turn off Hirs Mode Pro and try again.")
-            return
-        }
         if connection.isVideoMirroringSupported {
-            // Photo output records the reflection in the still's EXIF orientation
-            // and the Live Photo movie, preserving original quality and pairing.
+            // Originals always use the camera's normal orientation. Pro mirrors
+            // presentation and temporary export copies only.
             connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = mirrored
+            connection.isVideoMirrored = false
         }
 
         let settings: AVCapturePhotoSettings
@@ -353,12 +346,12 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         #endif
     }
 
-    private func simulateMockCapture(mirrored: Bool) {
+    private func simulateMockCapture() {
         capturedImage = nil
         capturedImageData = nil
         livePhotoCapture = nil
 
-        guard let capture = Self.makeMockCapture(mirrored: mirrored) else {
+        guard let capture = Self.makeMockCapture() else {
             captureInFlight = false
             captureErrorMessage = "The camera didn’t return a photo."
             capturePhase = nil
@@ -390,7 +383,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    static func makeMockCapture(mirrored: Bool) -> (image: UIImage, imageData: Data)? {
+    static func makeMockCapture() -> (image: UIImage, imageData: Data)? {
         let size = CGSize(width: 1200, height: 1600)
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { context in
@@ -416,8 +409,7 @@ final class CameraService: NSObject, ObservableObject, @unchecked Sendable {
         }
         CGImageDestinationAddImage(destination, cgImage, [
             kCGImageDestinationLossyCompressionQuality: 0.95,
-            kCGImagePropertyOrientation: mirrored
-                ? CGImagePropertyOrientation.upMirrored.rawValue : CGImagePropertyOrientation.up.rawValue
+            kCGImagePropertyOrientation: CGImagePropertyOrientation.up.rawValue
         ] as CFDictionary)
         guard CGImageDestinationFinalize(destination), let decodedImage = UIImage(data: data as Data) else { return nil }
         return (decodedImage, data as Data)

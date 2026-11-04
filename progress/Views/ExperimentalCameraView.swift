@@ -128,7 +128,8 @@ struct ExperimentalCameraView: View {
                     ZStack {
                         Color.black
 
-                        ExperimentalCameraPreviewView(session: cameraService.session, position: cameraService.cameraPosition)
+                        ExperimentalCameraPreviewView(session: cameraService.session, position: cameraService.cameraPosition,
+                                                      mirrorsPhotos: isHirsModeProEnabled)
                             .frame(width: previewWidth, height: actualPreviewHeight)
                             .background(Color.black)
                             .accessibilityHidden(true)
@@ -136,7 +137,7 @@ struct ExperimentalCameraView: View {
                         if showsReferencePhoto, let referencePhoto = referencePhotos.first {
                             CameraReferencePhotoOverlay(
                                 photo: referencePhoto,
-                                isMirrored: cameraService.cameraPosition == .front
+                                isMirrored: cameraService.cameraPosition == .front || isHirsModeProEnabled
                             )
                             .id(referencePhoto.objectID)
                             .frame(width: previewWidth, height: actualPreviewHeight)
@@ -735,9 +736,9 @@ struct ExperimentalCameraView: View {
         isCapturing = true
         let captureLocation = locationService.currentLocation
         #if targetEnvironment(simulator)
-        cameraService.capturePhoto(withLivePhoto: false, location: captureLocation, mirrored: mirroring.savesMirrored)
+        cameraService.capturePhoto(withLivePhoto: false, location: captureLocation)
         #else
-        cameraService.capturePhoto(withLivePhoto: shouldCaptureLivePhoto, location: captureLocation, mirrored: mirroring.savesMirrored)
+        cameraService.capturePhoto(withLivePhoto: shouldCaptureLivePhoto, location: captureLocation)
         #endif
     }
 
@@ -748,7 +749,7 @@ struct ExperimentalCameraView: View {
     private func presentMockCapturePreview() {
         let mirroring = currentMirroring
         captureMirroring = mirroring
-        guard let capture = CameraService.makeMockCapture(mirrored: mirroring.savesMirrored) else {
+        guard let capture = CameraService.makeMockCapture() else {
             return
         }
 
@@ -1106,6 +1107,7 @@ struct ExperimentalGuidesOverlay: View {
 struct ExperimentalCameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
     let position: CameraPosition
+    var mirrorsPhotos = false
 
     func makeUIView(context: Context) -> PreviewContainerView {
         let view = PreviewContainerView()
@@ -1128,7 +1130,7 @@ struct ExperimentalCameraPreviewView: UIViewRepresentable {
         if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = position == .front
+            connection.isVideoMirrored = position == .front || mirrorsPhotos
         }
     }
 }

@@ -6,6 +6,7 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
     let image: UIImage
     let sourceFrame: CGRect
     let destinationFrame: CGRect
+    var isMirrored = false
     let onStart: () -> Void
     let onComplete: () -> Void
 
@@ -14,6 +15,7 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
             image: image,
             sourceFrame: sourceFrame,
             destinationFrame: destinationFrame,
+            isMirrored: isMirrored,
             onStart: onStart,
             onComplete: onComplete
         )
@@ -24,6 +26,7 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
             image: image,
             sourceFrame: sourceFrame,
             destinationFrame: destinationFrame,
+            isMirrored: isMirrored,
             onStart: onStart,
             onComplete: onComplete
         )
@@ -44,6 +47,7 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
         private var image: UIImage
         private var sourceFrame: CGRect
         private var destinationFrame: CGRect
+        private var isMirrored: Bool
         private var onStart: (() -> Void)?
         private var onComplete: (() -> Void)?
         private var hasAppeared = false
@@ -56,12 +60,14 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
             image: UIImage,
             sourceFrame: CGRect,
             destinationFrame: CGRect,
+            isMirrored: Bool = false,
             onStart: @escaping () -> Void,
             onComplete: @escaping () -> Void
         ) {
             self.image = image
             self.sourceFrame = sourceFrame
             self.destinationFrame = destinationFrame
+            self.isMirrored = isMirrored
             self.onStart = onStart
             self.onComplete = onComplete
             super.init(nibName: nil, bundle: nil)
@@ -87,7 +93,9 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
             imageView.image = image
             imageView.contentMode = .scaleAspectFill
             imageView.clipsToBounds = true
-            imageView.frame = sourceFrame
+            imageView.bounds = CGRect(origin: .zero, size: sourceFrame.size)
+            imageView.center = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
+            imageView.transform = isMirrored ? CGAffineTransform(scaleX: -1, y: 1) : .identity
             container.addSubview(imageView)
             view = container
         }
@@ -114,6 +122,7 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
             image: UIImage,
             sourceFrame: CGRect,
             destinationFrame: CGRect,
+            isMirrored: Bool = false,
             onStart: @escaping () -> Void,
             onComplete: @escaping () -> Void
         ) {
@@ -127,7 +136,10 @@ struct PhotoDetailNativeOpeningView: UIViewControllerRepresentable {
             }
             self.sourceFrame = sourceFrame
             self.destinationFrame = destinationFrame
-            imageView.frame = sourceFrame
+            self.isMirrored = isMirrored
+            imageView.bounds = CGRect(origin: .zero, size: sourceFrame.size)
+            imageView.center = CGPoint(x: sourceFrame.midX, y: sourceFrame.midY)
+            imageView.transform = isMirrored ? CGAffineTransform(scaleX: -1, y: 1) : .identity
             startIfReady()
         }
 

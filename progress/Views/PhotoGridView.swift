@@ -34,6 +34,7 @@ struct PhotoGridView: View {
 
     @State private var showingCamera = false
     @AppStorage(CameraPreferenceKey.hasSeenGuideIntroduction) private var hasSeenGuideIntroduction = false
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var mirrorsPhotos = false
     @State private var captureGridTransition: PhotoGridCaptureTransition?
     @State private var captureLandingFrame: CGRect?
     @State private var settingsDestination: PhotoSettingsDestination?
@@ -166,6 +167,7 @@ struct PhotoGridView: View {
                             captureTransition: captureGridTransition,
                             hiddenPhotoObjectID: captureGridTransition?.photoObjectID ?? activePhotoDetailObjectID,
                             showsUploadStatus: !cloudSyncMonitor.isICloudUnavailable,
+                            mirrorsPhotos: mirrorsPhotos,
                             isSelectionMode: $isSelectionMode,
                             selectedPhotoIDs: $selectedPhotoIDs,
                             onOpenPhoto: { objectID, _, source in
@@ -1295,10 +1297,11 @@ struct PhotoGridView: View {
         }
 
         let assetName = photo.fullImageAssetName ?? photo.livePhotoImageAssetName
+        let mirrored = mirrorsPhotos
         Task { @MainActor in
             do {
                 let image = try await PhotoStorageService.shared.loadFullImage(named: assetName)
-                UIPasteboard.general.image = image
+                UIPasteboard.general.image = mirrored ? PhotoExportMirroring.reflectedImage(image) : image
             } catch {
                 exportAlertMessage = "Copy failed: \(error.localizedDescription)"
             }

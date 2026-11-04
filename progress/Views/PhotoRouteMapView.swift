@@ -1179,6 +1179,7 @@ private struct PhotoMapClusterGridOverlay: View {
 }
 
 private struct PhotoMapClusterGridCell: View {
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var mirrorsPhotos = false
     let gridItem: PhotoMapClusterGridItem
 
     @State private var thumbnailImage: UIImage?
@@ -1196,6 +1197,7 @@ private struct PhotoMapClusterGridCell: View {
                     .scaledToFill()
                     .frame(width: 78, height: 78)
                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .scaleEffect(x: mirrorsPhotos ? -1 : 1, y: 1)
             } else {
                 ProgressView()
                     .controlSize(.small)
@@ -1280,6 +1282,7 @@ private struct PhotoMapHeadingCompass: View {
 }
 
 private struct PhotoMapAnnotationView: View {
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var mirrorsPhotos = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: PhotoRouteMapItem
     let color: Color
@@ -1361,6 +1364,7 @@ private struct PhotoMapAnnotationView: View {
                     .scaledToFill()
                     .frame(width: 54, height: 54)
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .scaleEffect(x: mirrorsPhotos ? -1 : 1, y: 1)
             } else {
                 Circle()
                     .fill(color)

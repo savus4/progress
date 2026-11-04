@@ -76,7 +76,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .scaleEffect(x: mirroring.mirrorsPreviewOnly ? -1 : 1, y: 1)
+                        .scaleEffect(x: mirroring.showsMirroredPreview ? -1 : 1, y: 1)
                     }
                     .aspectRatio(image.size, contentMode: .fit)
                     .clipShape(.rect(cornerRadius: 24))
@@ -154,7 +154,7 @@ struct ExperimentalCapturePreviewOverlay: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: flightFrame.width, height: flightFrame.height)
-                        .scaleEffect(x: mirroring.mirrorsPreviewOnly ? -1 : 1, y: 1)
+                        .scaleEffect(x: mirroring.showsMirroredPreview ? -1 : 1, y: 1)
                         .clipShape(.rect(cornerRadius: flightCornerRadius))
                         .animation(.easeInOut(duration: 0.5)) { content in
                             content.rotation3DEffect(

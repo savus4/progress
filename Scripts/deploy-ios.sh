@@ -13,6 +13,7 @@ then installs and launches it on the paired physical iPhone.
 Defaults to "Simons iPhone". The installed ~/bin/deploy-ios.sh launcher pins
 the device identifier. An argument or IOS_DEPLOY_DEVICE overrides the default.
 Optional: IOS_DEPLOY_DERIVED_DATA, IOS_DEPLOY_LOG_DIR.
+SSH runs use your logged-in Mac session for signing. Stay logged in on the Mac.
 HELP
   exit 0
 fi
@@ -29,6 +30,9 @@ readonly log_dir=${IOS_DEPLOY_LOG_DIR:-$HOME/Library/Logs/ProgressDeploy}
 readonly lock_dir="${derived}.deploy-lock"
 
 [[ -d "$project" ]] || { print -u2 -- "Project missing: $project"; exit 1; }
+if [[ -n ${SSH_CONNECTION:-} && ${IOS_DEPLOY_IN_GUI_SESSION:-0} != 1 ]]; then
+  exec /bin/zsh "$project_root/Scripts/deploy-ios-in-session.sh" "$device"
+fi
 /usr/bin/xcode-select -p >/dev/null
 /bin/mkdir -p "${derived:h}" "$log_dir"
 if ! /bin/mkdir "$lock_dir" 2>/dev/null; then
@@ -57,6 +61,10 @@ run_step() {
     local result=$?
     /usr/bin/tail -n 70 "$log_file" >&2
     print -u2 -- "Failed: $label (exit $result). Full log: $log_file"
+    if /usr/bin/grep -Eq 'errSecInternalComponent|User interaction is not allowed' "$log_file"; then
+      print -u2 -- 'Code signing could not access the signing key. Unlock your login keychain on the Mac.'
+      print -u2 -- 'If macOS asks to authorize codesign, approve the request on the Mac, then retry.'
+    fi
     exit "$result"
   fi
 }

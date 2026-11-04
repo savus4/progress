@@ -317,6 +317,7 @@ struct PhotoDetailItem: Identifiable, Equatable {
 }
 
 struct PhotoDetailView: View {
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var mirrorsPhotos = false
     let openingSource: PhotoDetailOpeningSource?
     let onClose: (NSManagedObjectID?) -> Void
     let dismissalTargetFrame: CGRect?
@@ -405,7 +406,8 @@ struct PhotoDetailView: View {
                         reduceMotion: false
                     )
                     if reduceMotion {
-                        PhotoDetailDismissalImage(image: image, frame: destinationFrame, cornerRadius: 0)
+                        PhotoDetailDismissalImage(image: image, frame: destinationFrame, cornerRadius: 0,
+                                                 isMirrored: openingSource.isMirrored)
                             .opacity(hasExpandedOpeningImage ? 1 : 0)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
@@ -417,6 +419,7 @@ struct PhotoDetailView: View {
                                 dy: -geometry.frame(in: .global).minY
                             ),
                             destinationFrame: destinationFrame,
+                            isMirrored: openingSource.isMirrored,
                             onStart: openingSignpost.begin,
                             onComplete: completeOpening
                         )
@@ -435,7 +438,8 @@ struct PhotoDetailView: View {
                             translation: dismissalOffset,
                             reduceMotion: reduceMotion
                         ),
-                        cornerRadius: flightFrame == nil ? min(max(dismissalOffset.height / 12, 0), 12) : 0
+                        cornerRadius: flightFrame == nil ? min(max(dismissalOffset.height / 12, 0), 12) : 0,
+                        isMirrored: mirrorsPhotos
                     )
                     .opacity(dismissalOpacity)
                     .allowsHitTesting(false)
@@ -1520,6 +1524,7 @@ private final class ToolbarConfigViewController: UIViewController {
 }
 
 private struct PhotoDetailPageView: View {
+    @AppStorage(CameraPreferenceKey.hirsModeProEnabled) private var mirrorsPhotos = false
     let item: PhotoDetailItem
     let isCurrentPage: Bool
     let allowsLivePhotoPresentation: Bool
@@ -1554,6 +1559,7 @@ private struct PhotoDetailPageView: View {
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.black)
+                        .scaleEffect(x: mirrorsPhotos ? -1 : 1, y: 1)
                     }
                 } else if let displayedImage {
                     SnapBackZoomContainer {
@@ -1562,6 +1568,7 @@ private struct PhotoDetailPageView: View {
                             .aspectRatio(contentMode: .fit)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background(Color.black)
+                            .scaleEffect(x: mirrorsPhotos ? -1 : 1, y: 1)
                     }
                 } else if isLoadingMedia {
                     ProgressView()
@@ -1582,6 +1589,7 @@ private struct PhotoDetailPageView: View {
             ))
             .accessibilityAddTraits(.isImage)
             .accessibilityIdentifier("photoDetailImage")
+            .accessibilityValue(mirrorsPhotos ? "Mirrored" : "Original")
 
             Group {
                 if shouldShowLivePhotoStatusIndicator {

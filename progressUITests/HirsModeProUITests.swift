@@ -2,7 +2,7 @@ import XCTest
 
 final class HirsModeProUITests: XCTestCase {
     @MainActor
-    func testProEnablesHirsAndSaveRetryKeepsMirroredCapture() throws {
+    func testProEnablesHirsAndSaveRetryKeepsMirroredPreview() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-hasCompletedIntroduction", "YES", "UI_TEST_MOCK_CAPTURE"]
@@ -33,7 +33,7 @@ final class HirsModeProUITests: XCTestCase {
         XCTAssertEqual(pro.value as? String, "1")
         let description = app.staticTexts["hirsModeDescription"]
         XCTAssertTrue(description.exists)
-        XCTAssertEqual(description.label, "Hirs Mode mirrors previews. Pro also saves mirrored photos.")
+        XCTAssertEqual(description.label, "Hirs Mode mirrors previews. Pro mirrors all photos and exports.")
         XCTAssertGreaterThanOrEqual(description.frame.minY, pro.frame.maxY)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Dependent Hirs Mode settings with shared description"
@@ -54,6 +54,13 @@ final class HirsModeProUITests: XCTestCase {
         done.tap()
         XCTAssertTrue(done.waitForNonExistence(timeout: 10))
         XCTAssertEqual(app.cells.matching(identifier: "photoGridItem").count, 1)
+        let photo = app.cells.matching(identifier: "photoGridItem").firstMatch
+        let detail = app.descendants(matching: .any)["photoDetailImage"].firstMatch
+        photo.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        XCTAssertEqual(detail.value as? String, "Mirrored")
+        app.buttons["Back"].tap()
+        XCTAssertTrue(detail.waitForNonExistence(timeout: 5))
 
         settings.tap()
         for _ in 0..<5 where !pro.isHittable { app.swipeUp() }
@@ -62,6 +69,14 @@ final class HirsModeProUITests: XCTestCase {
         pro.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         XCTAssertEqual(pro.value as? String, "0")
         XCTAssertEqual(hirs.value as? String, "1")
+        app.buttons["Close"].tap()
+        photo.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        XCTAssertEqual(detail.value as? String, "Original")
+        app.buttons["Back"].tap()
+        XCTAssertTrue(detail.waitForNonExistence(timeout: 5))
+        settings.tap()
+        for _ in 0..<5 where !pro.isHittable { app.swipeUp() }
         pro.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         hirs.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         XCTAssertEqual(hirs.value as? String, "0")

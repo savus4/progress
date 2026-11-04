@@ -13,6 +13,11 @@ The script uses the `progress` scheme and Debug configuration, builds and signs
 with the project's existing settings, installs with `devicectl`, then launches
 `me.riepl.progress`. Xcode's interactive debugger is not attached.
 
+When called over SSH, the script starts a temporary `launchd` job in your
+logged-in Mac session and waits for its result. This lets signing use the same
+keychain context as a local build. Stay logged in on the Mac. The job is
+unloaded when deployment finishes; no login item or persistent agent is installed.
+
 ## iPhone Shortcut
 
 The signed Shortcut file is installed on this Mac at:
@@ -59,6 +64,12 @@ last 70 lines when a step fails. Build products use
   development team, certificate, and provisioning profile. The script uses
   existing signing assets and does not change signing settings or automatically
   register devices.
+- **`errSecInternalComponent` during CodeSign:** this can happen when SSH cannot
+  access the signing key in the login keychain. SSH deployments now run in your
+  logged-in Mac session automatically. If signing still fails, unlock the login
+  keychain on the Mac and respond to any `codesign` authorization dialog there.
+  [Apple's troubleshooting guide](https://developer.apple.com/forums/thread/712005)
+  explains the keychain and execution-context requirements.
 - **Deployment already running:** wait for it to finish. If it was forcibly
   stopped, verify no deployment is running before removing
   `~/Library/Developer/Xcode/DerivedData/ProgressPhoneDeploy.deploy-lock`.
@@ -72,7 +83,14 @@ override the build and log directories.
 On 2026-10-25, the installed launcher successfully built and signed the current
 checkout, installed `me.riepl.progress` on Simons iPhone, and launched it over
 the local network. The built app's signature was also verified with `codesign`.
-Shortcut import and its SSH connection still require the setup steps above.
+On 2026-11-04, an iPhone-triggered build reached signing and failed with
+`errSecInternalComponent`. A signing probe in the Mac's Aqua session succeeded;
+SSH deployments now use that session through
+[deploy-ios-in-session.sh](../Scripts/deploy-ios-in-session.sh).
+The updated SSH dispatch path was exercised locally and successfully built,
+signed, installed, and launched the app on Simons iPhone. The temporary job and
+deployment lock were removed afterward. The existing iPhone Shortcut command
+does not need to change.
 
 Apple references: [Xcode command-line tools](https://developer.apple.com/documentation/xcode/xcode-command-line-tool-reference),
 [importing Shortcuts](https://support.apple.com/guide/shortcuts-mac/apd02bffbaac/mac),

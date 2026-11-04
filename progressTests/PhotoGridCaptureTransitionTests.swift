@@ -6,6 +6,37 @@ import UIKit
 
 @MainActor
 struct PhotoGridCaptureTransitionTests {
+    @Test("Pro flips a large timeline in place while retaining visible images and scroll position")
+    func mirroringDoesNotRebuildTheGrid() throws {
+        let grid = try GridHarness(photoCount: 10_000)
+        defer { grid.cleanup() }
+        let collection = grid.collectionView
+        collection.setContentOffset(CGPoint(x: 0, y: 600), animated: false)
+        grid.controller.view.layoutIfNeeded()
+        let cells = collection.visibleCells.compactMap { $0 as? PhotoGridCollectionViewCell }
+        try #require(!cells.isEmpty)
+        let image = UIImage()
+        for cell in cells { cell.setThumbnailImage(image) }
+        let offset = collection.contentOffset
+        for mirrored in [true, false, true] {
+            grid.update(transition: nil, mirrorsPhotos: mirrored)
+            #expect(collection.contentOffset == offset)
+            #expect(collection.numberOfItems(inSection: 0) == 10_000)
+            #expect(Set(collection.visibleCells.map(ObjectIdentifier.init)) == Set(cells.map(ObjectIdentifier.init)))
+            for cell in cells {
+                let source = cell.openingSource(frameInGlobal: cell.frame)
+                #expect(source.image === image)
+                #expect(source.isMirrored == mirrored)
+                let media = try #require(cell.contentView.subviews.compactMap { $0 as? UIImageView }.first { $0.image === image })
+                #expect(media.transform.a == (mirrored ? -1 : 1))
+                #expect(media.transform.d == 1)
+            }
+        }
+        let cell = try #require(cells.first)
+        cell.prepareForReuse()
+        #expect(!cell.openingSource(frameInGlobal: cell.frame).isMirrored)
+    }
+
     @Test("Preparing a capture brings a scrolled grid to the top and keeps it there through layout")
     func preparationResetsTheScrollPosition() throws {
         let grid = try GridHarness(photoCount: 80)
@@ -141,7 +172,8 @@ struct PhotoGridCaptureTransitionTests {
 
         func update(items newItems: [UIKitPhotoGridItem]? = nil,
                     transition: PhotoGridCaptureTransition?,
-                    hiddenPhotoObjectID: NSManagedObjectID? = nil) {
+                    hiddenPhotoObjectID: NSManagedObjectID? = nil,
+                    mirrorsPhotos: Bool = false) {
             if let newItems {
                 items = newItems
                 changeToken += 1
@@ -154,7 +186,8 @@ struct PhotoGridCaptureTransitionTests {
                 showsUploadStatus: false,
                 isSelectionMode: false,
                 selectedPhotoIDs: [],
-                hiddenPhotoObjectID: hiddenPhotoObjectID
+                hiddenPhotoObjectID: hiddenPhotoObjectID,
+                mirrorsPhotos: mirrorsPhotos
             )
             controller.view.setNeedsLayout()
             controller.view.layoutIfNeeded()

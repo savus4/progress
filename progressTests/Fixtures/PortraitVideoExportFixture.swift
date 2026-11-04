@@ -23,7 +23,9 @@ final class PortraitVideoExportFixture {
         missingAssetIndices: Set<Int> = [],
         livePhotoIndices: Set<Int> = [],
         picturesPerSecond: Int = 30,
-        reversesPhotoOrder: Bool = false
+        reversesPhotoOrder: Bool = false,
+        mirrorsPhotos: Bool = false,
+        includesDateBanner: Bool = false
     ) throws {
         let fixtureID = UUID().uuidString
         directoryURL = FileManager.default.temporaryDirectory
@@ -70,10 +72,10 @@ final class PortraitVideoExportFixture {
         items = exportItems
         configuration = PortraitVideoExportConfiguration(
             picturesPerSecond: picturesPerSecond, quality: .compact,
-            includesDateBanner: false, includesLocationBanner: false,
+            includesDateBanner: includesDateBanner, includesLocationBanner: false,
             includesFavoriteLivePhotoVideo: !livePhotoIndices.isEmpty, holdsHeartedPhotos: false,
             usesAllPhotos: true, startDate: exportItems[0].captureDate, endDate: exportItems[photoCount - 1].captureDate,
-            reversesPhotoOrder: reversesPhotoOrder
+            reversesPhotoOrder: reversesPhotoOrder, mirrorsPhotos: mirrorsPhotos
         )
     }
 
