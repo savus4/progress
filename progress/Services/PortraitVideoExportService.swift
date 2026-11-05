@@ -132,16 +132,19 @@ private actor PortraitVideoExportDownloadPermitPool {
 
 private actor PortraitVideoExportAssetPrefetcher {
     private let cloudKitService: CloudKitService
+    private let fetchBatcher: CloudKitAssetFetchBatcher
     private let windowSize: Int
     private let permitPool: PortraitVideoExportDownloadPermitPool
     private var tasksByAssetName: [String: Task<URL, Error>] = [:]
 
     init(
         cloudKitService: CloudKitService,
+        fetchBatcher: CloudKitAssetFetchBatcher,
         windowSize: Int,
         maxConcurrentDownloadCount: Int
     ) {
         self.cloudKitService = cloudKitService
+        self.fetchBatcher = fetchBatcher
         self.windowSize = windowSize
         permitPool = PortraitVideoExportDownloadPermitPool(
             maxConcurrentDownloadCount: maxConcurrentDownloadCount
@@ -199,12 +202,16 @@ private actor PortraitVideoExportAssetPrefetcher {
     }
 
     private func makePrefetchTask(for assetName: String) -> Task<URL, Error> {
-        Task(priority: .utility) { [cloudKitService, permitPool] in
+        Task(priority: .utility) { [cloudKitService, fetchBatcher, permitPool] in
+            let wait = VideoExportDiagnostics.begin("prefetch.permit", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
             await permitPool.acquire()
+            wait?.end()
 
             do {
                 try Task.checkCancellation()
-                let url = try await cloudKitService.loadAssetURL(named: assetName)
+                let url = try await cloudKitService.loadAssetURL(
+                    named: assetName, qualityOfService: .userInitiated, fetchBatcher: fetchBatcher
+                )
                 try Task.checkCancellation()
                 await permitPool.release()
                 return url
@@ -219,11 +226,15 @@ private actor PortraitVideoExportAssetPrefetcher {
     }
 
     private func loadAssetURL(named assetName: String) async throws -> URL {
+        let wait = VideoExportDiagnostics.begin("prefetch.permit", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
         await permitPool.acquire()
+        wait?.end()
 
         do {
             try Task.checkCancellation()
-            let url = try await cloudKitService.loadAssetURL(named: assetName)
+            let url = try await cloudKitService.loadAssetURL(
+                named: assetName, qualityOfService: .userInitiated, fetchBatcher: fetchBatcher
+            )
             await permitPool.release()
             return url
         } catch {
@@ -493,6 +504,45 @@ final class PortraitVideoExportService {
         shouldPause: @escaping @MainActor () -> Bool = { false },
         progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
     ) async throws -> PortraitVideoExportResponse {
+        try await VideoExportDiagnostics.$runID.withValue(UUID().uuidString) {
+            VideoExportDiagnostics.event(
+                "export.experiment",
+                details: "name=cloudkit-batch-six-v1 download_qos=userInitiated max_records_per_operation=\(Self.maximumConcurrentPrefetchDownloads) coalescing_ms=10"
+            )
+            let bundle = Bundle.main
+            let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+            let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+            let span = VideoExportDiagnostics.begin(
+                "export",
+                details: "photos=\(photos.count) resumed=\(pausedSession != nil) app=\(version) build=\(build) os=\(ProcessInfo.processInfo.operatingSystemVersionString) fps=\(configuration.picturesPerSecond) quality=\(configuration.quality) location=\(configuration.includesLocationBanner) live=\(configuration.includesFavoriteLivePhotoVideo) reversed=\(configuration.reversesPhotoOrder) mirrored=\(configuration.mirrorsPhotos) prefetch_window=\(Self.prefetchPhotoWindowSize) concurrent_downloads=\(Self.maximumConcurrentPrefetchDownloads) \(VideoExportDiagnostics.systemState)"
+            )
+            defer { span?.end(details: VideoExportDiagnostics.systemState) }
+            do {
+                let response = try await performExport(
+                    from: photos, configuration: configuration, resuming: pausedSession,
+                    shouldPause: shouldPause, progress: progress
+                )
+                switch response {
+                case .completed(let result):
+                    span?.event("completed", details: "failed_photos=\(result.failedPhotos.count)")
+                case .paused(let session):
+                    span?.event("paused", details: "completed=\(session.completedPhotoCount) failed_photos=\(session.failedPhotos.count)")
+                }
+                return response
+            } catch {
+                span?.event(error is CancellationError ? "cancelled" : "failed", error: error)
+                throw error
+            }
+        }
+    }
+
+    nonisolated private func performExport(
+        from photos: [PortraitVideoExportItem],
+        configuration: PortraitVideoExportConfiguration,
+        resuming pausedSession: PortraitVideoExportPausedSession?,
+        shouldPause: @escaping @MainActor () -> Bool,
+        progress: @escaping @MainActor (PortraitVideoExportProgress) -> Void
+    ) async throws -> PortraitVideoExportResponse {
         var sortedPhotos = photos.filter { !$0.isHiddenFromVideo }.sorted { lhs, rhs in
             if lhs.captureDate == rhs.captureDate {
                 return lhs.objectID.uriRepresentation().absoluteString < rhs.objectID.uriRepresentation().absoluteString
@@ -530,8 +580,12 @@ final class PortraitVideoExportService {
             quality: configuration.quality,
             outputFrameRate: outputFrameRate
         )
+        let fetchBatcher = await cloudKitService.makeAssetFetchBatcher(
+            maximumRecordCount: Self.maximumConcurrentPrefetchDownloads
+        )
         let assetPrefetcher = PortraitVideoExportAssetPrefetcher(
             cloudKitService: cloudKitService,
+            fetchBatcher: fetchBatcher,
             windowSize: Self.prefetchPhotoWindowSize,
             maxConcurrentDownloadCount: Self.maximumConcurrentPrefetchDownloads
         )
@@ -587,6 +641,13 @@ final class PortraitVideoExportService {
                 )
 
                 let photoStartedAt = Date()
+                let assetName = PortraitVideoExportAssetSelector.assetName(
+                    for: photo, includesFavoriteLivePhotoVideo: configuration.includesFavoriteLivePhotoVideo
+                )
+                let photoTrace = VideoExportDiagnostics.begin(
+                    "photo", details: "index=\(index + 1) total=\(sortedPhotos.count) asset=\(assetName.map(VideoExportDiagnostics.assetTag) ?? "none")"
+                )
+                defer { photoTrace?.end() }
                 do {
                     let bannerText = await Self.makeBannerText(
                         for: photo,
@@ -621,7 +682,9 @@ final class PortraitVideoExportService {
                         let frameCount = configuration.holdsHeartedPhotos && photo.isHearted
                             ? heartedStillFrameCount
                             : stillFrameCount
-                        try await retryPhotoOperation {
+                        try await retryPhotoOperation("still.render") {
+                            let render = VideoExportDiagnostics.begin("still.render", details: "frames=\(frameCount)")
+                            defer { render?.end() }
                             try await appendStillPhoto(
                                 image,
                                 bannerText: bannerText,
@@ -638,6 +701,7 @@ final class PortraitVideoExportService {
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
+                    photoTrace?.event("failed", error: error)
                     failedPhotos.append(
                         PortraitVideoExportFailedPhoto(
                             photo: photo,
@@ -654,6 +718,12 @@ final class PortraitVideoExportService {
                     at: index,
                     duration: Date().timeIntervalSince(photoStartedAt)
                 )
+                if completedPhotoCount.isMultiple(of: 50) {
+                    VideoExportDiagnostics.event(
+                        "export.progress",
+                        details: "completed=\(completedPhotoCount) total=\(sortedPhotos.count) failed_photos=\(failedPhotos.count) \(VideoExportDiagnostics.systemState)"
+                    )
+                }
 
                 await progress(
                     PortraitVideoExportProgress(
@@ -885,6 +955,8 @@ final class PortraitVideoExportService {
         segmentFileNames: [String],
         failedPhotos: [PortraitVideoExportFailedPhoto]
     ) async throws -> (session: PortraitVideoExportPausedSession, segmentFileNames: [String]) {
+        let trace = VideoExportDiagnostics.begin("checkpoint", details: "completed=\(completedPhotoCount)")
+        defer { trace?.end() }
         var checkpointSegmentFileNames = segmentFileNames
 
         if writtenFrameCount > 0 {
@@ -968,6 +1040,9 @@ final class PortraitVideoExportService {
         }
 
         let writer = try AVAssetWriter(outputURL: fileURL, fileType: .mp4)
+        // Preserve exact frame boundaries for rates that do not divide 600 evenly.
+        let timeScale = CMTimeScale(outputFrameRate * 600)
+        writer.movieTimeScale = timeScale
         let width = Int(outputSize.width)
         let height = Int(outputSize.height)
         let input = AVAssetWriterInput(
@@ -983,6 +1058,7 @@ final class PortraitVideoExportService {
             ]
         )
         input.expectsMediaDataInRealTime = false
+        input.mediaTimeScale = timeScale
 
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
@@ -1015,6 +1091,8 @@ final class PortraitVideoExportService {
     }
 
     nonisolated private func finishSegment(_ segmentWriter: PortraitVideoSegmentWriter, frameCount: Int) async throws -> String {
+        let trace = VideoExportDiagnostics.begin("segment.finish", details: "frames=\(frameCount)")
+        defer { trace?.end() }
         // A single-frame segment has no timestamp interval for the encoder to
         // infer. Give every segment its exact duration before combining it.
         segmentWriter.writer.endSession(atSourceTime: CMTime(
@@ -1040,6 +1118,8 @@ final class PortraitVideoExportService {
     }
 
     nonisolated private func moveOrConcatenateSegments(_ segmentURLs: [URL], to outputURL: URL) async throws {
+        let trace = VideoExportDiagnostics.begin("segments.combine", details: "segments=\(segmentURLs.count)")
+        defer { trace?.end() }
         guard let firstSegmentURL = segmentURLs.first else {
             throw PortraitVideoExportError.writerFailed("Unable to finish video export.")
         }
@@ -1131,19 +1211,29 @@ final class PortraitVideoExportService {
     }
 
     nonisolated private func clampedPicturesPerSecond(_ picturesPerSecond: Int) -> Int {
-        min(max(picturesPerSecond, 1), 60)
+        min(max(picturesPerSecond, 1), 120)
     }
 
     nonisolated private func loadImageWithRetries(
         named assetName: String,
         prefetcher: PortraitVideoExportAssetPrefetcher
     ) async throws -> CGImage {
-        try await retryPhotoOperation {
-            let imageURL = try await prefetcher.consumeAssetURL(named: assetName)
+        try await retryPhotoOperation("still.load", assetName: assetName) {
+            let wait = VideoExportDiagnostics.begin("asset.wait", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
+            let imageURL: URL
+            do {
+                imageURL = try await prefetcher.consumeAssetURL(named: assetName)
+                wait?.end()
+            } catch {
+                wait?.end(details: "failed=true")
+                throw error
+            }
             defer {
                 cloudKitService.discardTemporaryReadableAsset(named: assetName)
             }
 
+            let decode = VideoExportDiagnostics.begin("still.decode", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
+            defer { decode?.end() }
             return try loadScaledImage(from: imageURL)
         }
     }
@@ -1159,12 +1249,22 @@ final class PortraitVideoExportService {
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
         audio: PortraitVideoSegmentAudio
     ) async throws -> Int {
-        try await retryPhotoOperation {
-            let videoURL = try await prefetcher.consumeAssetURL(named: assetName)
+        try await retryPhotoOperation("live.load-render", assetName: assetName) {
+            let wait = VideoExportDiagnostics.begin("asset.wait", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
+            let videoURL: URL
+            do {
+                videoURL = try await prefetcher.consumeAssetURL(named: assetName)
+                wait?.end()
+            } catch {
+                wait?.end(details: "failed=true")
+                throw error
+            }
             defer {
                 cloudKitService.discardTemporaryReadableAsset(named: assetName)
             }
 
+            let render = VideoExportDiagnostics.begin("live.render", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
+            defer { render?.end() }
             return try await appendLivePhotoVideo(
                 from: videoURL,
                 bannerText: bannerText,
@@ -1179,6 +1279,8 @@ final class PortraitVideoExportService {
     }
 
     nonisolated private func retryPhotoOperation<T>(
+        _ operationName: String,
+        assetName: String? = nil,
         _ operation: () async throws -> T
     ) async throws -> T {
         var lastError: Error?
@@ -1190,6 +1292,11 @@ final class PortraitVideoExportService {
                 throw CancellationError()
             } catch {
                 lastError = error
+                VideoExportDiagnostics.event(
+                    "photo.attempt-failed",
+                    details: "operation=\(operationName) asset=\(assetName.map(VideoExportDiagnostics.assetTag) ?? "none") attempt=\(attempt) max_attempts=\(maximumPhotoAttempts) next_delay_ms=\(attempt < maximumPhotoAttempts ? 250 * attempt : 0)",
+                    error: error
+                )
 
                 if attempt < maximumPhotoAttempts {
                     try await Task.sleep(for: .milliseconds(250 * attempt))
@@ -1560,6 +1667,8 @@ final class PortraitVideoExportService {
         includesDate: Bool,
         includesLocation: Bool
     ) async -> PortraitVideoBannerText? {
+        let trace = VideoExportDiagnostics.begin("banner", details: "location_enabled=\(includesLocation)")
+        defer { trace?.end() }
         let dateText = includesDate ? dateBannerText(for: photo.captureDate) : nil
         let locationText = includesLocation ? await locationBannerText(for: photo) : nil
 
@@ -1577,10 +1686,12 @@ final class PortraitVideoExportService {
     nonisolated private static func locationBannerText(for photo: PortraitVideoExportItem) async -> String? {
         if let locationName = photo.locationName?.trimmingCharacters(in: .whitespacesAndNewlines),
            !locationName.isEmpty {
+            VideoExportDiagnostics.event("location.source", details: "source=photo")
             return locationName
         }
 
         guard photo.latitude != 0 || photo.longitude != 0 else {
+            VideoExportDiagnostics.event("location.source", details: "source=none")
             return nil
         }
 
@@ -1588,12 +1699,15 @@ final class PortraitVideoExportService {
             for: photo.latitude,
             longitude: photo.longitude
         ) {
+            VideoExportDiagnostics.event("location.source", details: "source=cache")
             return cachedLocationName
         }
 
         let fallbackText = coordinateBannerText(latitude: photo.latitude, longitude: photo.longitude)
         let location = CLLocation(latitude: photo.latitude, longitude: photo.longitude)
 
+        let trace = VideoExportDiagnostics.begin("location.geocode")
+        defer { trace?.end() }
         do {
             let resolvedName = try await resolveLocationName(for: location)
             await LocationNameCacheService.shared.setCachedName(
@@ -1603,6 +1717,7 @@ final class PortraitVideoExportService {
             )
             return resolvedName
         } catch {
+            trace?.event("failed", error: error)
             return fallbackText
         }
     }

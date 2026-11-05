@@ -13,6 +13,7 @@ enum PhotoAssetDownload {
         let deadline = Task {
             do { try await Task.sleep(for: timeout) }
             catch { return }
+            VideoExportDiagnostics.event("request.timeout", details: "timeout=\(timeout)")
             request.cancel(throwing: URLError(.timedOut))
         }
         defer {

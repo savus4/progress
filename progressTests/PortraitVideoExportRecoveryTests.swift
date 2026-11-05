@@ -8,6 +8,34 @@ import UIKit
 @MainActor
 @Suite("Portrait Video Export Recovery")
 struct PortraitVideoExportRecoveryTests {
+    @Test("High-speed exports preserve the selected frame rate and every photo", arguments: [61, 90, 120], [false, true])
+    func exportsHighFrameRate(picturesPerSecond: Int, resume: Bool) async throws {
+        let fixture = try PortraitVideoExportFixture(photoCount: 7, picturesPerSecond: picturesPerSecond)
+        defer { fixture.close() }
+        var session: PortraitVideoExportPausedSession?
+        if resume {
+            let paused = try #require(try await pause(fixture, after: 3))
+            session = paused
+        }
+        let response = try await fixture.service.createVideo(
+            from: fixture.items, configuration: fixture.configuration,
+            resuming: session, progress: { _ in }
+        )
+        guard case .completed(let result) = response else {
+            Issue.record("The high-speed export did not complete")
+            return
+        }
+        #expect(result.failedPhotos.isEmpty)
+        let asset = AVURLAsset(url: result.videoURL)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let frameRate = try await track.load(.nominalFrameRate)
+        #expect(abs(Double(frameRate) - Double(picturesPerSecond)) < 0.01)
+        let count = try await frameCount(in: result.videoURL)
+        #expect(count == fixture.items.count)
+        let duration = try await asset.load(.duration).seconds
+        #expect(abs(duration - Double(fixture.items.count) / Double(picturesPerSecond)) < 0.001)
+    }
+
     @Test("Photo order and hidden exclusions survive pause/resume", arguments: [false, true], [false, true])
     func exportsPhotoSequence(resume: Bool, reverse: Bool) async throws {
         let fixture = try PortraitVideoExportFixture(photoCount: 8, hiddenIndices: [1, 5], reversesPhotoOrder: reverse)

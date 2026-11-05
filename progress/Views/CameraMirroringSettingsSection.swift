@@ -6,15 +6,15 @@ struct CameraMirroringSettingsSection: View {
 
     var body: some View {
         Section {
-            Toggle("Hirs Mode", isOn: $isHirsModeEnabled)
+            Toggle("Hirs-Mode", isOn: $isHirsModeEnabled)
                 .accessibilityIdentifier("hirsModeToggle")
 
-            Toggle("Hirs Mode Pro", isOn: $isHirsModeProEnabled)
+            Toggle("Hirs-Mode Pro", isOn: $isHirsModeProEnabled)
                 .accessibilityIdentifier("hirsModeProToggle")
         } header: {
             Text("Camera")
         } footer: {
-            Text("Hirs Mode mirrors previews. Pro mirrors all photos and exports.")
+            Text("Hirs-Mode mirrors previews. Pro mirrors all photos and exports.")
                 .lineLimit(3)
                 .accessibilityIdentifier("hirsModeDescription")
         }

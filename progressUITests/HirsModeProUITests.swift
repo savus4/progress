@@ -33,10 +33,10 @@ final class HirsModeProUITests: XCTestCase {
         XCTAssertEqual(pro.value as? String, "1")
         let description = app.staticTexts["hirsModeDescription"]
         XCTAssertTrue(description.exists)
-        XCTAssertEqual(description.label, "Hirs Mode mirrors previews. Pro mirrors all photos and exports.")
+        XCTAssertEqual(description.label, "Hirs-Mode mirrors previews. Pro mirrors all photos and exports.")
         XCTAssertGreaterThanOrEqual(description.frame.minY, pro.frame.maxY)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Dependent Hirs Mode settings with shared description"
+        screenshot.name = "Dependent Hirs-Mode settings with shared description"
         screenshot.lifetime = .keepAlways
         add(screenshot)
         app.buttons["Close"].tap()

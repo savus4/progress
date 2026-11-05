@@ -75,6 +75,8 @@ struct NotificationSettingsView: View {
                 CameraMirroringSettingsSection()
 
                 TipJarSection { showsTipSheet = true }
+
+                SupportSection()
             }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 let bottomEdge = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom

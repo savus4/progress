@@ -209,7 +209,7 @@ struct PortraitVideoExportSheet: View {
             Stepper(
                 picturesPerSecondTitle,
                 value: $picturesPerSecond,
-                in: 1...60
+                in: 1...120
             )
 
             Slider(
@@ -217,20 +217,10 @@ struct PortraitVideoExportSheet: View {
                     get: { Double(picturesPerSecond) },
                     set: { picturesPerSecond = Int($0.rounded()) }
                 ),
-                in: 1...60,
+                in: 1...120,
                 step: 1
             )
             .accessibilityLabel("Pictures per second")
-
-            VStack(alignment: .leading, spacing: 6) {
-                Toggle(isOn: $reversesPhotoOrder) {
-                    Label("Reverse Mode", systemImage: "backward.end.fill")
-                }
-
-                Text("Show photos from newest to oldest.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
 
             Toggle(isOn: $includesDateBanner) {
                 Label("Show Date Banner", systemImage: "calendar")
@@ -240,7 +230,7 @@ struct PortraitVideoExportSheet: View {
                 Label("Show Location Banner", systemImage: "location")
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 14) {
                 Toggle(isOn: includesFavoriteLivePhotoVideosBinding) {
                     Label {
                         Text("Use Favorite Live Photos")
@@ -262,7 +252,7 @@ struct PortraitVideoExportSheet: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 14) {
                 Toggle(isOn: includesHeartedHoldBinding) {
                     Label("Hold Hearted Photos", systemImage: "heart.fill")
                 }
@@ -277,6 +267,16 @@ struct PortraitVideoExportSheet: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle(isOn: $reversesPhotoOrder) {
+                    Label("Reverse Mode", systemImage: "backward.end.fill")
+                }
+
+                Text("Show photos from newest to oldest.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
         .disabled(exportTask != nil)
@@ -365,7 +365,7 @@ struct PortraitVideoExportSheet: View {
     }
 
     private var clampedPicturesPerSecond: Int {
-        min(max(picturesPerSecond, 1), 60)
+        min(max(picturesPerSecond, 1), 120)
     }
 
     private var hasHeartedPhotos: Bool {

@@ -184,26 +184,41 @@ final class CloudKitService {
         try await loadAssetURL(named: assetName)
     }
 
+    /// Returns a readable original, fetching from CloudKit when needed.
+    /// - Parameter qualityOfService: Overrides CloudKit fetch priority. A nil
+    ///   value preserves the framework default for existing callers.
+    /// - Parameter fetchBatcher: Optionally coalesces remote originals within
+    ///   one export; local reads and other callers keep their existing paths.
     func loadAssetURL(
         named assetName: String,
         reportsTransferEvents: Bool = true,
         forceRefetch: Bool = false,
-        allowsCellularAccess: Bool = true
+        allowsCellularAccess: Bool = true,
+        qualityOfService: QualityOfService? = nil,
+        fetchBatcher: CloudKitAssetFetchBatcher? = nil
     ) async throws -> URL {
+        let trace = VideoExportDiagnostics.begin("asset.load", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
+        defer { trace?.end() }
         try Task.checkCancellation()
         guard !deletedAssetNames.contains(assetName) else { throw CloudKitError.assetNotFound }
         #if DEBUG && targetEnvironment(simulator)
-        if let exampleURL = SimulatorExampleLibrary.assetURL(named: assetName) { return exampleURL }
+        if let exampleURL = SimulatorExampleLibrary.assetURL(named: assetName) {
+            VideoExportDiagnostics.assetRead(assetName, source: "simulator", url: exampleURL)
+            return exampleURL
+        }
         #endif
         if let stagedURL = stagedAssetURL(named: assetName) {
+            VideoExportDiagnostics.assetRead(assetName, source: "staged", url: stagedURL)
             return stableReadableURL(for: stagedURL, assetName: assetName)
         }
 
         if !forceRefetch, let offlineURL = try await offlineStore.assetURL(named: assetName) {
+            VideoExportDiagnostics.assetRead(assetName, source: "offline", url: offlineURL)
             return stableReadableURL(for: offlineURL, assetName: assetName)
         }
 
         if let legacyURL = legacyAssetURL(named: assetName) {
+            VideoExportDiagnostics.assetRead(assetName, source: "legacy", url: legacyURL)
             do {
                 let staged = try await stageAssetFileAsync(from: legacyURL, named: assetName, includesInBackup: true)
                 return stableReadableURL(for: staged, assetName: assetName)
@@ -214,12 +229,16 @@ final class CloudKitService {
         }
 
         if !forceRefetch, let readableURL = readableAssetURL(named: assetName) {
+            VideoExportDiagnostics.assetRead(assetName, source: "readable-cache", url: readableURL)
             return readableURL
         }
 
         if self === Self.shared {
+            let recovery = VideoExportDiagnostics.begin("asset.legacy-check", details: "asset=\(VideoExportDiagnostics.assetTag(assetName))")
+            defer { recovery?.end() }
             try await PhotoStorageService.shared.recoverLegacyAssetIfNeeded(named: assetName)
             if let stagedURL = stagedAssetURL(named: assetName) {
+                VideoExportDiagnostics.assetRead(assetName, source: "recovered", url: stagedURL)
                 return stableReadableURL(for: stagedURL, assetName: assetName)
             }
         }
@@ -237,6 +256,7 @@ final class CloudKitService {
                 return { work.cancel() }
             }
             try Task.checkCancellation()
+            VideoExportDiagnostics.assetRead(assetName, source: "injected", url: sourceURL)
             return stableReadableURL(for: sourceURL, assetName: assetName)
         }
 
@@ -252,7 +272,11 @@ final class CloudKitService {
         let recordID = assetRecordID(named: assetName)
         let results: [CKRecord.ID: Result<CKRecord, Error>]
         do {
-            let record = try await fetchAssetRecord(named: assetName, desiredKeys: nil, allowsCellularAccess: allowsCellularAccess)
+            let record = try await fetchAssetRecord(
+                named: assetName, desiredKeys: nil,
+                allowsCellularAccess: allowsCellularAccess, qualityOfService: qualityOfService,
+                fetchBatcher: fetchBatcher
+            )
             results = [recordID: .success(record)]
         } catch {
             if reportsTransferEvents {
@@ -290,6 +314,7 @@ final class CloudKitService {
             throw CloudKitError.assetNotFound
         }
 
+        VideoExportDiagnostics.assetRead(assetName, source: "cloudkit", url: stagedURL)
         return stableReadableURL(for: stagedURL, assetName: assetName)
     }
 
@@ -338,19 +363,65 @@ final class CloudKitService {
         }
     }
 
-    private func fetchAssetRecord(named assetName: String, desiredKeys: [String]?, allowsCellularAccess: Bool) async throws -> CKRecord {
-        let operation = CKFetchRecordsOperation(recordIDs: [assetRecordID(named: assetName)])
-        operation.desiredKeys = desiredKeys
-        operation.configuration.allowsCellularAccess = allowsCellularAccess
-        operation.configuration.timeoutIntervalForRequest = 15
-        operation.configuration.timeoutIntervalForResource = 30
-        return try await PhotoAssetDownload.run(network: networkMonitor) { request in
-            operation.perRecordResultBlock = { _, result in request.finish(result) }
-            operation.fetchRecordsResultBlock = { result in
-                if case .failure(let error) = result { request.finish(.failure(error)) }
-            }
+    /// Makes a batch scope that is shared by one export's bounded prefetcher.
+    func makeAssetFetchBatcher(maximumRecordCount: Int) -> CloudKitAssetFetchBatcher {
+        CloudKitAssetFetchBatcher(maximumRecordCount: maximumRecordCount) { [privateDatabase] operation in
             privateDatabase.add(operation)
-            return { operation.cancel() }
+        }
+    }
+
+    private func fetchAssetRecord(
+        named assetName: String,
+        desiredKeys: [String]?,
+        allowsCellularAccess: Bool,
+        qualityOfService: QualityOfService? = nil,
+        fetchBatcher: CloudKitAssetFetchBatcher? = nil
+    ) async throws -> CKRecord {
+        let recordID = assetRecordID(named: assetName)
+        let configuration = CKOperation.Configuration()
+        configuration.allowsCellularAccess = allowsCellularAccess
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        if let qualityOfService {
+            configuration.qualityOfService = qualityOfService
+        }
+        let batcher = desiredKeys == nil ? fetchBatcher : nil
+        let trace = VideoExportDiagnostics.begin(
+            "cloudkit.fetch",
+            details: "asset=\(VideoExportDiagnostics.assetTag(assetName)) mode=\(batcher == nil ? "single" : "batch") content=\(desiredKeys == nil ? "original" : "metadata") qos=\(configuration.qualityOfService.rawValue) request_timeout_s=15 resource_timeout_s=30 network=\(String(describing: networkMonitor?.state)) cellular_allowed=\(allowsCellularAccess)"
+        )
+        let progress = CloudKitAssetFetchProgress(trace: trace)
+        defer {
+            progress.finish()
+            trace?.end()
+        }
+        do {
+            let record: CKRecord = try await PhotoAssetDownload.run(network: networkMonitor) { request in
+                if let batcher {
+                    return batcher.enqueue(
+                        recordID: recordID, configuration: configuration, request: request, progress: progress
+                    )
+                }
+                let operation = CKFetchRecordsOperation(recordIDs: [recordID])
+                operation.desiredKeys = desiredKeys
+                operation.configuration = configuration
+                operation.perRecordProgressBlock = { _, fraction in progress.record(fraction) }
+                operation.perRecordResultBlock = { _, result in
+                    progress.finish()
+                    request.finish(result)
+                }
+                operation.fetchRecordsResultBlock = { result in
+                    if case .failure(let error) = result { request.finish(.failure(error)) }
+                }
+                progress.submitted(operationID: operation.operationID, recordCount: 1)
+                privateDatabase.add(operation)
+                return { operation.cancel() }
+            }
+            trace?.event("succeeded")
+            return record
+        } catch {
+            trace?.event("failed", error: error)
+            throw error
         }
     }
 
@@ -1021,7 +1092,7 @@ final class CloudKitService {
     }
 
     private func cloudKitError(for error: Error) -> Error {
-        guard let ckError = error as? CKError else {
+        guard let ckError = CloudKitErrorBridge.from(error) else {
             return error
         }
 
